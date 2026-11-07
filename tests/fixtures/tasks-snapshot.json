@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "savedAt": "2026-11-05T00:00:00.000Z",
+  "tasks": [
+    {
+      "id": "t1", "url": "https://example.org/v1", "kind": "video", "state": "Running",
+      "createdAt": "2026-11-05T00:00:00.000Z", "updatedAt": "2026-11-05T00:00:05.000Z",
+      "mediaInfo": null, "request": null, "artifacts": [], "lastPercent": 42,
+      "error": null, "privateMode": false, "postprocessed": false
+    },
+    {
+      "id": "t2", "url": "https://example.org/v2", "kind": "video", "state": "FetchingInfo",
+      "createdAt": "2026-11-05T00:00:00.000Z", "updatedAt": "2026-11-05T00:00:01.000Z",
+      "mediaInfo": null, "request": null, "artifacts": [], "lastPercent": null,
+      "error": null, "privateMode": false, "postprocessed": false
+    },
+    {
+      "id": "t3", "url": "https://example.org/v3", "kind": "audio", "state": "Completed",
+      "createdAt": "2026-11-05T00:00:00.000Z", "updatedAt": "2026-11-05T00:00:09.000Z",
+      "mediaInfo": null, "request": null, "artifacts": ["C://music//t3.m4a"], "lastPercent": 100,
+      "error": null, "privateMode": false, "postprocessed": false
+    }
+  ]
+}

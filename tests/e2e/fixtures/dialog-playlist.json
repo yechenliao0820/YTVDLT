@@ -1,0 +1,32 @@
+{
+  "source": "tests/fixtures/info-flat-playlist.json (L1 recorded, omitUrl applied)",
+  "media": null,
+  "playlist": {
+    "id": "PL_fixture_01",
+    "title": "Recorded Flat Playlist",
+    "_type": "playlist",
+    "extractor_key": "Generic",
+    "webpage_url": "https://example.org/playlist?list=PL_fixture_01",
+    "entries": [
+      {
+        "id": "a1",
+        "title": "Episode 1",
+        "duration": 100,
+        "_type": "url"
+      },
+      {
+        "id": "a2",
+        "title": "Episode 2",
+        "duration": 200,
+        "_type": "url"
+      },
+      {
+        "id": "a3",
+        "title": "Episode 3",
+        "duration": null,
+        "_type": "url"
+      }
+    ]
+  },
+  "error": null
+}

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-11-05T00:00:00.000Z",
+  "domains": {
+    "general": { "concurrency": 3, "theme": "dark", "language": "zh-CN", "privateMode": false, "disablePreview": false },
+    "format": { "quality": "1080p", "videoCodecPref": "auto", "formatSelection": true, "extractAudio": false },
+    "subtitle": { "languages": "zh.*,en.*", "enabled": true, "autoCaptions": false, "convertTo": "srt" },
+    "paths": { "outputTemplate": "%(title).200B [%(id)s].%(ext)s", "subdirByExtractor": true, "subdirByPlaylist": false, "restrictFilenames": true },
+    "network": { "maxRate": 500, "concurrentFragments": 8, "ipv4Only": false },
+    "advanced": { "debug": false, "embedMetadata": true, "updateChannel": "stable", "updateInterval": "weekly" },
+    "saved_links": { "items": ["https://example.org/a", "https://example.org/b"] }
+  }
+}

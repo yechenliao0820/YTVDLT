@@ -1,0 +1,142 @@
+classDiagram
+    direction TB
+
+    class DownloadEngine {
+        <<interface>>
+        +version() Promise~string~
+        +probe(url: string, opts: ProbeOptions) Promise~MediaInfo~
+        +probePlaylist(url: string, opts: ProbeOptions) Promise~PlaylistInfo~
+        +download(req: DownloadRequest, onEvent) CancelHandle
+        +selfUpdate(channel) Promise~UpdateResult~
+    }
+    class YtDlpEngine {
+        -deps: YtDlpEngineDeps
+        +probe(url, opts) Promise~MediaInfo~
+        +version() Promise~string~
+        +probePlaylist() [M1 占位 UNKNOWN]
+        +download() [M1 占位 UNKNOWN]
+        +selfUpdate() [M1 占位 UNKNOWN]
+    }
+    class FakeEngine {
+        -deps: FakeEngineDeps
+        +probe(url, opts) Promise~MediaInfo~
+        +probePlaylist() Promise~PlaylistInfo~
+        +download() CancelHandle
+    }
+    class EngineFactory {
+        +createEngine(kind, options) DownloadEngine
+    }
+    DownloadEngine <|.. YtDlpEngine : implements
+    DownloadEngine <|.. FakeEngine : implements
+    EngineFactory ..> DownloadEngine : creates
+
+    class ArgvBuilderPure {
+        <<pure function>>
+        +build(req: ProbeRequest) string[]
+        +assertHttpUrl(raw: string) void
+    }
+    class JsonMapperPure {
+        <<pure function>>
+        +toMediaInfo(raw: unknown) MediaInfo
+        +toPlaylistInfo(raw: unknown) PlaylistInfo
+    }
+    class MediaGuards {
+        <<pure function>>
+        +isRecord(v) bool
+        +numOrNull(v) number|null
+        +strOrNull(v) string|null
+    }
+    YtDlpEngine ..> ArgvBuilderPure : uses
+    YtDlpEngine ..> JsonMapperPure : uses
+    JsonMapperPure ..> MediaGuards : uses
+
+    class ConfigStore {
+        -ports: CorePorts
+        -state: ConfigFile
+        +get(domain, key) T
+        +set(domain, key, value) Promise~void~
+        +export() Promise~string~
+        +import(json) Promise~void~
+    }
+    class Logger {
+        -ports: CorePorts
+        +log(e: LogEvent) Promise~void~
+        +logArgv(scope, argv) Promise~void~
+        +writeCrashReport(err, ctx) Promise~string~
+    }
+    class Redactor {
+        <<pure function>>
+        +redact(v: unknown) unknown
+        +redactArgv(argv) string[]
+        +redactText(s: string) string
+    }
+    class ErrorMapper {
+        -clock: ClockPort
+        +map(stderr, ctx) AppError
+        +fromCode(code, ctx) AppError
+    }
+    class ErrorRules {
+        <<data>>
+        +ORDERED_RULES: Rule[]
+        +CODE_META
+    }
+    class RuntimeResolver {
+        -deps: RuntimeResolverDeps
+        +check() Promise~RuntimeCheckReport~
+    }
+    class ManifestLoader {
+        <<pure function>>
+        +validateManifest(json) RuntimeManifest
+    }
+    Logger ..> Redactor : uses
+    ErrorMapper ..> Redactor : uses
+    ErrorMapper ..> ErrorRules : uses
+    RuntimeResolver ..> ManifestLoader : uses
+    YtDlpEngine ..> Logger : injected
+    YtDlpEngine ..> ErrorMapper : injected
+
+    class FileSystemPort { <<interface>> }
+    class HashPort { <<interface>> }
+    class ProcessPort { <<interface>> }
+    class EnvPort { <<interface>> }
+    class ClockPort { <<interface>> }
+    class LogSinkPort { <<interface>> }
+    class CorePorts {
+        <<interface>>
+        +fs +hash +process +env +clock +logSink
+    }
+    CorePorts o-- FileSystemPort
+    CorePorts o-- HashPort
+    CorePorts o-- ProcessPort
+    CorePorts o-- EnvPort
+    CorePorts o-- ClockPort
+    CorePorts o-- LogSinkPort
+    ConfigStore ..> CorePorts : injected (constructor)
+    Logger ..> CorePorts : injected
+    RuntimeResolver ..> CorePorts : injected
+    YtDlpEngine ..> CorePorts : injected
+
+    class NodePortsAdapter {
+        <<apps/desktop 唯一 fs/crypto/child_process import 点>>
+        +createNodePorts(opts) CorePorts
+    }
+    class InMemoryPorts {
+        <<tests/unit 内存实现>>
+        +createInMemoryPorts() CorePorts
+    }
+    NodePortsAdapter ..|> CorePorts : implements
+    InMemoryPorts ..|> CorePorts : implements
+
+    class ElectronRuntimeResolver {
+        <<唯一 electron import 点>>
+        +checkRuntimeForApp() Promise~RuntimeCheckReport~
+    }
+    ElectronRuntimeResolver ..> NodePortsAdapter : assembles
+    ElectronRuntimeResolver ..> RuntimeResolver : invokes
+
+    class CheckRuntimeCli {
+        <<scripts/check-runtime.mjs>>
+        +main() void
+    }
+    CheckRuntimeCli ..> NodePortsAdapter : assembles
+    CheckRuntimeCli ..> RuntimeResolver : invokes

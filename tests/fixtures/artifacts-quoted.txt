@@ -1,0 +1,9 @@
+"C:\Users\x\Downloads\YTVDLT\Title [id].mp4"
+'C:\Users\x\Downloads\YTVDLT\Title [id].en.srt'
+C:\Users\x\Downloads\YTVDLT\Title [id].jpg
+
+relative\path.mp4
+C:\Users\x\Downloads\YTVDLT\chapters\01 Intro.mp4
+C:\Users\x\Downloads\YTVDLT\chapters\02 Main.mp4
+C:\Users\x\Downloads\YTVDLT\Title [id].mp4.part
+"C:\Users\x\Downloads\YTVDLT\Title [id].mp4"

@@ -1,0 +1,54 @@
+# YTVDLT packaging baseline (HANDOFF §12.4 / §12.10, ARCHITECTURE §9.2).
+# M1 只落配置、不执行打包；electron-builder CLI 在 M1 不安装。
+appId: com.ytvdlt.desktop
+productName: YTVDLT
+directories:
+  output: dist
+# D-75: with a `publish` block present, electron-builder 26 drops `main` from the
+# packaged package.json (measured: the archive then fails electron-builder's own
+# entry check with `"index.js" was not found in this archive`). The app entry is
+# not negotiable, so it is pinned here instead of relying on root package.json
+# surviving the rewrite untouched.
+extraMetadata:
+  main: apps/desktop/dist/main/main.cjs
+# `files` 绝不包含 resources/runtime/** —— 外部 exe/DLL 只能走 extraResources，
+# 绝不进 asar（asar 内是虚拟路径，无法 spawn）。
+files:
+  - apps/desktop/dist/**/*
+  - package.json
+extraResources:
+  - from: resources/runtime/win-x64
+    to: runtime
+    filter:
+      - "**/*"
+win:
+  # electron-builder 26 moved `signingHashAlgorithms` under `signtoolOptions`;
+  # the old top-level key makes the whole `win` block fail schema validation.
+  signtoolOptions:
+    signingHashAlgorithms:
+      - sha256
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+portable:
+  artifactName: "YTVDLT-Portable-${version}.exe"
+# D-75 / A-4.4-29: a `publish` block is what makes electron-builder emit
+# `latest.yml` + `<installer>.blockmap` and write `resources/app-update.yml`.
+# Without it the NSIS build is a dead end for the updater: there is no manifest
+# for electron-updater to read and no blockmap for differential download.
+#
+# The URL is a placeholder on the reserved `.invalid` TLD on purpose — nothing
+# resolves it. A real deployment overrides it at runtime via
+# `advanced.updateFeedUrl` (AppUpdateCoordinator → UpdaterPort.setFeedURL), so a
+# shipped build never phones home until an operator points it somewhere.
+publish:
+  - provider: generic
+    url: https://updates.ytvdlt.invalid/stable

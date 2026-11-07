@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>YTVDLT · 设置</title>
+<link rel="stylesheet" href="../../styles/ytvdlt.css">
+<link rel="stylesheet" href="../../styles/theme.css">
+<style>
+  .settings-page { height: 800px; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .settings-head { display: flex; align-items: baseline; gap: 12px; border-bottom: 2px solid var(--accent); padding-bottom: 8px; }
+  .settings-head h1 { font-size: 20px; margin: 0; font-weight: 700; }
+  .settings-head .meta { color: var(--muted); font-size: 12px; }
+  /* No flex-grow: a fixed 800px page with two short cards otherwise leaves a
+     250px void between the cards and the About section. */
+  .settings-body { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 12px; flex: 0 0 auto; align-items: start; }
+  .section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .section h2 { font-size: 14px; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  .row { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; }
+  .row { align-items: center; }
+  .row .label { width: 132px; color: var(--muted); flex: 0 0 auto; }
+  .row .spacer { flex: 1 1 auto; }
+  .segmented { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .segmented button { height: 30px; padding: 0 14px; border: 0; border-right: 1px solid var(--line); background: var(--panel); color: var(--ink); font-size: 13px; cursor: pointer; }
+  .segmented button:last-child { border-right: 0; }
+  .segmented button[aria-pressed="true"] { background: var(--accent); color: #ffffff; font-weight: 700; }
+  .swatches { display: inline-flex; gap: 8px; }
+  .swatch { width: 28px; height: 28px; border-radius: 14px; border: 2px solid var(--line); cursor: pointer; padding: 0; }
+  .swatch[data-accent="blue"] { background: #1d63b8; }
+  .swatch[data-accent="teal"] { background: #0f6b64; }
+  .swatch[data-accent="violet"] { background: #6d28d9; }
+  .swatch[data-accent="amber"] { background: #97600a; }
+  .swatch[data-accent="rose"] { background: #9f1239; }
+  .swatch[data-accent="system"] { background: linear-gradient(135deg, #1d63b8 50%, #46c98a 50%); }
+  .swatch[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  select { height: 30px; font-family: inherit; font-size: 13px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--ink); }
+  .about-line { display: flex; gap: 8px; font-size: 12px; color: var(--muted); padding: 4px 0; }
+  .about-line b { color: var(--ink); font-weight: 700; }
+  #ytvdlt-output { background: #f3f4f6; padding: 8px 10px; border-radius: 6px; font-size: 12px; max-height: 90px; overflow: auto; }
+  html[data-theme="dark"] #ytvdlt-output { background: #0a1119; color: #cfe3f7; }
+  [hidden="true"] { display: none !important; }
+</style>
+</head>
+<body>
+<main class="settings-page" id="settings-root" data-state="ready" data-theme-value="system" data-accent-value="system" data-locale-value="zh-CN">
+  <header class="settings-head">
+    <h1 id="settings-title" data-i18n="settings.title" data-fit>设置</h1>
+    <span class="meta" id="settings-meta">v0.1.0 · M5</span>
+  </header>
+
+  <div class="settings-body">
+    <section class="section" id="section-appearance">
+      <h2 data-i18n="settings.appearance" data-fit>外观</h2>
+
+      <div class="row">
+        <span class="label" data-i18n="settings.theme" data-fit>主题</span>
+        <div class="segmented" id="settings-theme" role="group" aria-label="主题">
+          <button type="button" data-theme="light" aria-pressed="false" data-i18n="settings.theme.light" data-fit>浅色</button>
+          <button type="button" data-theme="dark" aria-pressed="false" data-i18n="settings.theme.dark" data-fit>深色</button>
+          <button type="button" data-theme="system" aria-pressed="true" data-i18n="settings.theme.system" data-fit>跟随系统</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <span class="label" data-i18n="settings.accent" data-fit>强调色</span>
+        <div class="swatches" id="settings-accent" role="group" aria-label="强调色">
+          <button class="swatch" type="button" data-accent="system" aria-pressed="true" title="跟随系统" aria-label="跟随系统"></button>
+          <button class="swatch" type="button" data-accent="blue" aria-pressed="false" title="蓝" aria-label="蓝"></button>
+          <button class="swatch" type="button" data-accent="teal" aria-pressed="false" title="青" aria-label="青"></button>
+          <button class="swatch" type="button" data-accent="violet" aria-pressed="false" title="紫" aria-label="紫"></button>
+          <button class="swatch" type="button" data-accent="amber" aria-pressed="false" title="琥珀" aria-label="琥珀"></button>
+          <button class="swatch" type="button" data-accent="rose" aria-pressed="false" title="玫红" aria-label="玫红"></button>
+        </div>
+        <span class="spacer"></span>
+        <span class="note" id="settings-accent-note" data-i18n="settings.accent.note" data-fit>动态取色：跟随 Windows 强调色</span>
+      </div>
+
+      <div class="row">
+        <span class="label" data-i18n="settings.motion" data-fit>动态效果</span>
+        <select id="settings-motion" aria-label="动态效果">
+          <option value="system" data-i18n="settings.motion.system">跟随系统</option>
+          <option value="reduced" data-i18n="settings.motion.reduced">减少动态效果</option>
+          <option value="full" data-i18n="settings.motion.full">完整动效</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <span class="label" data-i18n="settings.language" data-fit>语言</span>
+        <div class="segmented" id="settings-language" role="group" aria-label="语言">
+          <button type="button" data-locale="zh-CN" aria-pressed="true" data-fit>简体中文</button>
+          <button type="button" data-locale="en" aria-pressed="false" data-fit>English</button>
+        </div>
+      </div>
+      <p class="note" data-i18n="settings.autostart.hint">可选；关闭时不在注册表写入 Run 项（A-4.6-07）。</p>
+    </section>
+
+    <section class="section" id="section-updates">
+      <h2 data-i18n="settings.updates" data-fit>更新</h2>
+      <div class="row">
+        <span class="label" data-i18n="settings.autostart" data-fit>开机自启</span>
+        <input type="checkbox" id="settings-autostart" aria-label="开机自启">
+        <span class="spacer"></span>
+        <span class="note" data-i18n="settings.autostart.note" data-fit>per-user，无管理员权限</span>
+      </div>
+      <div class="row">
+        <span class="label" data-i18n="settings.update.channel" data-fit>更新通道</span>
+        <select id="settings-channel" aria-label="更新通道">
+          <option value="stable">stable</option>
+          <option value="nightly">nightly</option>
+        </select>
+      </div>
+      <div class="row">
+        <span class="label" data-i18n="settings.update.interval" data-fit>检查间隔</span>
+        <select id="settings-interval" aria-label="检查间隔">
+          <option value="weekly">weekly</option>
+          <option value="daily">daily</option>
+          <option value="never">never</option>
+        </select>
+      </div>
+      <div class="row">
+        <span class="label" data-i18n="settings.engine.update" data-fit>组件更新 yt-dlp/aria2c</span>
+        <button type="button" id="settings-engine-update" data-action="engine-update" data-i18n="common.check" data-fit>检查并更新</button>
+      </div>
+      <p class="note" id="settings-components" data-component-state="idle">组件版本读取中…</p>
+      <div class="row">
+        <span class="label" data-i18n="settings.app.update" data-fit>检查应用更新</span>
+        <button type="button" id="settings-app-update" data-action="app-update" data-i18n="common.check" data-fit disabled>检查</button>
+      </div>
+      <p class="note" id="settings-offline" data-i18n="settings.offline">组件更新需配置更新源；应用本体更新待 GitHub 仓库接入</p>
+    </section>
+  </div>
+
+  <section class="section" id="section-about">
+    <h2 data-i18n="about.title" data-fit>关于 YTVDLT</h2>
+    <div class="about-line"><b data-i18n="about.version" data-fit>版本</b><span id="about-version">0.1.0</span></div>
+    <div class="about-line" data-i18n="about.runtime">运行时：yt-dlp / node / ffmpeg（随包，不入 asar）</div>
+    <div class="about-line" data-i18n="about.license">FFmpeg 采用 LGPL-3.0，源码与许可全文见 THIRD_PARTY_NOTICES。</div>
+    <div class="about-line" data-i18n="about.haptics">触觉反馈：桌面端无等价硬件，明确省略。</div>
+    <div class="about-line" data-i18n="about.transitions">转场动效仅用于状态切换与弹窗，遵循「减少动态效果」。</div>
+  </section>
+
+  <pre id="ytvdlt-output" aria-live="polite" hidden="true">{}</pre>
+</main>
+<script src="../../i18n/messages.js"></script>
+<script src="../../i18n/i18n.js"></script>
+<script src="../../theme/theme.js"></script>
+<script src="../../shortcuts/shortcuts.js"></script>
+<script src="../../app-shell.js"></script>
+<script src="./settings.js"></script>
+</body>
+</html>

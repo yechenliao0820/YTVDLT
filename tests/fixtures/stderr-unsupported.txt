@@ -1,0 +1,2 @@
+ERROR: Unsupported URL: https://example.invalid/watch?v=abc
+ERROR: [generic] example.invalid: no suitable extractor found

@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>YTVDLT · 任务日志</title>
+<link rel="stylesheet" href="../../styles/ytvdlt.css">
+<link rel="stylesheet" href="../../styles/theme.css">
+<style>
+  .log-page { padding: 16px 20px; }
+  .log-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+  .log-title { font-size: 18px; font-weight: 600; margin: 0; }
+  .log-meta { font-size: 12px; color: #6b7280; }
+  .log-lines { font-family: Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.55;
+               background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px;
+               height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+  .log-lines .ln { display: block; }
+  .log-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .log-actions button { min-width: 88px; }
+  #ytvdlt-output { background: #f3f4f6; padding: 10px; border-radius: 6px; font-size: 12px; max-height: 160px; overflow: auto; }
+  .empty { height: 420px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); text-align: center; }
+  .empty .glyph { width: 46px; height: 46px; border-radius: 23px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 700; }
+  .empty h2 { margin: 0; font-size: 15px; color: var(--ink); }
+  .empty p { margin: 0; font-size: 13px; }
+  html[data-theme="dark"] #ytvdlt-output { background: #0a1119; color: #cfe3f7; }
+  [hidden="true"] { display: none !important; }
+</style>
+</head>
+<body>
+<main class="log-page" id="ytvdlt-task-log" data-state="ready" data-task-id="t1">
+  <div class="log-head">
+    <h1 class="log-title" id="log-title">任务日志 · t1</h1>
+    <span class="log-meta" id="log-state">Running · 42%</span>
+  </div>
+  <div class="log-lines" id="log-lines" role="log" aria-live="polite"></div>
+  <div class="empty" id="log-empty" data-variant="empty" hidden="true">
+    <span class="glyph" aria-hidden="true">…</span>
+    <h2 data-i18n="log.empty.title" data-fit>暂无日志</h2>
+    <p data-i18n="log.empty.hint">任务开始后，yt-dlp 的每一行输出都会出现在这里。</p>
+  </div>
+  <div class="empty" id="log-error" data-variant="error" hidden="true">
+    <span class="glyph" aria-hidden="true">!</span>
+    <h2 data-i18n="log.error.title" data-fit>日志不可用</h2>
+    <p data-i18n="log.error.hint">任务已被移除，无法读取日志。</p>
+  </div>
+  <div class="log-actions">
+    <button id="log-copy" type="button" data-action="copy">复制日志</button>
+    <button id="log-cancel" type="button" data-action="cancel">取消</button>
+    <button id="log-retry" type="button" data-action="retry" aria-disabled="true">重试</button>
+  </div>
+  <pre id="ytvdlt-output" aria-live="polite">{}</pre>
+</main>
+<script src="../../i18n/messages.js"></script>
+<script src="../../i18n/i18n.js"></script>
+<script src="../../theme/theme.js"></script>
+<script src="../../shortcuts/shortcuts.js"></script>
+<script src="../../app-shell.js"></script>
+<script src="./task-log.js"></script>
+</body>
+</html>

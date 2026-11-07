@@ -1,0 +1,83 @@
+sequenceDiagram
+    autonumber
+    actor Dev as 工程师 / npm run check-runtime
+    participant CLI as scripts/check-runtime.mjs
+    participant Ports as node-ports.ts<br/>createNodePorts()
+    participant RR as Core RuntimeResolver<br/>(纯 TS，注入端口)
+    participant ML as manifest-loader.ts
+    participant FS as FileSystemPort
+    participant H as HashPort
+    participant P as ProcessPort
+    participant Out as stdout / reports/*.json
+
+    Dev->>CLI: node scripts/check-runtime.mjs --json
+    CLI->>Ports: createNodePorts({packaged:false})
+    Ports-->>CLI: CorePorts(fs, hash, process, clock, env, logSink)
+    CLI->>RR: checkRuntime(ports, manifestPath)
+    RR->>FS: readText(runtime-manifest.json)
+    FS-->>RR: manifest JSON 文本
+    RR->>ML: validateManifest(json)
+    alt schemaVersion / 必填字段不合法
+        ML-->>RR: throw ManifestValidationError(UNKNOWN)
+        RR-->>CLI: 结构化错误，退出码 3（不静默）
+    else manifest 合法
+        ML-->>RR: RuntimeManifest(items[])
+        loop 每个 item（逐文件）
+            RR->>FS: exists(path) / stat(path)
+            alt 文件缺失
+                FS-->>RR: false
+                RR->>RR: 组状态 MISSING + 专用错误码
+            else 文件存在
+                RR->>H: sha256File(path)
+                H-->>RR: 实际 SHA-256
+                alt 哈希不符
+                    RR->>RR: 组状态 HASH_MISMATCH
+                else 哈希一致
+                    RR->>P: spawn(绝对路径, ['--version'], {shell:false, windowsHide:true})
+                    P-->>RR: {exitCode:0, stdout:'2026.10.26', stderr:''}
+                    RR->>RR: 记录 version + RuntimeFileResult(OK)
+                end
+            end
+        end
+        RR->>RR: 聚合为 4 逻辑组 RuntimeStatus[]（ytdlp/ffmpeg/node/aria2c）
+        RR-->>CLI: RuntimeCheckReport
+    end
+    CLI->>Out: --json ? 打印报告 : 打印 4 行表格
+    CLI-->>Dev: exit 0（全绿） / exit 2（必需项失败） / exit 3（manifest 错）
+
+sequenceDiagram
+    autonumber
+    participant Caller as 调用方 (L2 用例 / M3 UI)
+    participant Eng as YtDlpEngine.probe()
+    participant AB as ArgvBuilder.build()
+    participant PP as ProcessPort (注入)
+    participant YT as yt-dlp.exe (绝对路径 spawn)
+    participant JM as JsonMapper
+    participant LG as Logger (+ redactor)
+    participant EM as ErrorMapper
+    participant DTO as MediaInfo
+
+    Caller->>Eng: probe(url, opts{jsRuntimePath, timeoutMs=5000, retries=1})
+    Eng->>AB: build({url, opts, enginePath})
+    AB->>AB: assertHttpUrl(url) —— 仅 http(s)，拒 file://、UNC、本地路径
+    alt URL 非法
+        AB-->>Eng: throw AppError(INVALID_URL)
+        Eng->>LG: logArgv(脱敏后的 argv) + error
+        Eng-->>Caller: reject(AppError)
+    else URL 合法
+        AB-->>Eng: ['-J','--dump-single-json','--no-playlist','--no-warnings','--socket-timeout','5','-R','1','--no-js-runtimes','--js-runtimes','node:<abs>','--',url]
+        Eng->>LG: logArgv('engine.probe', argv)  %% 全量脱敏
+        Eng->>PP: spawn(enginePath, argv, {shell:false, windowsHide:true, timeoutMs:30000})
+        PP->>YT: 启动绝对路径外部进程（argv[]，用户 token 在 -- 之后）
+        YT-->>PP: stdout = --dump-single-json JSON；stderr = 全量日志
+        PP-->>Eng: SpawnResult{exitCode, stdout, stderr, timedOut}
+        alt exitCode !== 0 或 timedOut
+            Eng->>EM: map(stderr, ctx)
+            EM-->>Eng: AppError（retryable / 已脱敏 report）
+            Eng-->>Caller: reject(AppError)
+        else exitCode === 0
+            Eng->>JM: toMediaInfo(JSON.parse(stdout))
+            JM-->>Eng: MediaInfo
+            Eng-->>Caller: resolve(MediaInfo)
+        end
+    end

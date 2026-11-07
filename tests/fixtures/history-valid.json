@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "id": "h1", "taskId": "t1", "url": "https://example.org/v1", "title": "Alpha Video",
+      "uploader": "Chan", "durationSec": 10, "videoPath": "C://out//Alpha [id].mp4",
+      "audioPath": null, "thumbnailPath": null, "subtitlePaths": [], "sizeBytes": 308666,
+      "extractorKey": "generic", "downloadType": "video", "formatId": null,
+      "createdAt": "2026-11-05T00:00:00.000Z", "completedAt": "2026-11-05T00:00:01.000Z"
+    },
+    {
+      "id": "h2", "taskId": "t2", "url": "https://example.org/v2", "title": "Beta Audio",
+      "uploader": null, "durationSec": 212, "videoPath": "C://music//Beta [id].m4a",
+      "audioPath": "C://music//Beta [id].m4a", "thumbnailPath": null, "subtitlePaths": [], "sizeBytes": 1024,
+      "extractorKey": "generic", "downloadType": "audio", "formatId": "251",
+      "createdAt": "2026-11-05T00:00:02.000Z", "completedAt": "2026-11-05T00:00:03.000Z"
+    },
+    {
+      "id": "h3", "taskId": "t3", "url": "https://example.org/v1", "title": "Alpha Video (dupe path)",
+      "uploader": "Chan", "durationSec": 10, "videoPath": "c:/OUT/Alpha [id].mp4",
+      "audioPath": null, "thumbnailPath": null, "subtitlePaths": [], "sizeBytes": 308666,
+      "extractorKey": "generic", "downloadType": "video", "formatId": null,
+      "createdAt": "2026-11-05T00:00:04.000Z", "completedAt": "2026-11-05T00:00:05.000Z"
+    }
+  ]
+}

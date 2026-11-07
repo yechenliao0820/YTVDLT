@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<title>YTVDLT · 下载队列</title>
+<link rel="stylesheet" href="../../styles/ytvdlt.css">
+<link rel="stylesheet" href="../../styles/theme.css">
+<style>
+  /* M5 queue surface — fixed 1280x800 like every other screenshot page. */
+  .queue-page { display: flex; flex-direction: column; height: 800px; padding: 16px 20px; gap: 10px; }
+  .queue-head { display: flex; align-items: flex-end; gap: 12px; border-bottom: 2px solid var(--accent); padding-bottom: 8px; }
+  .queue-head h1 { font-size: 20px; margin: 0; font-weight: 700; }
+  .queue-sub { color: var(--muted); font-size: 12px; margin: 2px 0 0; }
+  .queue-head .spacer { flex: 1 1 auto; }
+  .queue-search { width: 280px; height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; font-family: inherit; font-size: 13px; background: var(--panel); }
+  .queue-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .queue-tabs { display: flex; gap: 6px; align-items: center; }
+  .queue-tab { height: 30px; padding: 0 14px; border-radius: 15px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); font-size: 13px; cursor: pointer; }
+  .queue-tab[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 700; }
+  .queue-tab .n { margin-left: 6px; font-variant-numeric: tabular-nums; opacity: .85; }
+  .queue-tabs .spacer { flex: 1 1 auto; }
+  .queue-actions { display: flex; gap: 8px; align-items: center; }
+  .queue-paste { display: flex; gap: 6px; align-items: center; }
+  .queue-url { width: 300px; height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; font-family: inherit; font-size: 13px; background: var(--panel); color: var(--ink); }
+  .queue-actions button { height: 30px; padding: 0 12px; font-size: 13px; }
+  .queue-actions .primary { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 700; }
+  .queue-body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-content: start; }
+  .card { display: flex; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  .thumb { width: 118px; height: 66px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px; flex: 0 0 auto; }
+  .card-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .card-title { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card-meta { color: var(--muted); font-size: 12px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 11px; font-weight: 700; background: var(--accent-soft); color: var(--accent); }
+  .badge[data-state="Completed"] { background: #e3f7ec; color: var(--ok); }
+  .badge[data-state="Canceled"] { background: #eef1f5; color: var(--muted); }
+  .badge[data-state="Error"] { background: #fdeaee; color: var(--danger); }
+  html[data-theme="dark"] .badge[data-state="Completed"] { background: #14311f; }
+  html[data-theme="dark"] .badge[data-state="Canceled"] { background: #202b36; }
+  html[data-theme="dark"] .badge[data-state="Error"] { background: #3a1a20; }
+  .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .bar > i { display: block; height: 6px; background: var(--accent); }
+  .card-foot { display: flex; gap: 6px; align-items: center; }
+  .card-foot .spacer { flex: 1 1 auto; }
+  .card-foot button { height: 26px; padding: 0 10px; font-size: 12px; }
+  .empty { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); text-align: center; }
+  .empty .glyph { width: 54px; height: 54px; border-radius: 27px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700; }
+  .empty h2 { margin: 4px 0 0; font-size: 16px; color: var(--ink); }
+  .empty p { margin: 0; font-size: 13px; }
+  .empty .hint { font-size: 12px; }
+  .empty button { height: 30px; padding: 0 14px; background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 700; }
+  .empty[data-variant="error"] .glyph { background: #fdeaee; color: var(--danger); }
+  [hidden="true"] { display: none !important; }
+</style>
+</head>
+<body>
+<main class="queue-page" id="queue-root" data-state="empty" data-tab="all" data-visible-count="0" data-total-count="0" data-concurrency="2/3">
+  <header class="queue-head">
+    <div>
+      <h1 id="queue-title" data-i18n="queue.title" data-fit="">下载队列</h1>
+      <p class="queue-sub" id="queue-subtitle" data-i18n="queue.subtitle">粘贴链接开始下载，支持播放列表与自定义命令。</p>
+    </div>
+    <span class="spacer"></span>
+    <span class="queue-count" id="queue-concurrency" data-i18n="queue.concurrency">并发 2/3</span>
+    <input class="queue-search" id="queue-search" type="search" data-i18n-placeholder="queue.search.placeholder" data-i18n-aria-label="queue.search.label" placeholder="搜索标题 / 上传者 / 任务 ID" aria-label="搜索任务">
+  </header>
+
+  <nav class="queue-tabs" role="tablist" aria-label="队列筛选">
+    <button class="queue-tab" type="button" role="tab" data-tab="all" aria-selected="true" data-i18n="queue.tab.all" data-fit="" data-count="0">全部<span class="n">0</span></button>
+    <button class="queue-tab" type="button" role="tab" data-tab="downloading" aria-selected="false" data-i18n="queue.tab.downloading" data-fit="" data-count="0">下载中<span class="n">0</span></button>
+    <button class="queue-tab" type="button" role="tab" data-tab="finished" aria-selected="false" data-i18n="queue.tab.finished" data-fit="" data-count="0">已完成<span class="n">0</span></button>
+    <button class="queue-tab" type="button" role="tab" data-tab="canceled" aria-selected="false" data-i18n="queue.tab.canceled" data-fit="" data-count="0">已取消<span class="n">0</span></button>
+    <span class="spacer"></span>
+    <div class="queue-actions">
+      <form id="queue-paste-form" class="queue-paste" autocomplete="off">
+        <input id="queue-url" class="queue-url" type="text" data-i18n-placeholder="queue.url.placeholder" data-i18n-aria-label="queue.url.label" placeholder="粘贴视频或播放列表链接" aria-label="下载链接">
+        <button type="submit" id="queue-paste" class="primary" data-i18n="queue.paste" data-fit="">粘贴并解析</button>
+      </form>
+      <button type="button" id="queue-new" data-i18n="queue.new" data-fit="">新建下载</button>
+    </div>
+  </nav>
+
+  <section class="queue-body" id="queue-body" aria-live="polite">
+    <div class="cards" id="queue-cards" hidden="true"></div>
+    <div class="empty" id="queue-empty" data-variant="empty" hidden="false">
+      <span class="glyph" aria-hidden="true">＋</span>
+      <h2 data-i18n="queue.empty.title">还没有任务</h2>
+      <p data-i18n="queue.empty.hint">粘贴一个视频或播放列表链接开始，或按 Ctrl+V 直接粘贴。</p>
+      <button type="button" id="queue-empty-cta" data-i18n="queue.empty.cta" data-fit="">粘贴链接开始下载</button>
+      <p class="hint" data-i18n="queue.paste.hint">Ctrl+V 粘贴解析</p>
+    </div>
+    <div class="empty" id="queue-error" data-variant="error" hidden="true">
+      <span class="glyph" aria-hidden="true">!</span>
+      <h2 data-i18n="queue.error.title">队列读取失败</h2>
+      <p data-i18n="queue.error.hint">配置或任务快照可能损坏，已保留备份。</p>
+      <button type="button" id="queue-retry" data-i18n="queue.error.retry" data-fit="">重新加载队列</button>
+    </div>
+  </section>
+
+  <pre id="ytvdlt-output" aria-live="polite" hidden="true">{}</pre>
+</main>
+<script src="../../i18n/messages.js"></script>
+<script src="../../i18n/i18n.js"></script>
+<script src="../../theme/theme.js"></script>
+<script src="../../shortcuts/shortcuts.js"></script>
+<script src="../../app-shell.js"></script>
+<script src="./queue.js"></script>
+
+
+</body></html>

@@ -1,0 +1,11 @@
+{
+  "name": "@ytvdlt/ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "M3 three dialogs - zero-dependency static HTML/CSS/native JS (PRD-M3 5.5 / D-31)",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

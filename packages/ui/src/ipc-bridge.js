@@ -1,0 +1,99 @@
+/**
+ * ipc-bridge.js — the ONLY way a dialog talks to the main process.
+ *
+ * Zero imports by design: no `electron`, no `node:fs`, no child_process.
+ * The preload script exposes a narrow `window.ytvdltBridge` whitelist.
+ * When the bridge is absent (static file:// preview / headless screenshot),
+ * calls degrade to a structured "unavailable" result instead of throwing.
+ */
+(function (global) {
+  'use strict';
+  var YTVDLT = global.YTVDLT || (global.YTVDLT = {});
+
+  var ALLOWED_COMMANDS = [
+    'PROBE', 'PROBE_PLAYLIST',
+    'DIALOG_OPEN', 'DIALOG_CONFIRM', 'PATH_PREVIEW',
+    'CONFIG_GET', 'CONFIG_SET',
+    // D-76: the real task surface. Until this change the queue and detail pages
+    // only wrote `{action, taskId}` into a <pre> and never called the main
+    // process, so every button was inert in the packaged app.
+    'TASK_LIST', 'TASK_DETAIL', 'TASK_ACTION', 'DOWNLOAD_START'
+  ];
+
+  function bridge() {
+    return global.ytvdltBridge && typeof global.ytvdltBridge === 'object'
+      ? global.ytvdltBridge : null;
+  }
+
+  function isAvailable() {
+    var b = bridge();
+    return b !== null && typeof b.invoke === 'function';
+  }
+
+  /**
+   * D-77: names -> wire strings. The preload whitelists the VALUES of
+   * `IPC_CHANNELS` (`ytvdlt:task:list`), while every page calls the symbolic
+   * name (`TASK_LIST`). Passing the name straight through made the preload
+   * reject every call in the packaged app — that is why the paste box, the
+   * queue buttons and even the format dialog's PROBE were inert.
+   */
+  var CHANNEL_STRINGS = {
+    PROBE: 'ytvdlt:probe',
+    PROBE_PLAYLIST: 'ytvdlt:probePlaylist',
+    DIALOG_OPEN: 'ytvdlt:dialog:open',
+    DIALOG_CONFIRM: 'ytvdlt:dialog:confirm',
+    PATH_PREVIEW: 'ytvdlt:path:preview',
+    CONFIG_GET: 'ytvdlt:config:get',
+    CONFIG_SET: 'ytvdlt:config:set',
+    TASK_LIST: 'ytvdlt:task:list',
+    TASK_DETAIL: 'ytvdlt:task:detail',
+    TASK_ACTION: 'ytvdlt:task:action',
+    DOWNLOAD_START: 'ytvdlt:download:start'
+  };
+
+  /** Whitelisted, synchronous-safe command dispatch. Never builds a command. */
+  function invoke(command, payload) {
+    if (ALLOWED_COMMANDS.indexOf(command) === -1) {
+      return { ok: false, reason: 'command-not-allowed', command: command };
+    }
+    var b = bridge();
+    if (b === null || typeof b.invoke !== 'function') {
+      return { ok: false, reason: 'bridge-unavailable', command: command };
+    }
+    var wire = CHANNEL_STRINGS[command] || command;
+    try {
+      return b.invoke(wire, payload || {});
+    } catch (error) {
+      return { ok: false, reason: 'bridge-error', command: command, message: String(error) };
+    }
+  }
+
+  function requestProbe(url) { return invoke('PROBE', { url: url }); }
+  function requestProbePlaylist(url) { return invoke('PROBE_PLAYLIST', { url: url }); }
+  function openDialog(kind) { return invoke('DIALOG_OPEN', { kind: kind }); }
+  function confirmDialog(result) { return invoke('DIALOG_CONFIRM', result); }
+  function previewPath(patch) { return invoke('PATH_PREVIEW', patch); }
+
+  // ---- D-76: real task operations (queue / detail pages) ----
+  function listTasks(payload) { return invoke('TASK_LIST', payload || {}); }
+  function taskDetail(taskId) { return invoke('TASK_DETAIL', { taskId: taskId }); }
+  function taskAction(taskId, action) { return invoke('TASK_ACTION', { taskId: taskId, action: action }); }
+  function startDownload(url, kind) {
+    return invoke('DOWNLOAD_START', { url: url, kind: kind === 'audio' ? 'audio' : 'video' });
+  }
+
+  YTVDLT.bridge = {
+    ALLOWED_COMMANDS: ALLOWED_COMMANDS,
+    isAvailable: isAvailable,
+    invoke: invoke,
+    requestProbe: requestProbe,
+    requestProbePlaylist: requestProbePlaylist,
+    openDialog: openDialog,
+    confirmDialog: confirmDialog,
+    previewPath: previewPath,
+    listTasks: listTasks,
+    taskDetail: taskDetail,
+    taskAction: taskAction,
+    startDownload: startDownload
+  };
+})(window);

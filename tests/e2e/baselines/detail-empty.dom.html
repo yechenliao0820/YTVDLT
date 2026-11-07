@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<title>YTVDLT · 任务详情</title>
+<link rel="stylesheet" href="../../styles/ytvdlt.css">
+<link rel="stylesheet" href="../../styles/theme.css">
+<style>
+  .detail-page { padding: 16px 20px; }
+  .detail-title { font-size: 18px; font-weight: 600; margin: 0 0 6px; }
+  .detail-grid { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; font-size: 13px; margin: 12px 0 16px; }
+  .detail-grid dt { color: #6b7280; }
+  .detail-grid dd { margin: 0; word-break: break-all; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .actions button { min-width: 104px; }
+  .actions button[aria-disabled="true"] { opacity: .45; }
+  #ytvdlt-output { background: #f3f4f6; padding: 10px; border-radius: 6px; font-size: 12px; max-height: 200px; overflow: auto; }
+  .empty { padding: 48px 0; display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--muted); text-align: center; }
+  .empty .glyph { width: 46px; height: 46px; border-radius: 23px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 700; }
+  .empty h2 { margin: 0; font-size: 15px; color: var(--ink); }
+  .empty p { margin: 0; font-size: 13px; }
+  html[data-theme="dark"] #ytvdlt-output { background: #0a1119; color: #cfe3f7; }
+  [hidden="true"] { display: none !important; }
+</style>
+</head>
+<body>
+<main class="detail-page" id="ytvdlt-task-detail" data-state="empty" data-task-id="t1">
+  <h1 class="detail-title" id="detail-title">任务详情</h1>
+  <div class="empty" id="detail-empty" data-variant="empty" hidden="false">
+    <span class="glyph" aria-hidden="true">?</span>
+    <h2 data-i18n="detail.empty.title" data-fit="">任务不存在</h2>
+    <p data-i18n="detail.empty.hint">任务可能已被删除，请返回队列刷新。</p>
+  </div>
+  <dl class="detail-grid" id="detail-body" hidden="true">
+    <dt>任务 ID</dt><dd id="detail-id">t1</dd>
+    <dt>状态</dt><dd id="detail-state">Error</dd>
+    <dt>进度</dt><dd id="detail-progress">42%</dd>
+    <dt>错误码</dt><dd id="detail-code">HTTP_403</dd>
+    <dt>产物</dt><dd id="detail-artifacts">C:/V/fixture.mp4</dd>
+    <dt>URL</dt><dd id="detail-url">https://example.org/v?token=***</dd>
+  </dl>
+
+  <div class="actions" id="detail-actions" role="group" aria-label="任务操作" hidden="true">
+    <button type="button" data-action="open-file" aria-disabled="false">打开文件</button>
+    <button type="button" data-action="open-folder" aria-disabled="false">所在文件夹</button>
+    <button type="button" data-action="copy-url" aria-disabled="false">复制 URL</button>
+    <button type="button" data-action="copy-error-report" aria-disabled="false">复制错误报告</button>
+    <button type="button" data-action="cancel" aria-disabled="true">取消</button>
+    <button type="button" data-action="remove" aria-disabled="false">删除</button>
+    <button type="button" data-action="retry" aria-disabled="false">重试</button>
+  </div>
+
+  <pre id="ytvdlt-output" aria-live="polite">{}</pre>
+</main>
+<script src="../../i18n/messages.js"></script>
+<script src="../../i18n/i18n.js"></script>
+<script src="../../theme/theme.js"></script>
+<script src="../../shortcuts/shortcuts.js"></script>
+<script src="../../app-shell.js"></script>
+<script src="./task-detail.js"></script>
+
+
+</body></html>

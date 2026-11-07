@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<title>YTVDLT · 格式选择</title>
+<link rel="stylesheet" href="../styles/ytvdlt.css">
+<link rel="stylesheet" href="../styles/theme.css">
+</head>
+<body data-state="ready">
+<div id="ytvdlt-dialog" data-kind="format" data-state="ready" data-confirm="enabled" data-selected-count="2" data-confirmed="true" data-mode="video" data-total-bytes="11.95 MiB" data-warning-count="0">
+  <header class="dialog-head">
+    <h1>格式选择</h1>
+    <span class="subtitle">数据来源：L1 录制 MediaInfo（已剥离凭据 URL）</span>
+    <span id="ytvdlt-state-label">已就绪</span>
+  </header>
+
+  <div id="ytvdlt-banner" data-visible="false"></div>
+  <div id="ytvdlt-inline-error" data-visible="false"></div>
+  <div id="ytvdlt-warnings"></div>
+
+  <div class="toolbar">
+    <input id="ytvdlt-search" type="search" placeholder="搜索格式 id / 分辨率 / 编码 / 备注" aria-label="搜索格式">
+    <span class="spacer"></span>
+    <span>已选 <span id="ytvdlt-selected-count" class="counter">2</span> 项</span>
+    <span>合计体积 <span id="ytvdlt-total-bytes" class="counter">11.95 MiB</span></span>
+  </div>
+
+  <div class="columns" id="ytvdlt-columns">
+    <section class="column" id="col-video-only" data-group="video-only" data-disabled="false">
+      <h2>仅视频 <span class="count" id="count-video-only">1</span></h2>
+      <div class="items" id="items-video-only" data-visible-count="1" data-total-count="1"><label class="item" data-format-id="137" data-selected="true" data-disabled="false"><input type="radio" name="fmt-video-only"><div class="row1">137 · mp4 · 1080p</div><div class="row2">v:h264 a:none tbr:2500.5 size:10.00 MiB 1080p</div></label></div>
+    </section>
+    <section class="column" id="col-audio-only" data-group="audio-only" data-disabled="false">
+      <h2>仅音频 <span class="count" id="count-audio-only">1</span></h2>
+      <div class="items" id="items-audio-only" data-visible-count="1" data-total-count="1"><label class="item" data-format-id="251" data-selected="true" data-disabled="false"><input type="checkbox" name="fmt-audio-only"><div class="row1">251 · webm · —</div><div class="row2">v:none a:opus tbr:128 size:1.95 MiB audio only</div></label></div>
+    </section>
+    <section class="column" id="col-merged" data-group="merged" data-disabled="false">
+      <h2>音视频合并 <span class="count" id="count-merged">0</span></h2>
+      <div class="items" id="items-merged" data-visible-count="0" data-total-count="0"></div>
+    </section>
+  </div>
+
+  <div class="controls" id="ytvdlt-controls">
+    <label data-field="quality">清晰度
+      <select id="ctl-quality" aria-label="清晰度">
+        <option value="best">最佳</option><option value="2160p">2160p</option>
+        <option value="1440p">1440p</option><option value="1080p">1080p</option>
+        <option value="720p">720p</option><option value="480p">480p</option>
+        <option value="360p">360p</option><option value="lowest">最低</option>
+      </select>
+    </label>
+    <label data-field="videoCodecPref">视频编码
+      <select id="ctl-vcodec" aria-label="视频编码">
+        <option value="auto">自动</option><option value="av01">AV1</option>
+        <option value="vp9.2">VP9.2</option><option value="h264">H.264 兼容</option>
+      </select>
+    </label>
+    <label id="label-audio-quality" data-field="audioQuality" data-disabled="false">音质档位
+      <select id="ctl-audio-quality" aria-label="音质档位">
+        <option value="best">最佳</option><option value="192">192k</option>
+        <option value="128">128k</option><option value="64">64k</option>
+        <option value="32">32k</option><option value="lowest">最低</option>
+      </select>
+    </label>
+    <label data-field="audioCodecPref">音频编码
+      <select id="ctl-acodec" aria-label="音频编码">
+        <option value="auto">自动</option><option value="opus">OPUS</option><option value="aac">AAC</option>
+      </select>
+    </label>
+    <label data-field="audioFormat"><input id="ctl-mp3" type="checkbox" checked="false"> 转码 MP3（R1 下音质档位置灰）</label>
+    <label data-field="formatIdManual">手动格式 id <input id="ctl-manual-id" type="text" size="10" placeholder="如 137+251" aria-label="手动格式 id"></label>
+    <span id="ctl-notice" class="note"></span>
+  </div>
+
+  <footer class="dialog-foot">
+    <button id="ytvdlt-retry" hidden="true" type="button">重试解析</button>
+    <span class="spacer"></span>
+    <button id="ytvdlt-confirm" type="button" aria-disabled="false" data-confirm-state="enabled">确认选择</button>
+  </footer>
+
+  <pre id="ytvdlt-output">{
+  "kind": "format",
+  "confirmed": true,
+  "state": "ready",
+  "requestPatch": {
+    "format": {
+      "quality": "best",
+      "videoCodecPref": "auto",
+      "formatId": "137+251",
+      "sortingFields": null,
+      "extractAudio": false,
+      "audioQuality": "best",
+      "audioCodecPref": "auto",
+      "audioFormat": null,
+      "audioMultistreams": false
+    },
+    "subtitle": {
+      "enabled": false,
+      "languages": "en.*,.*-orig",
+      "autoCaptions": false,
+      "skipTranslated": true,
+      "convertTo": "none",
+      "embed": false,
+      "keepSubtitleFile": false
+    },
+    "paths": {
+      "videoDir": "C:/Videos",
+      "audioDir": "C:/Music",
+      "commandDir": "C:/Commands",
+      "privateMode": false,
+      "subdirByExtractor": false,
+      "subdirByPlaylist": false,
+      "outputTemplate": "%(title)s.%(ext)s",
+      "tempDir": ""
+    },
+    "network": {
+      "rateLimit": null,
+      "proxy": null,
+      "cookiesFile": null,
+      "userAgent": null,
+      "ipv4Only": false,
+      "concurrentFragments": null,
+      "aria2cPath": null
+    },
+    "advanced": {
+      "sponsorblockRemove": null,
+      "downloadSections": null,
+      "splitChapters": false,
+      "customTitle": null,
+      "debug": false,
+      "downloadArchive": null,
+      "customCommand": null
+    }
+  }
+}</pre>
+</div>
+
+<script src="../ipc-bridge.js"></script>
+<script src="../fixtures/probe-fixture.js"></script>
+<script src="../i18n/messages.js"></script>
+<script src="../i18n/i18n.js"></script>
+<script src="../theme/theme.js"></script>
+<script src="../shortcuts/shortcuts.js"></script>
+<script src="../app-shell.js"></script>
+<script src="dialog-state.js"></script>
+<script src="format-selector.js"></script>
+
+
+</body></html>

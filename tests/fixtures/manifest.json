@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "file": "media/fixture.mp4",
+  "sha256": "1db5d56506d3c59d1bdd9b35822bcf0ff31c85514a6d2866574e68129e66d04b",
+  "sizeBytes": 308666,
+  "durationSec": 10,
+  "videoCodec": "h264",
+  "audioCodec": "aac",
+  "videoStreams": 1,
+  "audioStreams": 1,
+  "encoder": "libopenh264",
+  "scheme": "A",
+  "generatedBy": "scripts/u3-verify.mjs",
+  "note": "LGPL shared build: no libx264; libopenh264 used when available (see DECISIONS.md O-02 / D-09).",
+  "expectedFormat": {
+    "formatId": "0",
+    "ext": "mp4",
+    "vcodec": "h264",
+    "acodec": "aac",
+    "width": 320,
+    "height": 240
+  },
+  "c8Golden": null
+}

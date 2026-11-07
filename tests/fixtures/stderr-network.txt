@@ -1,0 +1,5 @@
+ERROR: unable to download video data: <urlopen error _ssl.c:980: The handshake operation timed out>
+WARNING: [youtube] Read timed out. Retrying ...
+ERROR: unable to download webpage: <urlopen error [Errno -3] Temporary failure in name resolution>
+ERROR: unable to download webpage: HTTP Error 403: Forbidden
+ERROR: unable to download webpage: HTTP Error 429: Too Many Requests

@@ -1,0 +1,168 @@
+{
+  "schemaVersion": 1,
+  "platform": "win-x64",
+  "generatedAt": "2026-11-05T01:24:06.902Z",
+  "toolVersions": {
+    "node": "v22.22.2",
+    "npm": "10.9.7",
+    "pnpm": "9.15.9"
+  },
+  "items": [
+    {
+      "path": "ffmpeg/avcodec-63.dll",
+      "sha256": "46365f99769c7755fbe24b4cb2a8604bec0d05d6b878fa22e1e36352a86b3f69",
+      "sizeBytes": 91810816,
+      "version": "n9.0.2-47-gb204e94e90-20261104",
+      "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip",
+      "releaseTag": "latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip/published:2026-11-04T13:18:35Z",
+      "license": "LGPL-3.0",
+      "required": true,
+      "kind": "ffmpeg",
+      "group": "ffmpeg"
+    },
+    {
+      "path": "ffmpeg/avdevice-63.dll",
+      "sha256": "fec51710950b8a216aeb851c243360120aa53e419901de2c646728f80ea8c5fe",
+      "sizeBytes": 5008384,
+      "version": "n9.0.2-47-gb204e94e90-20261104",
+      "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip",
+      "releaseTag": "latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip/published:2026-11-04T13:18:35Z",
+      "license": "LGPL-3.0",
+      "required": true,
+      "kind": "ffmpeg",
+      "group": "ffmpeg"
+    },
+    {
+      "path": "ffmpeg/avfilter-12.dll",
+      "sha256": "98ee6e6c10166850bc4a7c54dc7b7201ba0a71c5946f2cc3abc6f3f9ade137e8",
+      "sizeBytes": 31876096,
+      "version": "n9.0.2-47-gb204e94e90-20261104",
+      "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip",
+      "releaseTag": "latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip/published:2026-11-04T13:18:35Z",
+      "license": "LGPL-3.0",
+      "required": true,
+      "kind": "ffmpeg",
+      "group": "ffmpeg"
+    },
+    {
+      "path": "ffmpeg/avformat-63.dll",
+      "sha256": "95d0200076d44fbf09d50a56b7a04526d3b8619982e89813c02aaa7434883712",
+      "sizeBytes": 19888128,
+      "version": "n9.0.2-47-gb204e94e90-20261104",
+      "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip",
+      "releaseTag": "latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip/published:2026-11-04T13:18:35Z",
+      "license": "LGPL-3.0",
+      "required": true,
+      "kind": "ffmpeg",
+      "group": "ffmpeg"
+    },
+    {
+      "path": "ffmpeg/avutil-61.dll",
+      "sha256": "a6470b21ecb553df47bb7e44d3068babd877e13fc04b95288518c228fe1c5e27",
+      "sizeBytes": 3025408,
+      "version": "n9.0.2-47-gb204e94e90-20261104",
+      "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip",
+      "releaseTag": "latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip/published:2026-11-04T13:18:35Z",
+      "license": "LGPL-3.0",
+      "required": true,
+      "kind": "ffmpeg",
+      "group": "ffmpeg"
+    },
+    {
+      "path": "ffmpeg/ffmpeg.exe",
+      "sha256": "ef9f302512b2332b078b73f078a2239b285d476242eeb71b3efc2db8399d701d",
+      "sizeBytes": 551424,
+      "version": "n9.0.2-47-gb204e94e90-20261104",
+      "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip",
+      "releaseTag": "latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip/published:2026-11-04T13:18:35Z",
+      "license": "LGPL-3.0",
+      "required": true,
+      "kind": "ffmpeg",
+      "group": "ffmpeg"
+    },
+    {
+      "path": "ffmpeg/ffplay.exe",
+      "sha256": "9512a126f8940a6ac6aa60d140c9cc7db53e6a1aa863ae1536b9b3341de86740",
+      "sizeBytes": 19210240,
+      "version": "n9.0.2-47-gb204e94e90-20261104",
+      "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip",
+      "releaseTag": "latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip/published:2026-11-04T13:18:35Z",
+      "license": "LGPL-3.0",
+      "required": true,
+      "kind": "ffmpeg",
+      "group": "ffmpeg"
+    },
+    {
+      "path": "ffmpeg/ffprobe.exe",
+      "sha256": "6019d1fbb5b12fa338c2082e617307ffd273af63ba118164b1dc7b857c09f193",
+      "sizeBytes": 269824,
+      "version": "n9.0.2-47-gb204e94e90-20261104",
+      "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip",
+      "releaseTag": "latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip/published:2026-11-04T13:18:35Z",
+      "license": "LGPL-3.0",
+      "required": true,
+      "kind": "ffprobe",
+      "group": "ffmpeg"
+    },
+    {
+      "path": "ffmpeg/swresample-7.dll",
+      "sha256": "3528b6a963fafc28a9271c753ab35bfc3d0f022b05babe356cd5509332ee6197",
+      "sizeBytes": 747008,
+      "version": "n9.0.2-47-gb204e94e90-20261104",
+      "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip",
+      "releaseTag": "latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip/published:2026-11-04T13:18:35Z",
+      "license": "LGPL-3.0",
+      "required": true,
+      "kind": "ffmpeg",
+      "group": "ffmpeg"
+    },
+    {
+      "path": "ffmpeg/swscale-10.dll",
+      "sha256": "67f42d2f0577f19ad69657e3e46965e72964f09b65e5f1b7c6e6407b9cc3e1d9",
+      "sizeBytes": 2343936,
+      "version": "n9.0.2-47-gb204e94e90-20261104",
+      "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip",
+      "releaseTag": "latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip/published:2026-11-04T13:18:35Z",
+      "license": "LGPL-3.0",
+      "required": true,
+      "kind": "ffmpeg",
+      "group": "ffmpeg"
+    },
+    {
+      "path": "node.exe",
+      "sha256": "1c331340fa6cac5e4294725959070a143fa0507195a78ad77eed7943f719aac9",
+      "sizeBytes": 93922624,
+      "version": "v24.22.2",
+      "sourceUrl": "https://nodejs.org/dist/v24.22.2/node-v24.22.2-win-x64.zip",
+      "releaseTag": "v24.22.2",
+      "license": "MIT",
+      "required": true,
+      "kind": "node",
+      "group": "node"
+    },
+    {
+      "path": "yt-dlp.exe",
+      "sha256": "f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d",
+      "sizeBytes": 23575744,
+      "version": "2026.10.26",
+      "sourceUrl": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/yt-dlp.exe",
+      "releaseTag": "2026.10.26",
+      "license": "Unlicense",
+      "required": true,
+      "kind": "ytdlp",
+      "group": "ytdlp"
+    },
+    {
+      "path": "aria2c.exe",
+      "sha256": "b151764ecbb164f25f8aeca3b93e0a18b63d108bbb1f33982fe4eea46b8ecab9",
+      "sizeBytes": 5117952,
+      "version": "1.35.0",
+      "sourceUrl": "https://github.com/aria2/aria2/releases/download/release-1.35.0/aria2-1.35.0-win-64bit-build1.zip",
+      "releaseTag": "release-1.35.0",
+      "license": "GPL-2.0-or-later",
+      "required": false,
+      "kind": "aria2c",
+      "group": "aria2c"
+    }
+  ]
+}

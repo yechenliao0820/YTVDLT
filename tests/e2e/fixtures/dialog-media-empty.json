@@ -1,0 +1,34 @@
+{
+  "source": "tests/fixtures/info-video.json + info-flat-playlist.json (L1 recorded, empty-data scenario)",
+  "media": {
+    "id": "dQw4w9WgXcQ",
+    "title": "Recorded Fixture Video",
+    "uploader": "Fixture Channel",
+    "uploader_id": "UC_fixture",
+    "duration": 212,
+    "thumbnail": "https://example.org/thumb.jpg",
+    "webpage_url": "https://example.org/watch?v=dQw4w9WgXcQ",
+    "extractor_key": "Generic",
+    "description": "Recorded offline fixture, no real credentials.",
+    "upload_date": "20261105",
+    "ext": "mp4",
+    "_type": "video",
+    "formats": [],
+    "subtitles": {},
+    "automatic_captions": {},
+    "chapters": null
+  },
+  "playlist": {
+    "id": "PL_fixture_01",
+    "title": "Recorded Flat Playlist",
+    "_type": "playlist",
+    "extractor_key": "Generic",
+    "webpage_url": "https://example.org/playlist?list=PL_fixture_01",
+    "entries": []
+  },
+  "error": {
+    "code": "UNSUPPORTED_SITE",
+    "message": "probe failed (offline recorded scenario)",
+    "retryable": true
+  }
+}

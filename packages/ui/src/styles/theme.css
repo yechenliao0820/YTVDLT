@@ -1,0 +1,76 @@
+/* YTVDLT theme layer (M5-1).
+ *
+ * `ytvdlt.css` keeps the M3 light palette (frozen, baseline-backed). This file
+ * ONLY adds:
+ *   1. a dark palette under `html[data-theme="dark"]`;
+ *   2. accent presets under `html[data-accent="..."]` (light + dark variants);
+ *   3. a reduced-motion switch under `html[data-motion="reduced"]`.
+ *
+ * Light + zh-CN remains byte-identical to M3: with no `data-*` attribute on
+ * `<html>` every selector below is inert, so the 14 M3 screenshot baselines must
+ * keep a 0-pixel delta after this file is added (verified by `npm run test:e2e`).
+ *
+ * Colour contract: every accent used as TEXT on `--panel` / `--bg` must reach
+ * WCAG AA (>= 4.5:1). `tests/unit/appearance.test.ts` parses this file and
+ * enforces that for all 5 presets x 2 themes — do not "tune" a value here
+ * without re-running that test.
+ */
+
+/* ---------- dark palette (neutral tokens) ---------- */
+html[data-theme="dark"] {
+  --ink: #e6edf5;
+  --muted: #9fb0c2;
+  --line: #2a3644;
+  --panel: #16202b;
+  --bg: #0e1720;
+  /* Default dark accent = the `blue` preset's dark variant. Declared here so
+   * `html[data-theme="dark"]` alone (no data-accent) is already AA-readable;
+   * `html[data-theme="dark"][data-accent="..."]` then overrides it. */
+  --accent: #5aa2f0;
+  --accent-soft: #16304a;
+  --danger: #ff6b7f;
+  --warn-bg: #322a17;
+  --ok: #46c98a;
+  --chip-bg: #1d2937;
+  --shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}
+
+/* ---------- light accents ---------- */
+html[data-accent="blue"] { --accent: #1d63b8; --accent-soft: #e5f0ff; }
+html[data-accent="teal"] { --accent: #0f6b64; --accent-soft: #dcf5f2; }
+html[data-accent="violet"] { --accent: #6d28d9; --accent-soft: #eee6ff; }
+html[data-accent="amber"] { --accent: #97600a; --accent-soft: #fdf3d7; }
+html[data-accent="rose"] { --accent: #9f1239; --accent-soft: #ffe4ea; }
+
+/* ---------- dark accents (brighter for dark surfaces) ---------- */
+html[data-theme="dark"][data-accent="blue"] { --accent: #5aa2f0; --accent-soft: #16304a; }
+html[data-theme="dark"][data-accent="teal"] { --accent: #2dd4bf; --accent-soft: #12332f; }
+html[data-theme="dark"][data-accent="violet"] { --accent: #a78bfa; --accent-soft: #241a3d; }
+html[data-theme="dark"][data-accent="amber"] { --accent: #e0a52a; --accent-soft: #33280f; }
+html[data-theme="dark"][data-accent="rose"] { --accent: #fb7185; --accent-soft: #3a1622; }
+
+/* Custom accent: `theme.js` writes --accent / --accent-soft inline, which wins
+ * over the preset blocks above. Nothing to declare here. */
+
+/* ---------- surfaces that need the dark palette ---------- */
+html[data-theme="dark"] body { background: var(--bg); color: var(--ink); }
+html[data-theme="dark"] .column,
+html[data-theme="dark"] .card,
+html[data-theme="dark"] .panel { background: var(--panel); }
+html[data-theme="dark"] .item { background: #1a2531; }
+html[data-theme="dark"] .item[data-selected="true"] { background: var(--accent-soft); }
+html[data-theme="dark"] .empty-hint { color: var(--muted); }
+html[data-theme="dark"] button { background: var(--panel); color: var(--ink); border-color: var(--line); }
+html[data-theme="dark"] input,
+html[data-theme="dark"] select { background: var(--panel); color: var(--ink); border-color: var(--line); }
+html[data-theme="dark"] pre#ytvdlt-output { background: #0a1119; color: #cfe3f7; }
+
+/* ---------- reduced motion (system setting or ?motion=reduced) ---------- */
+html[data-motion="reduced"] *,
+html[data-motion="reduced"] *::before,
+html[data-motion="reduced"] *::after {
+  transition: none !important;
+  animation: none !important;
+  scroll-behavior: auto !important;
+}

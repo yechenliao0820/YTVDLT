@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<title>YTVDLT · 播放列表选择</title>
+<link rel="stylesheet" href="../styles/ytvdlt.css">
+<link rel="stylesheet" href="../styles/theme.css">
+</head>
+<body data-state="ready">
+<div id="ytvdlt-dialog" data-kind="playlist" data-state="ready" data-confirm="enabled" data-selected-count="3" data-confirmed="true" data-total-duration="5:00" data-path-preview="C:/Videos/Recorded Flat Playlist/" data-kind-of-source="playlist" data-enqueue-batch="never" data-warning-count="0">
+  <header class="dialog-head">
+    <h1>播放列表选择</h1>
+    <span class="subtitle">数据来源：L1 录制 flat-playlist fixture（已剥离条目 URL）</span>
+    <span id="ytvdlt-state-label">已就绪</span>
+  </header>
+
+  <div id="ytvdlt-banner" data-visible="false"></div>
+  <div id="ytvdlt-inline-error" data-visible="false"></div>
+  <div id="ytvdlt-warnings"></div>
+
+  <div class="toolbar">
+    <input id="ytvdlt-search" type="search" placeholder="搜索条目标题 / id" aria-label="搜索播放列表条目">
+    <button id="ctl-select-all" type="button">全选</button>
+    <button id="ctl-select-none" type="button">反选</button>
+    <span class="spacer"></span>
+    <span>已选 <span id="ytvdlt-selected-count" class="counter">3</span> / <span id="ytvdlt-entry-count" class="counter">3</span> 条</span>
+    <span>合计时长 <span id="ytvdlt-total-duration" class="counter">5:00</span></span>
+  </div>
+
+  <div class="columns" id="ytvdlt-columns">
+    <section class="column" id="col-entries" data-group="entries" style="flex:3 1 0">
+      <h2>条目列表 <span class="count" id="count-entries">3</span></h2>
+      <div class="items" id="items-entries" data-visible-count="3" data-total-count="3"><label class="item" data-entry-id="a1" data-selected="true" data-disabled="false"><input type="checkbox"><div class="row1">1. Episode 1</div><div class="row2">id:a1 duration:1:40</div></label><label class="item" data-entry-id="a2" data-selected="true" data-disabled="false"><input type="checkbox"><div class="row1">2. Episode 2</div><div class="row2">id:a2 duration:3:20</div></label><label class="item" data-entry-id="a3" data-selected="true" data-disabled="false"><input type="checkbox"><div class="row1">3. Episode 3</div><div class="row2">id:a3 duration:—</div></label></div>
+    </section>
+    <section class="column" id="col-preview" data-group="preview" style="flex:1 1 0">
+      <h2>路径预览</h2>
+      <div class="items" id="items-preview" data-visible-count="0" data-total-count="0">
+        <p class="note">按 subdirByPlaylist 显示输出目录：</p>
+        <p class="path-preview" id="ytvdlt-path-preview">C:/Videos/Recorded Flat Playlist/</p>
+        <p class="note">确认仅「保存选择」，M3 不创建任务、不入队（A-M3-04 / D-38）。</p>
+        <p class="note" id="ctl-notice">M3 确认仅保存选择，不创建任务 / 不入队</p>
+      </div>
+    </section>
+  </div>
+
+  <div class="controls" id="ytvdlt-controls">
+    <label data-field="preset">预设格式
+      <select id="ctl-preset" aria-label="预设格式">
+        <option value="bestvideo+bestaudio/best">自动最佳</option>
+        <option value="bestvideo[height&lt;=1080]+bestaudio/best">1080p 最佳</option>
+        <option value="bestaudio/best">仅音频</option>
+      </select>
+    </label>
+    <span class="note" id="ctl-preset-note">预设仅回写 format.*，不产生下载任务</span>
+  </div>
+
+  <footer class="dialog-foot">
+    <button id="ytvdlt-retry" hidden="true" type="button">重试解析</button>
+    <span class="spacer"></span>
+    <button id="ytvdlt-confirm" type="button" aria-disabled="false" data-confirm-state="enabled">保存选择</button>
+  </footer>
+
+  <pre id="ytvdlt-output">{
+  "kind": "playlist",
+  "confirmed": true,
+  "state": "ready",
+  "selectedPlaylistIds": [
+    "a1",
+    "a2",
+    "a3"
+  ]
+}</pre>
+</div>
+
+<script src="../ipc-bridge.js"></script>
+<script src="../fixtures/probe-fixture.js"></script>
+<script src="../i18n/messages.js"></script>
+<script src="../i18n/i18n.js"></script>
+<script src="../theme/theme.js"></script>
+<script src="../shortcuts/shortcuts.js"></script>
+<script src="../app-shell.js"></script>
+<script src="dialog-state.js"></script>
+<script src="playlist-selector.js"></script>
+
+
+</body></html>

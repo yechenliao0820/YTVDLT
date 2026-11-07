@@ -1,0 +1,374 @@
+/**
+ * YtDlpEngine — the production `DownloadEngine` implementation.
+ *
+ * M1: `probe()` / `version()` (probe path unchanged).
+ * M2: `download()` — streaming spawn → progress projection → precise artifact
+ *      list via `--print-to-file` → completed/failed/canceled events.
+ * `selfUpdate()` remains an explicit UNKNOWN placeholder; `probePlaylist()` is
+ * implemented in M4-4 (flat playlist probe through the same injected ports).
+ *
+ * All process work goes through the injected `ProcessPort`; this file has no
+ * `child_process` / `node:*` / `electron` import.
+ */
+import type {
+  DownloadEngine, MediaInfo, PlaylistInfo, DownloadRequest, EngineEvent,
+  CancelHandle, UpdateResult, ProbeOptions, CorePorts, AppError, ErrorContext,
+  Artifact, EngineUpdateSource, QueueIntakeGate,
+} from '@ytvdlt/shared';
+import type { ILogger, IErrorMapper } from '@ytvdlt/core';
+import { build } from './argv-builder.js';
+import { buildDownload } from './argv-builder-download.js';
+import { toMediaInfo, toPlaylistInfo } from './json-mapper.js';
+import { parseProgressChunk } from './progress-parser.js';
+import {
+  artifactManifestPath, resolveArtifactManifestDir, parseArtifactManifestDetailed,
+} from './artifact-manifest.js';
+import { probeSucceeded, type RawProbeResult } from './probe-result.js';
+import { assertAbsoluteRuntimePaths, assertSafeSpawnOptions } from './runtime-check.js';
+import { SelfUpdater } from './self-updater.js';
+
+export interface YtDlpEngineDeps {
+  ports: CorePorts;
+  logger: ILogger;
+  mapper: IErrorMapper;
+  /** Absolute path of the bundled yt-dlp.exe. */
+  enginePath: string;
+  /** Absolute path of the bundled node.exe (EJS runtime). */
+  jsRuntimePath: string;
+  appVersion: string;
+  engineVersion?: string;
+  /** Test hook: override the ffmpeg directory (defaults to `<runtimeDir>/ffmpeg`). */
+  ffmpegDir?: string;
+  /**
+   * M5-5 append-only (D-62): where engine bytes come from. Absent means
+   * `selfUpdate()` reports "nothing changed" instead of pretending to update.
+   */
+  updateSource?: EngineUpdateSource;
+  /** M5-5 append-only: queue intake switch driven by the self-updater. */
+  intakeGate?: QueueIntakeGate;
+}
+
+export class YtDlpEngine implements DownloadEngine {
+  private readonly deps: YtDlpEngineDeps;
+
+  constructor(deps: YtDlpEngineDeps) {
+    this.deps = deps;
+  }
+
+  private contextOf(url: string, stderr: string, argv: readonly string[]): ErrorContext {
+    const { ports, appVersion, engineVersion } = this.deps;
+    return {
+      url,
+      stderr,
+      engineVersion: engineVersion ?? '2026.10.26',
+      appVersion,
+      os: `${ports.env.platform()} ${ports.env.osRelease()}`,
+      argv,
+    };
+  }
+
+  private ffmpegDir(): string {
+    const runtimeDir = this.deps.ports.env.runtimeDir().replace(/[\\/]+$/, '');
+    return this.deps.ffmpegDir ?? `${runtimeDir}/ffmpeg`;
+  }
+
+  async version(): Promise<string> {
+    const result = await this.deps.ports.process.spawn(this.deps.enginePath, ['--version'], {
+      shell: false,
+      windowsHide: true,
+      timeoutMs: 30_000,
+    });
+    if (!probeSucceeded(result)) return '';
+    return result.stdout.trim().split(/\r?\n/)[0] ?? '';
+  }
+
+  async probe(url: string, opts: ProbeOptions): Promise<MediaInfo> {
+    let argv: string[];
+    try {
+      assertAbsoluteRuntimePaths(this.deps.enginePath, opts.jsRuntimePath);
+      argv = build({ url, opts, enginePath: this.deps.enginePath });
+    } catch (error) {
+      const appError = error as Partial<AppError>;
+      if (appError?.code === 'INVALID_URL') throw error;
+      throw this.deps.mapper.fromCode('INVALID_URL', this.contextOf(url, String(error), []));
+    }
+
+    await this.deps.logger.logArgv('engine.probe', argv);
+
+    const spawnOptions = {
+      shell: false as const,
+      windowsHide: true as const,
+      timeoutMs: 30_000,
+      env: { PATH: `${this.ffmpegDir()};${this.deps.ports.env.get('PATH') ?? ''}` },
+    };
+    assertSafeSpawnOptions(spawnOptions);
+
+    const result = await this.deps.ports.process.spawn(this.deps.enginePath, argv, spawnOptions);
+    const raw: RawProbeResult = {
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      timedOut: result.timedOut,
+    };
+
+    if (!probeSucceeded(raw)) {
+      await this.deps.logger.error('engine.probe', 'failed', { stderr: result.stderr });
+      throw this.deps.mapper.map(result.stderr, this.contextOf(url, result.stderr, argv));
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      await this.deps.logger.error('engine.probe', 'invalid-json');
+      throw this.deps.mapper.fromCode('UNKNOWN', this.contextOf(url, result.stderr, argv));
+    }
+    return toMediaInfo(parsed);
+  }
+
+  /**
+   * Download one task. Returns immediately with a CancelHandle; progress and
+   * terminal state arrive through `onEvent`.
+   */
+  download(req: DownloadRequest, onEvent: (e: EngineEvent) => void): CancelHandle {
+    let pid: number | null = null;
+    let killTree: (() => Promise<boolean>) | null = null;
+    let canceled = false;
+
+    void this.runDownload(req, onEvent, (newPid, kill) => { pid = newPid; killTree = kill; }, () => canceled)
+      .catch((error: unknown) => {
+        // A download must never produce an unhandled rejection: surface it as a
+        // failed event so the queue can move to Error deterministically.
+        onEvent({
+          type: 'failed',
+          taskId: req.taskId,
+          error: {
+            code: 'UNKNOWN',
+            message: '下载过程发生未预期错误',
+            detail: error instanceof Error ? error.message : String(error),
+            retryable: true,
+            report: `UNKNOWN: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        });
+      });
+
+    const handle: CancelHandle = {
+      get pid() { return pid; },
+      cancel: async (): Promise<boolean> => {
+        canceled = true;
+        if (killTree === null) return false;
+        return killTree();
+      },
+    };
+    return handle;
+  }
+
+  private async runDownload(
+    req: DownloadRequest,
+    onEvent: (e: EngineEvent) => void,
+    register: (pid: number | null, kill: () => Promise<boolean>) => void,
+    isCanceled: () => boolean,
+  ): Promise<void> {
+    const taskId = req.taskId;
+    // D-68: never let an empty tempDir turn the manifest into a drive-root path.
+    const manifestDir = resolveArtifactManifestDir(
+      req.paths.tempDir, req.paths.videoDir, req.paths.audioDir, req.format.extractAudio,
+    );
+    const manifestPath = artifactManifestPath(manifestDir, taskId);
+
+    // `--print-to-file` APPENDS; a stale manifest would leak old paths.
+    try { await this.deps.ports.fs.unlink(manifestPath); } catch { /* absent is fine */ }
+    try { await this.deps.ports.fs.mkdir(manifestDir); } catch { /* best effort */ }
+    try { await this.deps.ports.fs.mkdir(req.paths.videoDir); } catch { /* best effort */ }
+    if (req.format.extractAudio) {
+      try { await this.deps.ports.fs.mkdir(req.paths.audioDir); } catch { /* best effort */ }
+    }
+
+    const argv = buildDownload(req, {
+      jsRuntimePath: this.deps.jsRuntimePath,
+      ffmpegDir: this.ffmpegDir(),
+      artifactManifestPath: manifestPath,
+    });
+    await this.deps.logger.logArgv('engine.download', argv);
+
+    // yt-dlp resolves the external downloader through PATH, so the directory
+    // that holds the bundled `aria2c.exe` has to be on it. ffmpeg's directory is
+    // already prepended for the same reason; aria2c goes first because it is the
+    // more specific request (a user-supplied aria2c must win over the bundled one).
+    const pathDirs = [this.ffmpegDir()];
+    const aria2cDir = aria2cDirOf(req.network.aria2cPath);
+    if (aria2cDir !== null) pathDirs.unshift(aria2cDir);
+    const spawnOptions = {
+      shell: false as const,
+      windowsHide: true as const,
+      env: { PATH: `${pathDirs.join(';')};${this.deps.ports.env.get('PATH') ?? ''}` },
+    };
+    assertSafeSpawnOptions(spawnOptions);
+
+    let stderrAll = '';
+    let pending = '';
+    const handle = this.deps.ports.process.spawnStreaming(
+      this.deps.enginePath,
+      argv,
+      spawnOptions,
+      (chunk) => {
+        if (chunk.stream === 'stderr') {
+          stderrAll += chunk.text;
+          return;
+        }
+        pending += chunk.text;
+        const { events, rest } = parseProgressChunk(pending, taskId);
+        pending = rest;
+        for (const event of events) {
+          // Project ProgressEvent onto the frozen EngineEvent 'progress' shape.
+          onEvent({
+            type: 'progress',
+            taskId,
+            percent: event.percent,
+            downloadedBytes: event.downloadedBytes,
+            totalBytes: event.totalBytes,
+            speedBps: event.speedBps,
+            etaSec: event.etaSec,
+            rawLine: event.rawLine,
+          });
+        }
+      },
+    );
+    register(handle.pid, () => handle.kill());
+
+    const result = await handle.done;
+
+    if (isCanceled()) {
+      // yt-dlp keeps the `.part` file; we never touch it here.
+      onEvent({ type: 'canceled', taskId });
+      return;
+    }
+    if (result.timedOut || result.exitCode !== 0) {
+      const error = this.deps.mapper.map(
+        result.stderr || stderrAll,
+        this.contextOf(req.url, result.stderr || stderrAll, argv),
+      );
+      await this.deps.logger.error('engine.download', 'failed', { stderr: result.stderr.slice(0, 2000) });
+      onEvent({ type: 'failed', taskId, error });
+      return;
+    }
+
+    // Precise artifact list from the manifest — never scan the directory.
+    let manifestText = '';
+    try { manifestText = await this.deps.ports.fs.readText(manifestPath); } catch { manifestText = ''; }
+    const { paths, dropped } = parseArtifactManifestDetailed(manifestText);
+    if (dropped.length > 0) {
+      await this.deps.logger.warn('engine.download', 'manifest.droppedLines', {
+        dropped: dropped.map((entry) => entry.reason),
+      });
+    }
+    if (paths.length === 0) {
+      onEvent({
+        type: 'failed',
+        taskId,
+        error: {
+          code: 'ARTIFACT_INCOMPLETE',
+          message: '下载完成但未产出可用文件',
+          detail: `artifact manifest empty: ${manifestPath}`,
+          retryable: true,
+          report: `ARTIFACT_INCOMPLETE: empty artifact manifest (${manifestPath})`,
+        },
+      });
+      return;
+    }
+
+    const artifacts: Artifact[] = [];
+    for (const path of paths) {
+      let sizeBytes: number | null = null;
+      try { sizeBytes = (await this.deps.ports.fs.stat(path)).sizeBytes; } catch { sizeBytes = null; }
+      artifacts.push({ taskId, path, kind: kindOf(path), sizeBytes });
+    }
+    onEvent({ type: 'completed', taskId, artifacts });
+  }
+
+  async probePlaylist(url: string, opts: ProbeOptions): Promise<PlaylistInfo> {
+    let argv: string[];
+    try {
+      assertAbsoluteRuntimePaths(this.deps.enginePath, opts.jsRuntimePath);
+      argv = build({
+        url,
+        opts: { ...opts, noPlaylist: false, flatPlaylist: true },
+        enginePath: this.deps.enginePath,
+      });
+    } catch (error) {
+      const appError = error as Partial<AppError>;
+      if (appError?.code === 'INVALID_URL') throw error;
+      throw this.deps.mapper.fromCode('INVALID_URL', this.contextOf(url, String(error), []));
+    }
+
+    await this.deps.logger.logArgv('engine.probePlaylist', argv);
+
+    const spawnOptions = {
+      shell: false as const,
+      windowsHide: true as const,
+      timeoutMs: 60_000,
+      env: { PATH: `${this.ffmpegDir()};${this.deps.ports.env.get('PATH') ?? ''}` },
+    };
+    assertSafeSpawnOptions(spawnOptions);
+
+    const result = await this.deps.ports.process.spawn(this.deps.enginePath, argv, spawnOptions);
+    const raw: RawProbeResult = {
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      timedOut: result.timedOut,
+    };
+    if (!probeSucceeded(raw)) {
+      await this.deps.logger.error('engine.probePlaylist', 'failed', { stderr: result.stderr });
+      throw this.deps.mapper.map(result.stderr, this.contextOf(url, result.stderr, argv));
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      await this.deps.logger.error('engine.probePlaylist', 'invalid-json');
+      throw this.deps.mapper.fromCode('UNKNOWN', this.contextOf(url, result.stderr, argv));
+    }
+    const info = toPlaylistInfo(parsed);
+    if (info.entries.length === 0) {
+      // A single video URL is not a playlist: surface it as UNSUPPORTED_SITE
+      // instead of an empty selector the user cannot act on.
+      throw this.deps.mapper.fromCode('UNSUPPORTED_SITE', this.contextOf(url, 'not a playlist', argv));
+    }
+    return info;
+  }
+
+  async selfUpdate(channel: 'stable' | 'nightly'): Promise<UpdateResult> {
+    const { updateSource } = this.deps;
+    if (updateSource === undefined) {
+      await this.deps.logger.warn('self-update', 'no engine update source configured', { channel });
+      return { fromVersion: '', toVersion: '', channel, changed: false, rolledBack: false };
+    }
+    const updater = new SelfUpdater({
+      ports: this.deps.ports,
+      logger: this.deps.logger,
+      source: updateSource,
+      intakeGate: this.deps.intakeGate ?? null,
+      enginePath: this.deps.enginePath,
+      channel,
+    });
+    return updater.update();
+  }
+}
+
+/** Directory part of an absolute Windows/POSIX path, without importing `node:path`. */
+function aria2cDirOf(aria2cPath: string | null): string | null {
+  if (aria2cPath === null || aria2cPath.trim() === '') return null;
+  const match = /^(.*)[\\/][^\\/]+$/.exec(aria2cPath.trim());
+  return match?.[1] ?? null;
+}
+
+function kindOf(path: string): Artifact['kind'] {
+  const ext = (/\.([A-Za-z0-9]+)$/.exec(path)?.[1] ?? '').toLowerCase();
+  if (['m4a', 'mp3', 'opus', 'ogg', 'flac', 'wav', 'aac'].includes(ext)) return 'audio';
+  if (['vtt', 'srt', 'ass', 'lrc'].includes(ext)) return 'subtitle';
+  if (['jpg', 'jpeg', 'png', 'webp'].includes(ext)) return 'thumbnail';
+  if (ext === 'json') return 'infojson';
+  return 'video';
+}

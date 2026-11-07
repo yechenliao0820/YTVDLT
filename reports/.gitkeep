@@ -1,0 +1,2 @@
+# reports/ — generated M1 evidence (JSON files are gitignored).
+# Regenerate with: node scripts/acceptance.mjs --milestone M1

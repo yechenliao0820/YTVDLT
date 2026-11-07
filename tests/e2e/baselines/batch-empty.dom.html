@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<title>YTVDLT · 批量入队预览</title>
+<link rel="stylesheet" href="../../styles/ytvdlt.css">
+<link rel="stylesheet" href="../../styles/theme.css">
+<style>
+  .batch-page { padding: 16px 20px; }
+  .batch-title { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  .batch-sub { color: var(--ytvdlt-muted, #6b7280); font-size: 12px; margin: 0 0 14px; }
+  .batch-stats { display: flex; gap: 18px; font-size: 12px; margin-bottom: 12px; }
+  .batch-stats b { font-size: 16px; }
+  .task-row { display: flex; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--ytvdlt-border, #e5e7eb); font-size: 13px; }
+  .task-row[data-state="queued"] .dot { background: #9ca3af; }
+  .task-row .dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; display: inline-block; }
+  .task-id { font-family: Consolas, monospace; font-size: 12px; color: #374151; }
+  .task-meta { color: var(--ytvdlt-muted, #6b7280); font-size: 12px; }
+  .batch-actions { margin-top: 14px; display: flex; gap: 10px; align-items: center; }
+  .batch-note { font-size: 12px; color: var(--ytvdlt-muted, #6b7280); }
+  #ytvdlt-output { background: #f3f4f6; padding: 10px; border-radius: 6px; font-size: 12px; max-height: 180px; overflow: auto; }
+  .empty { padding: 36px 0; display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--ytvdlt-muted, #6b7280); text-align: center; }
+  .empty .glyph { width: 44px; height: 44px; border-radius: 22px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 19px; font-weight: 700; }
+  .empty h2 { margin: 0; font-size: 15px; color: var(--ink); }
+  .empty p { margin: 0; font-size: 13px; }
+  html[data-theme="dark"] #ytvdlt-output { background: #0a1119; color: #cfe3f7; }
+  [hidden="true"] { display: none !important; }
+</style>
+</head>
+<body>
+<main class="batch-page" id="ytvdlt-batch" data-state="empty" data-enqueue-batch="on-confirm" data-task-count="0">
+  <h1 class="batch-title" id="batch-title">Recorded Flat Playlist</h1>
+  <p class="batch-sub">每条选中项生成一个独立任务（各自进度 / 取消 / 重试），并发上限 <span id="batch-limit">3</span>。</p>
+
+  <section class="batch-stats">
+    <span>已选条目 <b id="batch-selected">1</b></span>
+    <span>将创建任务 <b id="batch-tasks">0</b></span>
+    <span>预计并发 <b id="batch-concurrency">0</b></span>
+  </section>
+
+  <section id="batch-rows" aria-label="待入队任务" hidden="true"></section>
+  <div class="empty" id="batch-empty" data-variant="empty" hidden="false">
+    <span class="glyph" aria-hidden="true">0</span>
+    <h2 data-i18n="batch.empty.title" data-fit="">没有选中的条目</h2>
+    <p data-i18n="batch.empty.hint">返回播放列表选择，勾选至少一个条目。</p>
+  </div>
+  <div class="empty" id="batch-error" data-variant="error" hidden="true">
+    <span class="glyph" aria-hidden="true">!</span>
+    <h2 data-i18n="batch.error.title" data-fit="">批量入队失败</h2>
+    <p data-i18n="batch.error.hint">播放列表解析失败，请稍后重试。</p>
+  </div>
+
+  <div class="batch-actions">
+    <button id="batch-enqueue" type="button" data-confirm="disabled" aria-disabled="true">加入队列</button>
+    <span class="batch-note" id="batch-notice">确认后由主进程创建 N 个独立任务，不会自动开始下载。</span>
+  </div>
+
+  <pre id="ytvdlt-output" aria-live="polite">{}</pre>
+</main>
+<script src="../../i18n/messages.js"></script>
+<script src="../../i18n/i18n.js"></script>
+<script src="../../theme/theme.js"></script>
+<script src="../../shortcuts/shortcuts.js"></script>
+<script src="../../app-shell.js"></script>
+<script src="./playlist-batch.js"></script>
+
+
+</body></html>

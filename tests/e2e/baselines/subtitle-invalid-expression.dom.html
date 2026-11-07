@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<title>YTVDLT · 字幕选择</title>
+<link rel="stylesheet" href="../styles/ytvdlt.css">
+<link rel="stylesheet" href="../styles/theme.css">
+</head>
+<body data-state="ready">
+<div id="ytvdlt-dialog" data-kind="subtitle" data-state="ready" data-confirm="disabled" data-selected-count="1" data-confirmed="false" data-mode="video" data-split="false" data-enabled="true" data-expression-valid="false" data-warning-count="0">
+  <header class="dialog-head">
+    <h1>字幕选择</h1>
+    <span class="subtitle">数据来源：L1 录制 MediaInfo（已剥离字幕 URL）</span>
+    <span id="ytvdlt-state-label">已就绪</span>
+  </header>
+
+  <div id="ytvdlt-banner" data-visible="false"></div>
+  <div id="ytvdlt-inline-error" data-visible="true">语言表达式不能包含空白或控制字符</div>
+  <div id="ytvdlt-warnings"></div>
+
+  <div class="toolbar">
+    <input id="ytvdlt-search" type="search" placeholder="搜索语言 / 名称 / 后缀" aria-label="搜索字幕语言">
+    <span class="spacer"></span>
+    <span>已选 <span id="ytvdlt-selected-count" class="counter">1</span> 种语言</span>
+  </div>
+
+  <div class="columns" id="ytvdlt-columns">
+    <section class="column" id="col-suggested" data-group="suggested">
+      <h2>建议语言 <span class="count" id="count-suggested">1</span></h2>
+      <div class="items" id="items-suggested" data-visible-count="1" data-total-count="1"><label class="item" data-language="en" data-selected="true" data-disabled="false"><input type="checkbox"><div class="row1">en · vtt/vtt</div><div class="row2">name:English/English (auto) tracks:2</div></label></div>
+    </section>
+    <section class="column" id="col-other" data-group="other">
+      <h2>其它语言 <span class="count" id="count-other">1</span></h2>
+      <div class="items" id="items-other" data-visible-count="1" data-total-count="1"><label class="item" data-language="zh-Hans" data-selected="false" data-disabled="false"><input type="checkbox"><div class="row1">zh-Hans · srt</div><div class="row2">name:— tracks:1</div></label></div>
+    </section>
+    <section class="column" id="col-automatic" data-group="automatic">
+      <h2>自动字幕 <span class="count" id="count-automatic">1</span></h2>
+      <div class="items" id="items-automatic" data-visible-count="1" data-total-count="1"><label class="item" data-language="en" data-selected="true" data-disabled="false"><input type="checkbox"><div class="row1">en · vtt/vtt</div><div class="row2">name:English/English (auto) tracks:2</div></label></div>
+    </section>
+  </div>
+
+  <div class="controls" id="ytvdlt-controls">
+    <label data-field="convertTo">格式转换
+      <select id="ctl-convert" aria-label="字幕格式转换">
+        <option value="none">不转换</option><option value="ass">ass</option>
+        <option value="srt">srt</option><option value="vtt">vtt</option><option value="lrc">lrc</option>
+      </select>
+    </label>
+    <label id="label-enabled" data-field="enabled"><input id="ctl-enabled" type="checkbox" checked=""> 启用字幕</label>
+    <label id="label-auto" data-field="autoCaptions" data-disabled="false"><input id="ctl-auto" type="checkbox"> 自动字幕</label>
+    <label id="label-skip" data-field="skipTranslated" data-disabled="false"><input id="ctl-skip" type="checkbox" checked=""> 跳过自动翻译</label>
+    <label id="label-embed" data-field="embed" data-disabled="false"><input id="ctl-embed" type="checkbox"> 嵌入视频</label>
+    <label id="label-keep" data-field="keepSubtitleFile" data-disabled="false" data-reason="仅音频模式不可保留独立字幕"><input id="ctl-keep" type="checkbox"> 保留独立字幕文件</label>
+    <label data-field="languages">语言表达式 <input id="ctl-expression" type="text" size="22" value="en.*,.*-orig" aria-label="语言表达式"></label>
+    <span id="ctl-experimental" class="note" data-visible="false">自动翻译字幕（实验性）：可能不准确，需确认后启用</span>
+    <span id="ctl-mkv-hint" class="note" data-visible="false">将强制合并为 MKV</span>
+  </div>
+
+  <footer class="dialog-foot">
+    <button id="ytvdlt-retry" hidden="true" type="button">重试解析</button>
+    <span class="spacer"></span>
+    <button id="ytvdlt-confirm" type="button" aria-disabled="true" data-confirm-state="disabled" disabled="">确认选择</button>
+  </footer>
+
+  <pre id="ytvdlt-output">{}</pre>
+</div>
+
+<script src="../ipc-bridge.js"></script>
+<script src="../fixtures/probe-fixture.js"></script>
+<script src="../i18n/messages.js"></script>
+<script src="../i18n/i18n.js"></script>
+<script src="../theme/theme.js"></script>
+<script src="../shortcuts/shortcuts.js"></script>
+<script src="../app-shell.js"></script>
+<script src="dialog-state.js"></script>
+<script src="subtitle-selector.js"></script>
+
+
+</body></html>
