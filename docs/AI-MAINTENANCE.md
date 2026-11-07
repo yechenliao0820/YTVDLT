@@ -284,7 +284,8 @@ ui（零依赖） ← preload ← apps/desktop
 
 | 想了解 | 看哪份 |
 |---|---|
-| 做过哪些决策、为什么这么定 | `docs/DECISIONS.md`（D-01…D-80，最新在最后） |
+| **本版交付了什么、验收怎么过的、事故怎么发生的** | `docs/DELIVERY-REPORT.md` |
+| 做过哪些决策、为什么这么定 | `docs/DECISIONS.md`（D-01…D-81，最新在最后） |
 | 每个版本产出了什么、为什么被淘汰 | `docs/BUILD-HISTORY.md` |
 | 打包步骤与环境 | `docs/BUILD.md` |
 | 验收口径 | `docs/ACCEPTANCE.md` |
