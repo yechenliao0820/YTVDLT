@@ -35,3 +35,31 @@
 - 重建方式：`git init` → 全量快照一次 commit。**不伪造多段历史**——分段伪造会让 hash、作者时间、diff 都与事实不符，不如一次说清。
 - 事故前工作区状态（可参考 `_to-delete-ytvdlt/` 内打包产物与 `reports/` 证据）已并入当前快照。
 - 若日后找到 `.git` 残留（回收站之外的备份、其他磁盘、远端），可用 `git fetch <backup> && git reset --soft <原hash>` 把真实历史接回来。
+
+## 四、可选分支 `history`：按文件时间戳重建的分段历史
+
+`main` 保留"一次全量快照"的诚实形态；另有一条 `history` 分支，把现有文件**按真实修改时间**归入 6 个开发阶段，
+逐段提交，使 `git log` 能反映实际推进节奏。生成脚本：`scripts/rebuild-history.mjs`（可重复运行、幂等从零重建）。
+
+**哪些是真的**
+
+- 每个文件的修改时间（`mtime`）——事故中文件被 `mv` 搬运，时间戳未变；
+- 阶段边界与里程碑含义——取自 `docs/M*-REPORT.md`、`docs/M5-HANDOFF-V4.md`、`docs/DECISIONS.md`；
+- 提交标题里 `D-61…D-81` 的编号——来自决策记录原文。
+
+**哪些不是真的**
+
+- **commit hash 全部是新算的**，与事故前无关；
+- 每段内部的 diff 是"该时间段的文件一次性出现"，**不是**当时的真实增量；
+- 作者/提交时间被设为阶段日期（`GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE`），仅用于排序与可读性。
+
+**怎么用**
+
+```bash
+git log --oneline history          # 查看重建时间线
+git push origin history:main       # 若想让仓库对外呈现分段历史
+git push origin master             # 若想保持"单一全量快照"的诚实形态（推荐对外说明后再选）
+```
+
+两条分支的文件内容**完全一致**（`git diff master history` 为空），差别只在提交粒度与时间。
+
