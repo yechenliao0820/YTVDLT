@@ -3,7 +3,7 @@
 Windows 桌面视频下载器。**双击即用，零外部依赖**：安装包自带 yt-dlp、Node.js 运行时与 FFmpeg（LGPL shared），不需要用户预装 Python / Node / FFmpeg。
 
 - 平台：Windows 10（1809+）/ Windows 11，x64
-- 版本：0.1.6
+- 版本：0.1.0（基准线：2026-11-07 重建仓库后首次发版）
 - 形态：NSIS 安装版 + 便携版（免安装）
 
 > **接手维护（人或 AI）先看 [`docs/AI-MAINTENANCE.md`](docs/AI-MAINTENANCE.md)**：
