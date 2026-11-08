@@ -36,6 +36,7 @@
 9. **默认只打安装版**（`--win nsis`）。便携版与更新清单属点名项，业主说「打包」才跑；不要主动打包（一次约 5 分钟）。
 10. **改了本手册或 `BUILD-HISTORY.md` 要同步外层阅读副本**：业主在 `C:/Users/leolee/Desktop/YTVDLT/docs/` 放了副本，两边不一致会让人拿着旧规则干活。
 11. **版本号按 §7 的十进制进位规则取**，任一段都不写两位数；发版前查 `CHANGELOG.md` 确认下一版号。
+12. **维护完成后不要主动推送仓库或发布 Release**。等业主明确说「上传仓库」/「发布 release」再执行；执行后把仓库地址、分支、提交号与上传方法一起交给业主或下一位接手者（见 §11）。推送和发布是对外动作，不是收尾的自动步骤。
 
 ### 0.1 删除文件的规定（一次真实事故换来，不可协商）
 
@@ -318,6 +319,24 @@ node scripts/check-layering.mjs                     # 有没有偷偷 import nod
 
 **冷启动**：跑 §1 三条自证 → 读 §4 分诊表 → 读 §3 找到被指派功能的文件 →
 跑 `handoff-check.mjs` → 需要真机时按 §7 第 6 步打包。不要通读全仓，也不要通读历史报告。
+
+### 代码仓库与上传
+
+- 公开仓库：`https://github.com/yechenliao0820/YTVDLT.git`；默认分支 `main`；remote 名 `origin`。
+- **不要主动推送**（铁律 12）。维护做完先本地交付并等指令；业主说「上传仓库」后再执行。
+- 上传方法：
+
+  ```bash
+  git remote -v                                  # 先确认 origin 指向上面的地址
+  git status --short                             # 看清楚本次要提交什么
+  git add -A && git commit -m "<改动摘要>"
+  git push origin main                           # 首次需 GitHub 授权，之后凭据由 Git Credential Manager 缓存
+  ```
+
+- 推送前体检：确认没有大文件（单文件 > 50 MB 会被拒）、密钥 / token 误入、以及
+  `.gitignore` 是否仍覆盖 `node_modules/`、`dist-*`、`_to-delete/`、随包 exe、`reports/`。
+- 上传后把**仓库地址、分支、本次提交号**写进回复交给业主／下一位；
+  发布二进制 Release 同样等业主明确指令，产物在 `dist-<version>/`。
 
 ---
 
