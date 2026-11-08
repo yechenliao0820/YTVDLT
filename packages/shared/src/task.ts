@@ -27,6 +27,16 @@ export interface TaskRecord {
   artifacts: string[];
   /** Last progress percent; preserved across cancel/failure/restart. */
   lastPercent: number | null;
+  /**
+   * 0.2.1 (D-95): the last observed transfer numbers, so the queue card can
+   * show "12.3 MB / 48.0 MB · 4.2 MB/s · 剩余 1:32" instead of a bare percent.
+   * All optional: an old `tasks.json` simply has none of them, and `null`
+   * always means "unknown", never zero.
+   */
+  lastDownloadedBytes?: number | null;
+  lastTotalBytes?: number | null;
+  lastSpeedBps?: number | null;
+  lastEtaSec?: number | null;
   error: AppError | null;
   /** When true, completion does NOT write history. */
   privateMode: boolean;

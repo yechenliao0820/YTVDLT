@@ -1,6 +1,6 @@
 export { ConfigStore, type ConfigStoreDeps } from './config-store.js';
 export {
-  CONFIG_SCHEMA_VERSION, CONFIG_DOMAIN_NAMES, DEFAULT_DOMAINS,
+  CONFIG_SCHEMA_VERSION, CONFIG_DOMAIN_NAMES, DEFAULT_DOMAINS, DEFAULT_PATH_TOKENS,
   createDefaultConfig, isValidConfigFile, type ConfigFile,
 } from './defaults.js';
 export {

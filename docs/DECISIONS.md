@@ -1067,3 +1067,103 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 决策 | 只重建受影响的 **9 张**：`queue-ready / queue-empty / queue-error / queue-en / queue-dark / queue-audio / queue-prefill` 与 `settings-appearance / settings-en-dark`。重建前确认所有 case `dom=true`（结构断言未破）且其余 22 张 PASS、反例 5/5 PASS；重建后全量 31/31 + 反例 5/5 复验。测试数 789 → **792**（+1 权限契约、+2 菜单）。版本号按手册升到 0.1.10，打包后两个 `package.json` 还原 `0.1.0`。 |
 | 验证 | `pnpm typecheck` 5/5；`npm test` 792/792；`run-e2e.mjs --negative-checks` 31/31 + 5/5；`handoff-check.mjs` 对账通过。 |
 | 未覆盖 | ① 未在 VM 的 `C:\Program Files` 安装上做在线下载复测（D-89 同批）；② 关于弹窗的菜单触发只在打包产物 CDP 层验证，未做真实鼠标点菜单（Electron 原生菜单不在 CDP 可点范围）。 |
+
+## D-93 · 2026-11-08 · 应用本体更新改走 GitHub Releases（0.2.1）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主） | 「软件本体既没有在设置里提供检查更新选项，也没有自动检查更新」；期望：新版本发布时弹窗提示 + 显示 Release 里的更新说明，可选「以后不再显示」，能一键下载安装并校验；做不到就跳发布页。 |
+| 根因 | ① `electron-builder.yml` 的 `publish` 是 `https://updates.ytvdlt.invalid/stable`（保留占位域名），而 `AppUpdateCoordinator` 在 feed 为空/非 http 时直接返回 `degraded`，所以**从来没有任何一次真实的更新检查**；② 即使填了地址也走不通：`electron-updater` 的 generic 通道要 `latest.yml` + `.blockmap`，而 GitHub Releases 上只有 `YTVDLT-Setup-0.1.10.exe` 一个资产（实测 `releases/latest` 只有一个 asset），没有清单；③ 设置页把「检查应用更新」按钮硬写成 `disabled`，连假入口都没留。 |
+| 决策 | ① 新增 `shared/app-update.ts`（纯类型）+ `core/app-update/`（版本比较、Release 解析、安装包挑选、Markdown 压平、弹窗抑制规则），全部 L0 可测；`0.1.10` 这个历史例外的排序由「逐段数值比较」自然满足（0.1.10 > 0.1.9 且 < 0.2.0）。② 新增 `main/github-releases.ts` 读 `/repos/:owner/:repo/releases/latest`；新增 `main/app-update-service.ts` 状态机（idle→checking→available→downloading→ready/error）。③ 下载走 `adapters/http-download.ts`：流式写 `<file>.part`，逐块回报字节数，**先校验再改名**；校验三项——大小、GitHub `digest` 的 SHA-256（有则比）、`MZ` 头；任一不过就改名 `.rejected` 保留证据，绝不删除。安装包地址强制 `https://*.github.com|*.githubusercontent.com`（JSON 里来的 URL 不能当可信输入）。④ 安装用 `shell.openPath` 起 NSIS，800 ms 后 `app.quit()`；不静默安装、不改注册表。⑤ 弹窗底部是复选框「以后不再提示此版本」+ 三个按钮（前往发布页 / 稍后 / 下载并安装）：勾选后点「稍后」或点遮罩关闭才写 `advanced.skippedAppVersion`；不勾选则只写 renderer 的 `sessionStorage`，不污染配置。⑥ 自动检查默认开、6 小时节流（`advanced.autoCheckAppUpdate` + `lastAppUpdateCheckAt`）。⑦ 新增 `updates/update-dialog.js`（队列页与设置页共用，`about.js` 同款注入式弹窗），更新说明只用 `textContent` 渲染——远端 JSON 不进 innerHTML；`hidden` 属性与 `style.display` 双写，避免宿主页没有 `[hidden="true"]` 规则时内联 `display:flex` 压过 UA 默认（这正是初版进度条在预览里露出来的原因）。通道按 append-only 增 `APP_UPDATE_STATUS` / `APP_UPDATE_ACTION`。`app-updater.ts`（electron-updater 路径）保留但不接线，理由写在该文件与 `electron-entry.ts` 末尾。 |
+| 验证 | 新增 `tests/unit/app-update.test.ts`（17 例：版本比较、draft/prerelease 拒绝、资产挑选、notes 压平与截断、弹窗抑制）+ `tests/unit/app-update-service.test.ts`（12 例：可用/已最新/网络失败、安装前拒绝、非 GitHub 域名拒绝、skip 持久化、open-page 门禁）。`npm test` 792 → **821** 全过；`pnpm typecheck` 5/5；e2e 31/31 + 反例 5/5。真实网络抽验：`releases/latest` 解出 `0.1.10` / `YTVDLT-Setup-0.1.10.exe` / 226,356,479 B / 说明 956 字；`downloadToFile` 对 `SHA2-256SUMS` 实测流式写入 + 哈希（1595 B）。另用 dev 版 Electron 真机启动一次：`advanced.lastAppUpdateCheckAt` 与 `lastEngineUpdateCheckAt` 双双落盘（相差 2.5 s），证明两条启动检查真的跑到了网络，而不是空转。 |
+| 未覆盖 | ① **没有在真机上把「下载 226 MB → 校验 → 启动安装 → 重启」这条链走完**（本轮按手册不主动打包）；② 便携版不在覆盖范围：只认 `Setup` 资产，`-portable` 会被打 0 分；③ 未配置 GitHub token，匿名 60 次/小时的限流对「一天最多 4 次自动检查」够用，但没有退避重试；④ 差量更新没做，每次都是整包。 |
+
+## D-94 · 2026-11-08 · yt-dlp 独立更新面（0.2.1）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主） | 「YTDLP 的更新检查功能…类似插件框架，需要支持自动检测并安装更新」，且「检查 YTDLP 更新」与「检查软件本体更新」要分开，避免引擎过旧导致软件失效而责任不在本体。 |
+| 根因 | `ComponentUpdater` 只有一个全局 `baseUrl`（来自 `YTVDLT_COMPONENT_FEED` 或 `advanced.componentFeedUrl`，出厂都是空），所以 yt-dlp 更新按钮永远是灰的；`ComponentState` 只有「已装版本」，无法知道远端最新版；aria2c 与 yt-dlp 共用一个 feed，而 aria2 的资产目录里没有 `SHA2-256SUMS`。 |
+| 决策 | ① 每个组件自带 `feedUrl` / `versionApiUrl`：yt-dlp 指向官方 `https://github.com/yt-dlp/yt-dlp/releases/latest/download`（该目录确实同时有 `yt-dlp.exe` 与 `SHA2-256SUMS`，实测命中）；aria2c 保持 `null`，继续只跟运营镜像。② 新增 `COMPONENT_CHECK` 通道：只查版本不下载，返回 `installedVersion / latestVersion / updateAvailable`。③ 启动自动检查默认开、24 小时节流（`advanced.autoCheckEngineUpdate` + `lastEngineUpdateCheckAt`），只写日志不弹窗——引擎旧了去设置里点，不打断启动。④ 真正的替换仍然复用 `SelfUpdater`（`.new` → rename → 校验 → 失败回滚 `.bak`），没有新写一套覆盖逻辑。⑤ 设置页把「应用本体」和「yt-dlp 引擎」拆成上下两块，各有自己的开关与按钮；顺带删掉只写 fixture 通道、从不落盘的「更新通道 / 检查间隔」两个下拉——留着就是骗人。 |
+| 验证 | `COMPONENT_CHECK` 走既有 `ComponentUpdatePortLike`，`m5-channels` 白名单只收空 payload；实测 `releases/latest` 解出 yt-dlp 最新 `2026.10.26`，`SHA2-256SUMS` 中 `yt-dlp.exe` 行可解析（`f5389d36…`）。通道数 11 → 14 的两处断言同步更新。 |
+| 未覆盖 | ① 未在真机跑一次「yt-dlp.exe 换文件」（需要在线下载 ~20 MB 并重启任务）；② aria2c 仍无官方校验清单，只能靠自建镜像；③ 引擎更新期间只暂停队列 intake，不等待正在跑的任务结束——与 D-67 一致，未改。 |
+
+## D-95 · 2026-11-08 · 队列卡片显示总大小 / 速度 / 剩余时间（0.2.1）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主截图） | 卡片只有「20.0%」，没有下载速度、没有总大小，无法预估还要多久。 |
+| 根因 | 三层同时丢数据：① `TaskRecord` 只持久化 `lastPercent`，其余进度字段用完即弃；② `TASK_LIST` 的 `TaskListItemDto` 根本没有这些字段；③ `queue.js::toTask()` 把 `speed` 硬写成 `0`、`eta` 写成 `null`，所以即便 DTO 有值，渲染层也会丢掉。 |
+| 决策 | ① `ProgressEvent` 的 `downloadedBytes / totalBytes / speedBps / etaSec` 落到 `TaskRecord` 的四个**可选**字段（`null` 恒等于「未知」，不是 0；旧 `tasks.json` 不必迁移）。② `toTaskListItem` 原样透出，URL 仍然不出现。③ 渲染层组合行：`42.0% · 90.0 MB / 214 MB · 4.0 MB/s · 剩余 1:36`，三个片段各自独立出现/消失（大小未知、速度未知、ETA 未知是三种不同状态，单模板表达不了八种组合）。④ 数字用 `tabular-nums` 防跳动；`queue.js` 增加「可见内容签名」，轮询 1.2 s 但只有真的变了才重绘（否则封面 `<img>` 每秒重建会闪）。 |
+| 验证 | 单测默认配置不变；e2e `queue-*` 7 张基线按 case 重建后全量 31/31 + 反例 5/5；截图复核浅色/深色下进度行不换行、不截断，完成态显示 `100.0% · 304 MB / 304 MB`。 |
+| 未覆盖 | ① 后处理（合并 / 转码）阶段 yt-dlp 不报 `speed`，那一段仍只有百分比；② 多流（`bestvideo+bestaudio`）每次切换会从 0 重新计，百分比回跳是引擎行为，UI 未做跨流合并；③ 未做「剩余时间」的平滑（用引擎原值）。 |
+
+## D-96 · 2026-11-08 · 队列封面缩略图（0.2.1）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主） | 「图片每次都以首字母显示…能不能获取一下视频略缩图…下载视频封面或略缩图盖在上面」。 |
+| 根因 | `MediaInfo.thumbnail` 从 M1 起就被 `json-mapper` 解析出来了，但**没有任何代码读过它**；`queue.js` 直接渲染标题首字母。同时项目有硬规则：媒体 URL 不得离开主进程（签名链接不能进 DOM / 截图）。 |
+| 决策 | ① 新增 `main/thumbnail-cache.ts`：探测拿到 `mediaInfo.thumbnail` 后，主进程 `https` 拉取（10 s 超时、6 MiB 上限），按魔数识别 jpg/png/webp/gif，写到 `<dataDir>/thumbs/<sha1(url)>.<ext>`，同一 URL 天然去重；`TASK_LIST` 只回本地绝对路径 `thumbPath`。② 触发点：队列事件里首次 `progress`（探测已完成）与 `state-changed → Running`，另外启动时给最多 20 个已恢复任务补封面；同一 task 用 in-flight 表去重，1.2 s 轮询不会打爆网络。③ 渲染层 `<img>` 失败（缓存被删/编码不支持）自动回退首字母，不显示破图。④ 图片本地路径转 `file:///` 时只 `encodeURI`，保留盘符冒号。 |
+| 验证 | e2e 全部 case 无 `thumbPath` → 走字母分支，7 张基线重建后全绿；缓存目录不可写或网络失败只写一条 `warn` 日志，卡片行为不变（代码路径有 try/catch 兜底，未新增失败模态）。 |
+| 未覆盖 | ① **未用真实在线任务在真机看一张封面**（需要联网下载，本轮没有打包产物可跑）；② `http.getBytes` 是整块读取，6 MiB 上限是**读完之后**的判断，不能防恶意超大响应——域名来自提取器，风险低但没做流式截断；③ 缓存不清理（按 URL 哈希去重，长期会积累小文件）。 |
+
+## D-97 · 2026-11-08 · 桌面快捷方式图标：先证明打包没问题，再修缓存（0.2.1）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主） | 「上一个 AI 改桌面图标，他只改了安装包图标，桌面的还是那个原子核」。 |
+| 根因（实测，不是猜） | 直接比对字节：把 `apps/desktop/build/icon.ico` 中 256×256 那档的 DIB 载荷（跳过 40 字节头）拿到 `dist-0.1.10/win-unpacked/YTVDLT.exe` 与 `YTVDLT Setup 0.1.10.exe` 里搜索，**两处都命中**。也就是说 0.1.10 的应用 exe 与安装包都已内嵌品牌图标，`win.icon` 生效了。剩下的只能是 Windows 侧：快捷方式的图标由 shell 按「路径 + 时间戳」缓存，覆盖安装不重写 `.lnk` 时仍显示旧图（Electron 原子），这是升级路径的经典表现，不是打包配置错。 |
+| 决策 | ① 新增 `apps/desktop/build/installer.nsh`：`customInstall` / `customUnInstall` 里调 `shell32::SHChangeNotify(SHCNE_ASSOCCHANGED)`，强制 Explorer 重读图标缓存，不需要管理员、不会让安装失败；`electron-builder.yml` 加 `nsis.include` 指向它。② 加 `nsis.shortcutName: YTVDLT`，快捷方式名不再随 `productName` 漂移，排障时有确定的路径可查。③ `BrowserWindow` 显式传 `icon`（用既有的 tray 图标路径），顺手修掉开发态 `electron .` 显示原子图标的问题。④ 不去动 `files` glob（铁律 3），不改 `make-icon.mjs` 的四档输出（16/32/48/256 已足够，Windows 自行缩放）。 |
+| 验证 | 字节比对结论如上；`icon.ico` 头解析确认 4 档均是 32-bit BMP（非 PNG-in-ICO），Explorer 可直读；`nsis.include` 引用的宏名 `customInstall` / `customUnInstall` 是 electron-builder NSIS 模板的保留钩子；`pnpm typecheck` 5/5（`BrowserWindowOptionsLike` 新增可选 `icon`）。 |
+| 未覆盖 | ① **本轮不打包，所以「重装后桌面图标真的变了」没有实机证据**——需要下一次 `electron-builder --win nsis` + 覆盖安装才能确认；② 已经被缓存污染的机器，若 `SHChangeNotify` 仍不生效，需要手动 `ie4uinit.exe -show` 或删掉桌面快捷方式重装（已写入 BUILD.md 排障表）；③ 没有做 `nsis` 自定义安装页 / 卸载残留快捷方式的强制清理。 |
+
+## D-98 · 2026-11-08 · 下载位置可选（视频 / 音频分开），设置页唯一入口（0.2.1）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主） | 「下载的可以选择下载到哪个文件夹…应该写到设置里面还是哪里面？你自己去看一下」「要有个默认下载路径，否则到时候保存也会失败」。 |
+| 根因 | 路径能力从 M3 就在：`paths.videoDir` / `audioDir` + `withExpandedPaths` + `buildDownloadRequest` 一路打通，默认值是 `%USERPROFILE%/Downloads/YTVDLT`。**缺的只是一个写入点**——全仓没有任何 UI 能改这两个键，用户只能手改 `config.json`。 |
+| 决策 | ① **放设置页，不放队列页**：全局默认目录属于"设置"，队列页是这一批任务的操作台；放队列页等于给同一份 config 开第二个写入口，两处状态迟早不一致。② **视频 / 音频各一个字段**：音频早就独立走 `paths.audioDir`，合成"一个下载文件夹"会让既有音频任务在用户不知情时换目录。③ 新通道 `PATH_ACTION`（`pick` / `reset` / `open`），payload 只收 `{action, kind}`——**路径字符串永远不由渲染层提供**，只有主进程原生对话框选出来的路径才会写进配置，渲染层无法把任意目录写进 config。④ 选完先探可写（`mkdir` + 写一个探针文件再删），不可写直接拒绝保存并回显原因；存储值空白或非字符串时回落默认 token，避免空目录导致后续下载全部失败。⑤ 显示用**展开后的绝对路径**（`%USERPROFILE%` 的展开在主进程做），存储保留用户选的绝对路径或默认 token；「恢复默认」写回 token，换机器仍然跟着用户目录走。⑥ 三处都不碰 `packages/shared/src/request.ts`（D-50 冻结）。 |
+| 验证 | 新增 9 例单测：默认值展开、选目录后持久化并回显、音视频互不影响、取消对话框不改配置、不可写目录拒绝保存、恢复默认写回 token、`open` 走端口、非法 action/kind 被拒、无 picker 时明确报"不支持"而不是假装保存。真实环境核对：`expandEnvVars` 得到 `C:/Users/leolee/Downloads/YTVDLT`，空白值回落同一路径。`npm test` 821 → **830**；通道数 14 → 15（两处断言同步）；`settings-appearance` / `settings-en-dark` 两张基线按 case 重建后全量 31/31 + 反例 5/5。 |
+| 未覆盖 | ① 原生文件夹对话框本身没有自动化用例（要人手点），只在适配器层做了可写探测与失败回传；② 没有"本任务单独存到别处"（按任务覆盖目录），只有全局默认；③ 网络盘 / UNC 路径只做一次写探测，断连后不重试也不自动降级到默认目录。 |
+
+## D-99 · 2026-11-08 · 设置页分区侧边栏 + 滚动联动（0.2.2）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主） | 「设置页的内容太多，不是可以下滑吗？然后还有个侧边栏会显示当前滑到哪里了…主题有深色/明亮/跟随系统，下面有路径设置，旁边有侧边栏跟着滑动」「英文版的也应该有吧？不要等会我切换成英文了还是这个」。 |
+| 根因 | 设置页从 M5 起就是 `height:800px` 的**整页不滚动**两列网格（外观 ｜ 更新），没有分区导航；分区一多只能往下堆，用户既看不到页码也跳不过去。 |
+| 决策 | ① **结构**：`header` 固定 + `.settings-shell`（左目录 156px ｜ 右 `.settings-scroll`）。滚动发生在内层列而不是文档，目录才能一直留在视野里。② 目录 4 项与 `#section-*` 一一对应；点击 `scrollTo({behavior:'smooth'})`，`data-motion="reduced"` 时降级为瞬时。③ **scrollspy**：监听内层 `scroll`，以「列顶 + 28px」为探针线取最后一个越线的分区；滚到底时强制最后一项——**但只在确实溢出时**，否则短页面会在初始状态就把「关于」点亮（实测踩到过）。④ 滚动列底部必须留白 `padding-bottom: max(140px, 60vh)`：不留白的话最后两个分区永远滚不到探针线，点「关于」会停在高亮「下载位置」的地方。这是把数学算出来才发现的（`padding ≥ clientH − 末段高度`）。⑤ 首帧测量不可信：`wire()` 在解析期跑，此时 rect 还没稳定，用 `load` + `ResizeObserver` 复测。⑥ 布局从两列改**单列**（目录必须对应纵向分区），顺手把「开机自启」从「更新」挪回「主题与外观」，并修掉它那条孤立的说明文字（原来提示在 A 卡、开关在 B 卡）。⑦ 中英同源：新增 5 个 `settings.nav.*` 键走同一套字典，英文标签更长所以目录固定 156px 且允许换行。⑧ 悬停只改文字颜色，不填底色——深色主题下填色与「当前项」几乎分不出来。 |
+| 验证 | 真机 CDP + **真实鼠标事件**（`Input.dispatchMouseEvent`，不用合成事件）：依次点四个目录项，落位 `scrollTop` = 302 / 549 / 705 / 0，`data-active` 同步为 `section-updates / paths / about / appearance`；真实滚轮滚动时高亮跟随；暗色主题下排版复核。e2e 新增 3 条断言（`section-nav`、`nav-active`、`nav-en`），31/31 + 反例 5/5；`npm test` 830/830；`typecheck` 5/5。 |
+| 未覆盖 | ① 目前只有 4 个分区且内容不长，滚动范围主要来自底部留白；等真实内容变多后探针线仍按「列顶 + 28px」工作，但没在超长页面上验过；② 没有「回到顶部」按钮；③ 目录不支持折叠/二级分组；④ 没有做键盘焦点顺序的专门验证（链接本身可 Tab 到）。 |
+
+## D-100 · 2026-11-08 · README 中英双语 + 许可证英文前置（仓库呈现，0.2.2）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主） | 「GitHub 上给人看的那个 RE 什么…简介写的太潦草了，要丰富多样一点」「要做成中英文双语言…点一下就切换到英文文档」「许可证怎么开头是中文啊？下面虽然有英文完整的，但上面是中文，许可证也做成英文的形式比较好吧」。 |
+| 根因 | ① `README.md` 是唯一一份纯中文说明，且内容停在 0.1.0：写着「electron-updater + NSIS 静默更新」（0.2.1 已改成 GitHub Release 检查 + 用户确认安装）、「718 例测试」「30 张基线」，全部过期；② 没有截图、没有安装/更新/数据落点说明，国际读者拿不到可执行信息；③ `LICENSE` 是中英双语自定义许可，但中文在前、英文在后，按国际惯例第一屏应是英文。 |
+| 决策 | ① 拆成 **`README.md`（英文，默认门面）+ `README.zh-CN.md`（中文镜像）**，两份顶部各有语言切换行（当前语言加粗、另一种是链接），结构与章节一一对应，改一份必须改另一份。② README 按「它是什么 / 截图 / 功能 / 环境 / 安装 / 数据落点 / 从源码构建 / 目录与分层 / 文档索引 / 第三方组件 / 许可 / 免责」重写，并**纠正所有过期事实**（更新机制、测试数、基线数、版本号不再硬编码，版本交给 Release 徽章）。③ 新增 `docs/assets/` 四张实机截图（队列浅色/深色、设置、更新弹窗），全部来自 e2e 与真机渲染，不放示意图。④ `LICENSE` 重排为**英文在前、简体中文在后**，条款逐条对应、未增删；开头明确「两种文本同等有效，歧义时以简体中文为准」——保留原有的中文优先，**没有借排版之机改变法律效果**；末尾「说明」同时给英文与中文。⑤ 打包参数表从 `docs/BUILD.md` 摘了四个「不是装饰」的标志进 README，避免外部构建者踩同一个坑。 |
+| 验证 | 本地链接逐条核对：`README.md` 14 条、`README.zh-CN.md` 14 条、`LICENSE` 2 条，全部命中真实文件（脚本化检查，无失效链接）；截图 4 张均 `< 170 KB`，取自 `docs/assets/`。README 中不再出现硬编码版本号与过期测试数字；`docs/BUILD.md`/`AI-MAINTENANCE.md` 的分层图、打包命令与 README 一致。`handoff-check` 对账通过。 |
+| 未覆盖 | ① 没有在 GitHub 网页上实际预览（本地无法渲染 GitHub 的 Markdown/HTML 表格），HTML 双列图片表在窄屏下的换行表现未验证；② 徽章依赖 shields.io，离线或墙内可能不显示（不影响正文）；③ 仓库 About 简介、Topics、Social preview 属于 GitHub 设置项，不在文件里，需要业主在网页上填。 |
+
+## D-101 · 2026-11-08 · 重复下载应再存一份（(1)/(2)），而不是报 ALREADY_DOWNLOADED（0.2.2）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主 VM 实测，0.2.1） | 同一视频下第二次，任务直接 `State: Error` / `Code: ALREADY_DOWNLOADED` / `Message: 该产物已在历史记录中`，但 `Progress: 100%`、`Artifacts: 1`。业主原话：「这不能直接报错吧…都下载了那你不保存吗？再保存一次，后面改为一」「千错万错都是我们的错，不能让用户觉得是自己的问题」。 |
+| 根因（实测，不是推测） | 用随包 yt-dlp 复现三次：① 首次 → `Destination: Test [mov_bbb].mp4`；② 同模板再来一次 → `Test [mov_bbb].mp4 has already been downloaded` 且**退出码 0**（yt-dlp 默认不覆盖）；③ 换成 ` (1)` 模板 → 真的又下一份 `Test [mov_bbb] (1).mp4`。于是链路是：yt-dlp 跳过 → 应用拿到**旧文件**路径 → 12 项校验全过（文件确实完整）→ `history.add()` 按 `videoPath` 去重命中 → 任务被判 Error。**校验没做错，错在把「已存在」当成了失败**。 |
+| 决策 | ① **下载前改名**：`TaskQueue.withCopySuffix()` 在 `Running` 之前读输出目录，按 `[<id>]` 找到该媒体的文件家族，取最高编号 +1，把 ` (n)` 插到模板 `.%(ext)s` 之前（`%(title).200B [%(id)s].%(ext)s` → `… [%(id)s] (1).%(ext)s`）；纯函数在 `core/src/path-resolver/copy-suffix.ts`，fs 仍然走 port。② **只做有把握的改名**：模板没有 `%(id)s`、目录读不到、模板没有 `%(ext)s` 时一律不动名字——宁可退回旧行为，也不猜文件名。③ **历史重复不再判失败**：产物已通过全部校验且文件在盘上，直接 `Completed`；否则等于告诉用户「下载失败」，而文件就在眼前。④ 编号语义：从 `(1)` 起，已有最大编号 +1；字幕 / 封面与主文件同族一起换名（同一 stem + 自己的扩展名）。⑤ 不动 `--overwrites`，也不动 argv 冻结位置：覆盖会毁掉用户已有的文件，另存一份才是他要的。 |
+| 验证 | 真机 yt-dlp 三次对照见上（skip → ` (1)` 成功落盘，两个文件均 788,493 B）；再用**真实引擎**（`createEngine('ytdlp')` + 随包 yt-dlp）连跑三次：`mov_bbb_[mov_bbb].mp4` → `…_(1).mp4` → `…_(2).mp4`，三次都收到 `completed` 事件，证明「净化后的模板 + --restrict-filenames + 编号检测」三者串起来是对的。新增 16 例单测：`copy-suffix.test.ts` 12 例（无同名 / `(1)` / 递增 / 忽略别的 id / 字幕同族 / 年份不误判 / 插入位置 / 无 `%(ext)s` 返回 null）+ `task-queue.test.ts` 4 例（无同名列不加后缀、同名加 ` (1)`、已有 `(1)` 加 ` (2)`、历史重复判 Completed 且 `error === null`）。`npm test` 830 → **846**；`typecheck` 5/5；验收 10/10 gate、allGreen=true。 |
+| 未覆盖 | ① 打开 `subdirByExtractor` / `subdirByPlaylist` 时只扫顶层输出目录，子目录里的同名文件扫不到，会退回「判完成但不多存一份」；② 同一 URL 两个任务**并发**时可能算出同一个编号，第二个被 yt-dlp 跳过 → 判完成；③ 模板里没有 `%(id)s` 时不做唯一化（无法把文件归因到某个媒体）；④ 历史里那条重复记录不会新增，也就是说「第二份文件」不会出现在历史列表中——只出现在文件夹里。 |
+
+## D-102 · 2026-11-08 · 等待态线性不确定进度指示器（0.2.2）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主截图） | 卡片显示「解析中 / 排队中」时整块界面原地不动，大文件解析较久时用户会以为卡死或死机，进而想关掉软件。 |
+| 根因 | `queue.js::card()` 只有 `Running` / `Canceled` / `Error` 会渲染 `.bar` 进度条；`Idle` / `FetchingInfo` / `ReadyWithInfo` 落到 `else` 分支，只输出一行静态文字。这些状态本来就没有数值进度可报，界面也没有任何持续反馈通道。 |
+| 决策 | ① **把下载进度条搬过来**：等待态复用同一条 `.bar` 轨道（6px / `var(--line)` / 圆角 / `overflow:hidden`），位置与进行中卡片一致，只把填充条换成线性不确定指示器。② **形态**：短条宽 36% 轨道，`transform: translateX(-100% → 278%)`（278% = 1/0.36 − 1，短条左边缘正好从轨道左外走到右外），`1.7s linear infinite`，从左到右循环，不显示百分比。③ **渐变拖尾**：`linear-gradient(90deg, …)` 用 `color-mix(in srgb, var(--accent) 0% … 82% … 78%, transparent)` 铺色——左端（尾部）渐隐到全透明，右端（运动方向前端）最深但**不取纯 `--accent`**（业主要求「较深但不过深」），两端透明让循环接缝不可见；颜色走 `--accent`，自动适配 5 套强调色与深浅主题。④ **语义**：`role="progressbar"` 不写 `aria-valuenow`（标准的不确定态写法），新增中英同源键 `queue.card.waiting` 作无障碍标签；状态文案保留，不编造百分比。⑤ **稳定相位**：`animation-delay` 取任务 id 的固定哈希取模，而不是 `Date.now()`——同一任务重绘落在同一帧、多个等待任务不齐步走、截图基线不受真实时间影响。⑥ **减少动效**：`html[data-motion="reduced"]` 与 `prefers-reduced-motion` 下不跑动画，但保留一条静态拖尾（空轨道会被误读成「没在干活」）。⑦ **基线采集**：headless shell 在 `--virtual-time-budget` 下把 CSS 动画冻结在首帧（短条仍在轨道外），故 `run-e2e.mjs` 只对 `pages/queue/index.html` 追加 `&motion=reduced`，静态帧可见且逐帧确定；其它 24 张基线不动、断言不放宽。⑧ 版本号维持 `0.2.2`（业主指定），不改 `package.json` 版本、不改两份 README。 |
+| 验证 | `pnpm typecheck` 5/5；`npm test` 846/846。改 UI 后先全量跑 e2e：只有 7 个 `queue-*` case 失败且 `dom=true`，其余 24 张 0 像素差异；逐 case 重建 7 张基线后全量 **31/31 + 反例 5/5**，连跑两遍全绿（确定性）。CDP 在真实时间轴读 computed style：`animationName=ytv-wait-sweep`，550 ms 内 `transform` 由 209.19px → 418.30px（确实在动），短条宽 165.95px = 轨道 461px 的 36%，渐变首端 `color(srgb 0 0 0 / 0)`、右端 `color(srgb 0.113725 0.388235 0.721569 / …)`（左透明右深蓝）；reduced 下 `animationName=none` / `transform=none` / `segLeft=barLeft`。放大截图复核浅色（blue）与深色（violet）：拖尾方向一致、等待卡片无百分比数字。 |
+| 未覆盖 | ① `render()` 是全量重建，队列里同时有 `Running` 任务时 1.2 s 轮询可能重绘整个列表，等待态短条会回到自己的固定相位而不是连续推进；只有等待任务时 `paintKey` 不变、动画连续。② 未用真实大文件解析在真机录屏验证动画观感，本轮证据是 CDP 计算样式 + 静态截图 + 打包产物。③ 短条宽度与周期固定（36% / 1.7 s），不随轨道长度自适应，全屏宽卡片下节奏略慢。④ 等待态没有「预计剩余时间 / 解析日志」入口，引擎此时不报数值。⑤ `role="progressbar"` 的实际屏幕阅读器播报未做实测。 |

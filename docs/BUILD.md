@@ -114,12 +114,16 @@ CSC_IDENTITY_AUTO_DISCOVERY=false \
 | `-c.extraMetadata.main=apps/desktop/dist/main/main.cjs` | 根 `package.json` 没有 `main` 字段（它同时是 workspace 根），打包后启动会找不到入口 |
 | `-c.electronDist=node_modules/electron/dist`（**可选但推荐**） | 直接用已解压的 Electron，跳过每次重新下载 zip。npmmirror 的 CDN 偶发 `502 Bad Gateway`，加上这个参数后打包完全不受网络抖动影响 |
 
-产物（`dist/`）：
+产物（`dist-<version>/`）：
+
+> 交付目录按版本留档，别覆盖上一版：命令里加一句
+> `--config.directories.output=dist-0.2.1`（0.2.1 起使用；不写就是 `dist/`）。
 
 | 文件 | 体积（实测） |
 |---|---|
-| `YTVDLT Setup 0.1.0.exe` | 214.1 MB（NSIS 安装版） |
-| `YTVDLT-Portable-0.1.0.exe` | 190.9 MB（便携版） |
+| `YTVDLT Setup 0.2.1.exe` | 215.8 MiB（NSIS 安装版，0.2.1 实测 226,274,545 B） |
+| `YTVDLT Setup <ver>.exe.blockmap` | ~232 KiB（差分清单） |
+| `latest.yml` | ~341 B（electron-updater 清单；本仓库不发布，但留在产物里备查） |
 | `win-unpacked/` | 636 MB（免安装目录，可直接跑） |
 
 ## 5. 自检
@@ -152,4 +156,5 @@ for m in M1 M2 M3 M4 M5; do node scripts/acceptance.mjs --milestone $m; done
 | `YTVDLT.exe: bad option: --remote-debugging-port=9222`（0.1.9 实测） | 当前 shell 继承了 WorkBuddy 的 `ELECTRON_RUN_AS_NODE=1`，Electron 被当成 Node 启动，把调试参数当 Node 参数解析 | 启动时清掉继承变量：`env -u ELECTRON_RUN_AS_NODE -u NODE_OPTIONS -u NODE_EXTRA_CA_CERTS ./YTVDLT.exe --remote-debugging-port=9222` |
 | 改了 `packages/ui/**` 后 e2e 全红 | 队列页 DOM/像素基线是冻结快照，改 UI 必然不匹配 | **不要改结论也不要全量覆盖基线**：先 `node scripts/run-e2e.mjs --negative-checks` 确认只有预期 case 失败且 `dom=true`（结构断言没破），再对每个受影响 case 跑 `node scripts/run-e2e.mjs --case=<id> --update-baselines`，最后全量 31/31 + 反例 5/5 复验（0.1.9 重建 7 张，0.1.10 重建 9 张含 `settings-*`） |
 | 装到 `C:\Program Files` 后下载报 `PERMISSION_DENIED`，stderr 有 `C:\Program Files\YTVDLT\tmpXXXX.tmp`（0.1.10 实测） | yt-dlp 子进程继承了安装目录作 CWD，且没有显式 `TEMP`；`Program Files` 对普通用户只读。**不是**用户没用管理员运行 | 所有子进程 spawn 走 `yt-dlp-engine.ts::spawnBase()`，把 `cwd` 与 `TEMP/TMP/TMPDIR` 钉到可写输出目录；不要建议「以管理员身份运行」绕过（D-89） |
-| 桌面快捷方式 / 任务栏还是 Electron 默认「原子」图标 | 只依赖 `buildResources/icon.ico` 的隐式查找不够稳 | 先 `node scripts/make-icon.mjs`，再确认 `electron-builder.yml` 里 `win.icon` / `nsis.installerIcon` / `nsis.uninstallerIcon` 都指向 `apps/desktop/build/icon.ico`；**重新打包**后旧快捷方式才会刷新（D-90） |
+| 桌面快捷方式 / 任务栏还是 Electron 默认「原子」图标 | 覆盖安装时 Windows 按「路径 + 时间戳」缓存 `.lnk` 图标，即使新 exe 已内嵌品牌图标也仍显示旧的 | **先证明打包没坏**：把 `apps/desktop/build/icon.ico` 里 256 档的 DIB 载荷（跳过 40 字节头）在 `dist-<ver>/win-unpacked/YTVDLT.exe` 里搜一遍，命中即 `win.icon` 已生效。然后确认 `electron-builder.yml` 的 `nsis.include` 指向 `apps/desktop/build/installer.nsh`（安装结束时 `SHChangeNotify` 刷缓存）。仍不生效就 `ie4uinit.exe -show`，或删掉桌面快捷方式重装（D-97） |
+| 打包时报 `Invalid command: !insertmacro` / `installer.nsh` 相关 | `nsis.include` 路径写错，或宏名不是 electron-builder 的保留钩子 | 只允许 `customHeader` / `preInit` / `customInit` / `customInstall` / `customUnInstall` / `customRemoveFiles` 这组名字；`installer.nsh` 里我们的宏叫 `ytvdltRefreshShellIcons`，由 `customInstall` 插入 |

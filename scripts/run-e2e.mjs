@@ -281,7 +281,13 @@ async function main() {
   for (const testCase of cases) {
     const caseStart = performance.now();
     const htmlPath = testCase.page ? pagePath(ROOT, testCase.page) : dialogPath(ROOT, testCase.dialog);
-    const url = fileUrl(htmlPath, testCase.query);
+    // 0.2.2 (D-102): headless shell with --virtual-time-budget freezes CSS
+    // animations on the first frame, where the waiting segment is still off
+    // track (translateX(-100%)). Capture the queue page in reduced-motion
+    // instead: the gradient segment is visible, static and frame-deterministic.
+    // Real users still get the looping animation. Only this page is affected.
+    const queuePage = testCase.page === 'pages/queue/index.html';
+    const url = fileUrl(htmlPath, queuePage ? `${testCase.query}&motion=reduced` : testCase.query);
     const tempPng = join(TMP, `${testCase.id}.png`);
     const names = baselineNames(testCase.id);
     const baselinePng = join(BASELINES, names.png);

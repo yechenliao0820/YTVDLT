@@ -24,32 +24,38 @@
     {
       id: 't-run-1', state: 'Running', title: 'Sprite Fright — Blender Open Movie',
       uploader: 'Blender Studio', duration: 624, percent: 42,
-      speed: 4_200_000, eta: 96, kind: 'video', artifacts: 0, errorCode: null
+      speed: 4_200_000, eta: 96, kind: 'video', artifacts: 0, errorCode: null,
+      downloadedBytes: 94_371_840, totalBytes: 224_694_080, thumbPath: null
     },
     {
       id: 't-fetch-2', state: 'FetchingInfo', title: 'Big Buck Bunny — 4K remaster',
       uploader: 'Peach Open Movie', duration: 596, percent: 0,
-      speed: 0, eta: null, kind: 'video', artifacts: 0, errorCode: null
+      speed: 0, eta: null, kind: 'video', artifacts: 0, errorCode: null,
+      downloadedBytes: null, totalBytes: null, thumbPath: null
     },
     {
       id: 't-ready-3', state: 'ReadyWithInfo', title: 'Sintel — 1080p',
       uploader: 'Durian Open Movie', duration: 888, percent: 0,
-      speed: 0, eta: null, kind: 'video', artifacts: 0, errorCode: null
+      speed: 0, eta: null, kind: 'video', artifacts: 0, errorCode: null,
+      downloadedBytes: null, totalBytes: null, thumbPath: null
     },
     {
       id: 't-done-4', state: 'Completed', title: 'Tears of Steel — 720p',
       uploader: 'Mango Open Movie', duration: 734, percent: 100,
-      speed: 0, eta: 0, kind: 'video', artifacts: 2, errorCode: null
+      speed: 0, eta: 0, kind: 'video', artifacts: 2, errorCode: null,
+      downloadedBytes: 318_767_104, totalBytes: 318_767_104, thumbPath: null
     },
     {
       id: 't-cancel-5', state: 'Canceled', title: 'Cosmos Laundromat — pilot',
       uploader: 'Gooseberry', duration: 731, percent: 37,
-      speed: 0, eta: null, kind: 'video', artifacts: 0, errorCode: null
+      speed: 0, eta: null, kind: 'video', artifacts: 0, errorCode: null,
+      downloadedBytes: 61_865_984, totalBytes: 167_205_376, thumbPath: null
     },
     {
       id: 't-error-6', state: 'Error', title: 'Live concert — private stream',
       uploader: 'unknown', duration: null, percent: 12,
-      speed: 0, eta: null, kind: 'audio', artifacts: 0, errorCode: 'HTTP_403'
+      speed: 0, eta: null, kind: 'audio', artifacts: 0, errorCode: 'HTTP_403',
+      downloadedBytes: null, totalBytes: null, thumbPath: null
     }
   ];
 
@@ -192,18 +198,42 @@
       uploader: item.uploader || '—',
       duration: typeof item.duration === 'number' ? item.duration : null,
       percent: typeof item.percent === 'number' ? item.percent : 0,
-      speed: 0, eta: null,
+      // 0.2.1 (D-95): these four are what makes the card useful while it runs.
+      speed: typeof item.speedBps === 'number' ? item.speedBps : 0,
+      eta: typeof item.etaSec === 'number' ? item.etaSec : null,
+      downloadedBytes: typeof item.downloadedBytes === 'number' ? item.downloadedBytes : null,
+      totalBytes: typeof item.totalBytes === 'number' ? item.totalBytes : null,
+      // 0.2.1 (D-96): a local, already-cached cover path — never a remote URL.
+      thumbPath: typeof item.thumbPath === 'string' && item.thumbPath !== '' ? item.thumbPath : null,
       artifacts: typeof item.artifactCount === 'number' ? item.artifactCount : 0,
       errorCode: item.errorCode || null
     };
+  }
+
+  /** 0.2.1 (D-96): a full re-render replaces every `<img>`; polling every 1.2 s
+   *  would make the covers flicker. The queue is only repainted when something
+   *  the user can see actually changed. */
+  var lastPaint = '';
+
+  function paintKey(list) {
+    var rows = list.map(function (task) {
+      return [
+        task.id, task.state, task.percent, task.downloadedBytes,
+        task.totalBytes, task.speed, task.eta, task.thumbPath
+      ].join(',');
+    }).join('~');
+    return [model.tab, model.query, model.sort, list.length, rows].join('#');
   }
 
   function refresh() {
     if (!live.active) { render(); return; }
     call('TASK_LIST', { tab: 'all' }).then(function (result) {
       if (!result || result.ok === false) { live.error = true; render(); return; }
+      var wasError = live.error;
       live.error = false;
       live.tasks = (Array.isArray(result.items) ? result.items : []).map(toTask);
+      // Recovering from an error must always repaint, even if the data matches.
+      if (!wasError && paintKey(live.tasks) === lastPaint) return;
       render();
     });
   }
@@ -406,6 +436,104 @@
     };
   }
 
+  // ---- 0.2.1 (D-95): 进度行的构成 ---------------------------------------
+  // Parts drop out independently: size unknown, speed unknown and ETA unknown
+  // are three different states, and a single template cannot express all eight
+  // combinations without turning into a wall of `{placeholder}`s.
+  function fmtBytes(value) {
+    var s = shell();
+    return s !== null && typeof s.formatBytes === 'function' ? s.formatBytes(value) : String(value);
+  }
+  function fmtSpeed(value) {
+    var s = shell();
+    return s !== null && typeof s.formatSpeed === 'function' ? s.formatSpeed(value) : String(value) + ' B/s';
+  }
+  function fmtEta(value) {
+    var s = shell();
+    return s !== null && typeof s.formatEta === 'function' ? s.formatEta(value) : String(value);
+  }
+  function percentLabel(value) {
+    var number = Number(value);
+    if (!isFinite(number)) return '0.0%';
+    return (Math.round(number * 10) / 10).toFixed(1) + '%';
+  }
+  function progressText(task) {
+    var parts = [percentLabel(task.percent)];
+    var done = task.downloadedBytes;
+    var total = task.totalBytes;
+    if (typeof done === 'number' && done > 0) {
+      if (typeof total === 'number' && total > 0) {
+        parts.push(t('queue.card.size', { done: fmtBytes(done), total: fmtBytes(total) }));
+      } else {
+        parts.push(fmtBytes(done));
+      }
+    }
+    if (task.state === 'Running' && typeof task.speed === 'number' && task.speed > 0) {
+      parts.push(fmtSpeed(task.speed));
+      if (typeof task.eta === 'number' && task.eta >= 0) {
+        parts.push(t('queue.card.eta', { eta: fmtEta(task.eta) }));
+      }
+    }
+    return parts.join(' · ');
+  }
+
+  // ---- 0.2.1 (D-96): 封面图 -------------------------------------------------
+  /** `C:\a b\c.jpg` → `file:///C:/a%20b/c.jpg` (encodeURI keeps the drive colon). */
+  function toFileUrl(path) {
+    var normalized = String(path).replace(/\\/g, '/').replace(/^\/+/, '');
+    return encodeURI('file:///' + normalized);
+  }
+
+  function thumbNode(task) {
+    var node = el('div', 'thumb');
+    var letter = String(task.title || '?').slice(0, 1).toUpperCase();
+    var path = task.thumbPath;
+    if (typeof path !== 'string' || path === '') {
+      node.setAttribute('data-thumb', 'letter');
+      node.textContent = letter;
+      return node;
+    }
+    var image = doc.createElement('img');
+    image.className = 'thumb-img';
+    image.alt = '';
+    image.setAttribute('draggable', 'false');
+    image.setAttribute('loading', 'lazy');
+    image.src = toFileUrl(path);
+    node.setAttribute('data-thumb', 'image');
+    // A deleted cache file or an unsupported codec must degrade to the badge,
+    // not leave a broken-image glyph in the middle of the card.
+    image.addEventListener('error', function () {
+      if (image.parentNode === node) node.removeChild(image);
+      node.setAttribute('data-thumb', 'letter');
+      node.textContent = letter;
+    });
+    node.appendChild(image);
+    return node;
+  }
+
+  // ---- 0.2.2 (D-102): 等待态的线性不确定进度指示器 -----------------------
+  /** 稳定相位：按任务 id 取模，而不是 Date.now()。同一任务每次重绘都落在
+   *  动画的同一帧（全量重绘不会把短条甩回起点），多个等待任务不会齐步走，
+   *  截图基线也不受真实时间影响。 */
+  function waitPhase(id) {
+    var hash = 0;
+    for (var i = 0; i < id.length; i += 1) hash = (hash * 31 + id.charCodeAt(i)) % 1700;
+    return hash;
+  }
+
+  /** 轨道与进行中卡片共用 `.bar`，只把填充条换成 CSS 动画短条。
+   *  故意不写 `aria-valuenow` / 百分比：这些状态还没有可报的数值进度。 */
+  function waitBar(task) {
+    var bar = el('div', 'bar');
+    bar.setAttribute('data-mode', 'indeterminate');
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-label', t('queue.card.waiting'));
+    var segment = el('i');
+    segment.style.animationDelay = '-' + waitPhase(String(task.id)) + 'ms';
+    bar.appendChild(segment);
+    return bar;
+  }
+
   function card(task) {
     var node = el('article', 'card');
     node.setAttribute('data-task-id', task.id);
@@ -427,7 +555,7 @@
     });
     node.appendChild(check);
 
-    node.appendChild(el('div', 'thumb', String(task.title || '?').slice(0, 1).toUpperCase()));
+    node.appendChild(thumbNode(task));
 
     var main = el('div', 'card-main');
     var title = el('div', 'card-title', task.title);
@@ -451,22 +579,22 @@
       bar.appendChild(fill);
       bar.setAttribute('data-percent', String(task.percent));
       main.appendChild(bar);
-      var progress = el('div', 'card-meta');
+      var progress = el('div', 'card-meta card-progress');
       progress.setAttribute('data-progress', String(task.percent));
-      progress.textContent = task.state === 'Running' && task.speed > 0
-        ? t('queue.card.progress', {
-          percent: task.percent,
-          speed: shell() ? shell().formatSpeed(task.speed) : String(task.speed),
-          eta: shell() ? shell().formatEta(task.eta) : String(task.eta)
-        })
-        : t('queue.card.progress.plain', { percent: task.percent });
+      progress.textContent = progressText(task);
       main.appendChild(progress);
     } else if (task.state === 'Completed') {
-      main.appendChild(el('div', 'card-meta', t('queue.card.progress.plain', { percent: 100 })));
-    } else if (task.state === 'ReadyWithInfo') {
-      main.appendChild(el('div', 'card-meta', t('queue.card.ready')));
+      var done = el('div', 'card-meta card-progress');
+      done.setAttribute('data-progress', '100');
+      done.textContent = progressText({ percent: 100, downloadedBytes: task.downloadedBytes, totalBytes: task.totalBytes, state: 'Completed', speed: 0, eta: null });
+      main.appendChild(done);
     } else {
-      main.appendChild(el('div', 'card-meta', t('queue.card.queued')));
+      // 0.2.2 (D-102): 下载尚未开始（Idle / FetchingInfo / ReadyWithInfo / Queued）。
+      // 复用下载进度条的轨道，换成循环短条：大文件解析较久时也有可见反馈，
+      // 不会被当成卡死；状态文案保留，但不编造百分比。
+      main.appendChild(waitBar(task));
+      var hint = task.state === 'ReadyWithInfo' ? t('queue.card.ready') : t('queue.card.queued');
+      main.appendChild(el('div', 'card-meta', hint));
     }
 
     var foot = el('div', 'card-foot');
@@ -617,6 +745,7 @@
     var footCount = doc.getElementById('queue-foot-count');
     if (footCount !== null) footCount.textContent = visible.length + ' / ' + list.length;
     refreshToolbar();
+    lastPaint = paintKey(list);
     return { list: list, visible: visible, counts: perTab };
   }
 

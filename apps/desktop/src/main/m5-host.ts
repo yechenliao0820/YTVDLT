@@ -15,8 +15,9 @@ import type { TaskDetailAction } from '@ytvdlt/core';
 import { createM4Host, type M4Host, type M4HostOptions } from './m4-host.js';
 import {
   createM5Handlers, M5_CHANNELS,
-  type AppearanceDto, type ComponentUpdatePortLike,
-  type SystemAppearancePort, type TaskDetailPort, type TaskListPort, type TrashFilesPort,
+  type AppUpdatePortLike, type AppearanceDto, type ComponentUpdatePortLike,
+  type PathPickerPort, type SystemAppearancePort, type TaskDetailPort, type TaskListPort,
+  type ThumbnailPort, type TrashFilesPort,
 } from './m5-channels.js';
 import type { IpcGateway, IpcHandler } from './ipc-gateway.js';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
@@ -32,6 +33,14 @@ export interface M5HostOptions extends M4HostOptions {
   readonly dataDirReason?: string;
   /** D-67: component (yt-dlp / aria2c) updater; absent = button disabled. */
   readonly componentUpdate?: ComponentUpdatePortLike;
+  /** D-93: app updater (GitHub Releases); absent = "此构建不含更新器". */
+  readonly appUpdate?: AppUpdatePortLike;
+  /** D-96: cached cover images; absent = letter badges. */
+  readonly thumbnails?: ThumbnailPort;
+  /** D-98: `%VAR%` expansion for the download roots. */
+  readonly expandPath?: (raw: string) => string;
+  /** D-98: native folder picker; absent = path rows stay read-only. */
+  readonly pathPicker?: PathPickerPort;
   /** D-87: recycle-bin adapter for "also delete local files". */
   readonly trashFiles?: TrashFilesPort;
 }
@@ -110,6 +119,10 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     systemAppearance: options.systemAppearance,
     ...(options.onAppearanceChanged === undefined ? {} : { onAppearanceChanged: options.onAppearanceChanged }),
     ...(options.componentUpdate === undefined ? {} : { componentUpdate: options.componentUpdate }),
+    ...(options.appUpdate === undefined ? {} : { appUpdate: options.appUpdate }),
+    ...(options.thumbnails === undefined ? {} : { thumbnails: options.thumbnails }),
+    ...(options.expandPath === undefined ? {} : { expandPath: options.expandPath }),
+    ...(options.pathPicker === undefined ? {} : { pathPicker: options.pathPicker }),
     ...(options.trashFiles === undefined ? {} : { trashFiles: options.trashFiles }),
     enqueueSingle: (input) => m4.enqueueSingle(input),
   });

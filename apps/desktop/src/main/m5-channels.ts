@@ -14,9 +14,11 @@
  *   - no `electron` / `node:*` import — the services arrive injected.
  */
 import { IPC_CHANNELS } from '@ytvdlt/shared';
-import type { DownloadKind, FormatDomain, TaskRecord } from '@ytvdlt/shared';
+import type {
+  AppUpdateAction, AppUpdateActionResult, AppUpdateState, DownloadKind, FormatDomain, TaskRecord,
+} from '@ytvdlt/shared';
 import {
-  ACCENT_PRESETS, buildTaskListSnapshot, maskUrlSecrets,
+  ACCENT_PRESETS, DEFAULT_PATH_TOKENS, buildTaskListSnapshot, maskUrlSecrets,
   normalizeHexColor, normalizeThemeMode, normalizeMotionMode, parseAccent,
 } from '@ytvdlt/core';
 import type {
@@ -43,7 +45,26 @@ export interface SystemAppearancePort {
 /** D-67: the component-update surface, injected from the main process. */
 export interface ComponentUpdatePortLike {
   status(): Promise<unknown>;
+  /** 0.2.1 (D-94): network lookup of the latest published version. */
+  check(): Promise<unknown>;
   run(): Promise<unknown>;
+}
+
+/** 0.2.1 (D-93): the app-update surface, injected from the main process. */
+export interface AppUpdatePortLike {
+  state(): AppUpdateState;
+  perform(action: AppUpdateAction): Promise<AppUpdateActionResult>;
+}
+
+/**
+ * 0.2.1 (D-96): where the cached cover image for a task lives.
+ *
+ * The renderer never sees the remote thumbnail URL — only a local absolute
+ * path, and only when the bytes were actually cached. `null` means "draw the
+ * letter badge", which is also the offline / privacy-safe path.
+ */
+export interface ThumbnailPort {
+  pathOf(taskId: string): string | null;
 }
 
 /**
@@ -54,6 +75,31 @@ export interface ComponentUpdatePortLike {
  */
 export interface TrashFilesPort {
   trash(paths: readonly string[]): Promise<readonly string[]>;
+}
+
+/**
+ * 0.2.1 (D-98): the download root, user-selectable.
+ *
+ * `video` and `audio` are separate on purpose — the app already wrote audio to
+ * `paths.audioDir`, so one "download folder" would silently move half the user's
+ * files. The picker itself lives in the main process (native dialog + writability
+ * probe), which is why this port has no `electron` import.
+ */
+export type PathKind = 'video' | 'audio';
+
+export interface PathPickerPort {
+  /**
+   * Opens the native folder picker. `path: null` + `error: null` means the user
+   * cancelled; `error` non-null means the directory exists but is not writable.
+   */
+  pick(kind: PathKind, startAt: string): Promise<{ path: string | null; error: string | null }>;
+  open(path: string): Promise<void>;
+}
+
+export interface PathsDto {
+  /** Absolute, `%VAR%`-expanded paths — exactly what the engine will write to. */
+  readonly videoDir: string;
+  readonly audioDir: string;
 }
 
 /** D-83: what the renderer may ask for in a single download. */
@@ -86,6 +132,14 @@ export interface M5ChannelDeps {
   readonly enqueueSingle?: (input: SingleDownloadInput) => Promise<readonly string[]>;
   /** D-87: absent = "also delete local files" is refused instead of deleting anything. */
   readonly trashFiles?: TrashFilesPort;
+  /** D-93: absent = the settings page shows "此构建不含更新器". */
+  readonly appUpdate?: AppUpdatePortLike;
+  /** D-96: absent = every card falls back to the letter badge. */
+  readonly thumbnails?: ThumbnailPort;
+  /** D-98: `%VAR%` expansion; absent = stored values are shown verbatim (tests). */
+  readonly expandPath?: (raw: string) => string;
+  /** D-98: native folder picker + reveal; absent = the path rows stay read-only. */
+  readonly pathPicker?: PathPickerPort;
 }
 
 export interface TaskListItemDto {
@@ -98,6 +152,13 @@ export interface TaskListItemDto {
   readonly percent: number | null;
   readonly errorCode: string | null;
   readonly artifactCount: number;
+  /** 0.2.1 (D-95): transfer numbers; `null` = unknown, never "zero". */
+  readonly downloadedBytes: number | null;
+  readonly totalBytes: number | null;
+  readonly speedBps: number | null;
+  readonly etaSec: number | null;
+  /** 0.2.1 (D-96): absolute local cover path, or null for the letter badge. */
+  readonly thumbPath: string | null;
 }
 
 export interface TaskDetailDto {
@@ -120,9 +181,15 @@ export interface AppearanceDto {
   readonly language: 'zh-CN' | 'en';
   /** D-88: when true the host clears the task history as the window closes. */
   readonly privateMode: boolean;
+  /** 0.2.1 (D-93 / D-94): two independent startup-check switches. */
+  readonly autoCheckAppUpdate: boolean;
+  readonly autoCheckEngineUpdate: boolean;
   readonly systemAccent: string | null;
   readonly prefersDark: boolean;
   readonly prefersReducedMotion: boolean;
+  /** 0.2.1 (D-98): resolved download roots. */
+  readonly videoDir: string;
+  readonly audioDir: string;
 }
 
 const TASK_ACTIONS: readonly TaskDetailAction[] = [
@@ -142,11 +209,27 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   [IPC_CHANNELS.TEMPLATE_SAVE]: ['id', 'name', 'args'],
   [IPC_CHANNELS.TEMPLATE_DELETE]: ['id'],
   [IPC_CHANNELS.SETTINGS_GET]: [],
-  [IPC_CHANNELS.SETTINGS_SET]: ['theme', 'accent', 'motion', 'language', 'privateMode'],
+  [IPC_CHANNELS.SETTINGS_SET]: [
+    'theme', 'accent', 'motion', 'language', 'privateMode',
+    'autoCheckAppUpdate', 'autoCheckEngineUpdate',
+  ],
   [IPC_CHANNELS.COMPONENT_STATUS]: [],
   [IPC_CHANNELS.COMPONENT_UPDATE]: [],
+  [IPC_CHANNELS.COMPONENT_CHECK]: [],
+  [IPC_CHANNELS.APP_UPDATE_STATUS]: [],
+  [IPC_CHANNELS.APP_UPDATE_ACTION]: ['action'],
+  [IPC_CHANNELS.PATH_ACTION]: ['action', 'kind'],
   [IPC_CHANNELS.DOWNLOAD_START]: ['url', 'kind', 'quality', 'audioQuality', 'audioFormat'],
 };
+
+/** D-93: the only actions the renderer may trigger. */
+const APP_UPDATE_ACTIONS: readonly AppUpdateAction[] = [
+  'check', 'download', 'install', 'open-page', 'skip-version', 'dismiss',
+];
+
+/** D-98: paths are user input; keep them short and printable. */
+const MAX_PATH_LENGTH = 400;
+const PATH_ACTIONS: readonly string[] = ['pick', 'reset', 'open'];
 
 /** D-83: the renderer may only pick values the plan layer already understands. */
 const VIDEO_QUALITY_VALUES: readonly string[] = ['best', '2160p', '1440p', '1080p', '720p', '480p', '360p', 'lowest'];
@@ -167,7 +250,7 @@ export function validateM5Payload(channel: string, payload: unknown): Record<str
 }
 
 /** URL-free projection: the list never needs a link to render a card. */
-export function toTaskListItem(record: TaskRecord): TaskListItemDto {
+export function toTaskListItem(record: TaskRecord, thumbnailPath: string | null = null): TaskListItemDto {
   return {
     id: record.id,
     state: record.state,
@@ -178,6 +261,11 @@ export function toTaskListItem(record: TaskRecord): TaskListItemDto {
     percent: record.lastPercent,
     errorCode: record.error?.code ?? null,
     artifactCount: record.artifacts.length,
+    downloadedBytes: record.lastDownloadedBytes ?? null,
+    totalBytes: record.lastTotalBytes ?? null,
+    speedBps: record.lastSpeedBps ?? null,
+    etaSec: record.lastEtaSec ?? null,
+    thumbPath: thumbnailPath,
   };
 }
 
@@ -196,6 +284,23 @@ export function toTaskDetail(record: TaskRecord): TaskDetailDto {
   };
 }
 
+/**
+ * D-98: stored value (`%USERPROFILE%/...`) → the absolute path the engine uses.
+ *
+ * An empty or non-string value falls back to the shipped default instead of
+ * producing `''` — an empty output dir is exactly the "save failed" case the
+ * user must never hit.
+ */
+export function readPaths(deps: Pick<M5ChannelDeps, 'config' | 'expandPath'>): PathsDto {
+  const expand = deps.expandPath ?? ((raw: string): string => raw);
+  const read = (key: 'videoDir' | 'audioDir'): string => {
+    const raw = deps.config.get<string>('paths', key);
+    const value = typeof raw === 'string' ? raw.trim() : '';
+    return expand(value === '' ? DEFAULT_PATH_TOKENS[key] : value);
+  };
+  return { videoDir: read('videoDir'), audioDir: read('audioDir') };
+}
+
 function readAppearance(deps: M5ChannelDeps): AppearanceDto {
   return {
     theme: normalizeThemeMode(deps.config.get('general', 'theme')),
@@ -203,9 +308,12 @@ function readAppearance(deps: M5ChannelDeps): AppearanceDto {
     motion: normalizeMotionMode(deps.config.get('general', 'motion')),
     language: String(deps.config.get('general', 'language')).toLowerCase().startsWith('en') ? 'en' : 'zh-CN',
     privateMode: deps.config.get('general', 'privateMode') === true,
+    autoCheckAppUpdate: deps.config.get('advanced', 'autoCheckAppUpdate') !== false,
+    autoCheckEngineUpdate: deps.config.get('advanced', 'autoCheckEngineUpdate') !== false,
     systemAccent: deps.systemAppearance.accent(),
     prefersDark: deps.systemAppearance.prefersDark(),
     prefersReducedMotion: deps.systemAppearance.prefersReducedMotion(),
+    ...readPaths(deps),
   };
 }
 
@@ -252,7 +360,10 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       tab: snapshot.tab,
       counts: snapshot.counts,
       empty: snapshot.empty,
-      items: snapshot.visible.map(toTaskListItem),
+      items: snapshot.visible.map((record) => toTaskListItem(
+        record,
+        deps.thumbnails === undefined ? null : deps.thumbnails.pathOf(record.id),
+      )),
     };
   });
 
@@ -334,6 +445,43 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     return deps.componentUpdate.run();
   });
 
+  // 0.2.1 (D-94): the network half of the component surface. Kept separate from
+  // COMPONENT_STATUS so the settings page can render versions instantly and only
+  // pay for a request when the user (or the startup toggle) asks for one.
+  handlers.set(IPC_CHANNELS.COMPONENT_CHECK, async (payload) => {
+    validateM5Payload(IPC_CHANNELS.COMPONENT_CHECK, payload);
+    if (deps.componentUpdate === undefined) {
+      return { checkedAt: '', results: [] };
+    }
+    return deps.componentUpdate.check();
+  });
+
+  // 0.2.1 (D-93): app update. `status` is a pure read of the in-memory state, so
+  // the queue page can poll it on the same tick as TASK_LIST without a request.
+  handlers.set(IPC_CHANNELS.APP_UPDATE_STATUS, async (payload) => {
+    validateM5Payload(IPC_CHANNELS.APP_UPDATE_STATUS, payload);
+    if (deps.appUpdate === undefined) {
+      return {
+        phase: 'idle', currentVersion: '', latest: null,
+        message: '此构建不含更新器', downloadedBytes: 0, totalBytes: null,
+        skippedVersion: null, lastCheckedAt: null, canAutoInstall: false,
+      };
+    }
+    return deps.appUpdate.state();
+  });
+
+  handlers.set(IPC_CHANNELS.APP_UPDATE_ACTION, async (payload) => {
+    const record = validateM5Payload(IPC_CHANNELS.APP_UPDATE_ACTION, payload);
+    const action = record['action'];
+    if (typeof action !== 'string' || !APP_UPDATE_ACTIONS.includes(action as AppUpdateAction)) {
+      throw new Error('[m5-ipc] unknown app update action');
+    }
+    if (deps.appUpdate === undefined) {
+      return { ok: false, action, message: '此构建不含更新器', state: null };
+    }
+    return deps.appUpdate.perform(action as AppUpdateAction);
+  });
+
   // D-69: the real single-video download entry. The renderer (or a smoke test)
   // supplies a plain http(s) URL; no playlist, no fixture channel.
   // D-83: it may also say what to fetch — video resolution preset, audio
@@ -376,6 +524,68 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     return { accepted: true, enqueued: taskIds.length > 0, taskIds };
   });
 
+  // 0.2.1 (D-98): the download root. `pick` is the only way to change it — the
+  // renderer can never hand us an arbitrary string to write into the config.
+  handlers.set(IPC_CHANNELS.PATH_ACTION, async (payload) => {
+    const record = validateM5Payload(IPC_CHANNELS.PATH_ACTION, payload);
+    const action = record['action'];
+    const kind = record['kind'];
+    if (typeof action !== 'string' || !PATH_ACTIONS.includes(action)) {
+      throw new Error('[m5-ipc] unknown path action');
+    }
+    if (kind !== 'video' && kind !== 'audio') throw new Error('[m5-ipc] path kind must be video|audio');
+    const key: 'videoDir' | 'audioDir' = kind === 'audio' ? 'audioDir' : 'videoDir';
+    const before = readPaths(deps);
+
+    if (action === 'reset') {
+      await deps.config.setDomain('paths', { [key]: DEFAULT_PATH_TOKENS[key] });
+      const paths = readPaths(deps);
+      return { ok: true, action, kind, canceled: false, error: null, path: paths[key], paths };
+    }
+
+    if (deps.pathPicker === undefined) {
+      return {
+        ok: false, action, kind, canceled: false,
+        error: '当前构建不支持选择目录', path: null, paths: before,
+      };
+    }
+
+    if (action === 'open') {
+      try {
+        await deps.pathPicker.open(before[key]);
+        return { ok: true, action, kind, canceled: false, error: null, path: before[key], paths: before };
+      } catch (error) {
+        return {
+          ok: false, action, kind, canceled: false,
+          error: error instanceof Error ? error.message : String(error),
+          path: null, paths: before,
+        };
+      }
+    }
+
+    const picked = await deps.pathPicker.pick(kind, before[key]);
+    if (picked.path === null) {
+      return {
+        ok: false, action, kind,
+        // No error + no path = the user closed the dialog; not a failure.
+        canceled: picked.error === null,
+        error: picked.error,
+        path: null,
+        paths: before,
+      };
+    }
+    const next = picked.path.trim();
+    if (next === '' || next.length > MAX_PATH_LENGTH || /[\u0000-\u001f]/.test(next)) {
+      return {
+        ok: false, action, kind, canceled: false,
+        error: '所选路径无效', path: null, paths: before,
+      };
+    }
+    await deps.config.setDomain('paths', { [key]: next });
+    const paths = readPaths(deps);
+    return { ok: true, action, kind, canceled: false, error: null, path: paths[key], paths };
+  });
+
   handlers.set(IPC_CHANNELS.SETTINGS_GET, async (payload) => {
     validateM5Payload(IPC_CHANNELS.SETTINGS_GET, payload);
     return readAppearance(deps);
@@ -415,7 +625,16 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       if (typeof record['privateMode'] !== 'boolean') throw new Error('[m5-ipc] invalid privateMode');
       patch['privateMode'] = record['privateMode'];
     }
+    // 0.2.1: the update switches live in `advanced`, not `general`.
+    const advancedPatch: Record<string, unknown> = {};
+    for (const key of ['autoCheckAppUpdate', 'autoCheckEngineUpdate'] as const) {
+      const value = record[key];
+      if (value === undefined) continue;
+      if (typeof value !== 'boolean') throw new Error(`[m5-ipc] invalid ${key}`);
+      advancedPatch[key] = value;
+    }
     if (Object.keys(patch).length > 0) await deps.config.setDomain('general', patch);
+    if (Object.keys(advancedPatch).length > 0) await deps.config.setDomain('advanced', advancedPatch);
     const snapshot = readAppearance(deps);
     deps.onAppearanceChanged?.(snapshot);
     return snapshot;
@@ -435,6 +654,10 @@ export const M5_CHANNELS: readonly string[] = [
   IPC_CHANNELS.SETTINGS_GET,
   IPC_CHANNELS.COMPONENT_STATUS,
   IPC_CHANNELS.COMPONENT_UPDATE,
+  IPC_CHANNELS.COMPONENT_CHECK,
+  IPC_CHANNELS.APP_UPDATE_STATUS,
+  IPC_CHANNELS.APP_UPDATE_ACTION,
+  IPC_CHANNELS.PATH_ACTION,
   IPC_CHANNELS.SETTINGS_SET,
   IPC_CHANNELS.DOWNLOAD_START,
 ];

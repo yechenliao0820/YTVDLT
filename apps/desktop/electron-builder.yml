@@ -39,6 +39,11 @@ win:
 nsis:
   installerIcon: apps/desktop/build/icon.ico
   uninstallerIcon: apps/desktop/build/icon.ico
+  # 0.2.1 (D-97): a stable shortcut name plus an explicit icon-cache flush —
+  # an in-place upgrade otherwise keeps the old (Electron atom) desktop icon
+  # because Windows caches it by path + timestamp. See build/installer.nsh.
+  shortcutName: YTVDLT
+  include: apps/desktop/build/installer.nsh
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true

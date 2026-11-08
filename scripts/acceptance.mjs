@@ -517,6 +517,14 @@ const M3_TEST_FILE_MAP = {
   // M5-5 follow-up (D-67): component updates over HTTP + the feed contract.
   'component-updater.test.ts': ['A-4.4-28', 'A-4.4-29'],
   'http-update-source.test.ts': ['A-4.4-28'],
+  // 0.2.1 (D-91…D-94, D-97): menu wiring, GitHub-release app update, engine check.
+  'app-menu.test.ts': ['A-M5-00'],
+  'app-update.test.ts': ['A-4.4-29'],
+  'app-update-service.test.ts': ['A-4.4-29'],
+  // 0.2.2 (D-101): repeated downloads get a numbered name instead of an error.
+  'copy-suffix.test.ts': ['A-4.2-11', 'A-4.4-27'],
+  // 0.2.2 (D-101): repeated downloads get a numbered name instead of an error.
+  'copy-suffix.test.ts': ['A-4.2-11', 'A-4.4-27'],
 };
 
 /** Honest, separately-listed deviations (never reported as PASS assertions). */
@@ -1192,8 +1200,8 @@ const M5_ASSERTIONS = [
   { id: 'A-4.4-16', layer: 'L2', subject: '四 Tab 筛选 + 空/错状态（队列/详情/日志/批量四个页面同构）', tests: ['task-view', 'm5-channels'], needs: ['vitest', 'e2e'], evidence: ['reports/vitest-results.json::task-view.test.ts', 'reports/e2e-summary.json::queue-ready,queue-empty,queue-error,batch-empty,detail-empty,log-error'] },
   { id: 'A-4.4-20', layer: 'L2', subject: 'Light/Dark/System 三态 + 强调色，切深色全页即时且中文基线像素不变', tests: ['appearance'], needs: ['vitest', 'e2e'], evidence: ['reports/vitest-results.json::appearance.test.ts', 'reports/e2e-summary.json::format-dark,queue-dark,settings-en-dark'] },
   { id: 'A-4.4-21', layer: 'L2', subject: 'zh-CN/en 切换：全部文案切换、0 缺失键、0 溢出', tests: ['i18n'], needs: ['vitest', 'e2e'], evidence: ['reports/vitest-results.json::i18n.test.ts', 'reports/e2e-summary.json::format-en,queue-en,settings-en-dark'] },
-  { id: 'A-4.4-28', layer: 'L3', subject: 'yt-dlp 引擎更新：SHA2-256SUMS 校验 + 原子替换 + 回滚', deferred: 'N1/N3：需先装 electron/electron-builder（N1）并下载官方 yt-dlp.exe 与 SHA2-256SUMS（N3），本环境禁止联网，未实现也未声称通过', evidence: ['docs/M5-SUMMARY.md::A-4.4-28'] },
-  { id: 'A-4.4-29', layer: 'L3', subject: '应用自更新：electron-updater + NSIS latest.yml + 失败静默降级', deferred: 'N1：electron-updater 与 electron-builder 均未安装，M5-4/M5-5 打包块未开工；不得以 SKIPPED 冒充 PASS', evidence: ['docs/M5-SUMMARY.md::A-4.4-29'] },
+  { id: 'A-4.4-28', layer: 'L3', subject: 'yt-dlp 引擎更新：SHA2-256SUMS 校验 + 原子替换 + 回滚', deferred: 'N1/N3：逻辑与真实清单已实测（2026-11-08 拉到官方 `SHA2-256SUMS` 并解析出 yt-dlp.exe 行），但**没有在真机对真实 yt-dlp.exe 执行一次换文件并重启任务**；按规则不改判 PASS（D-62 / D-94）', evidence: ['docs/M5-SUMMARY.md::A-4.4-28', 'reports/vitest-results.json::self-updater.test.ts,component-updater.test.ts'] },
+  { id: 'A-4.4-29', layer: 'L3', subject: '应用自更新：检查发布版本 + 安装包校验 + 失败静默降级（GitHub Release 路径，替代 electron-updater/latest.yml，见 D-93）', deferred: '实现与网络实测通过（版本检查、说明解析、流式下载、大小/SHA-256/MZ 三项校验、失败只进 error 态），但未在真机完成「下载 216 MiB → 校验 → 启动 NSIS → 重启」闭环；electron-updater 路径因仓库不发布 latest.yml 而不可用，按规则不改判 PASS', tests: ['app-update', 'app-update-service'], needs: ['vitest'], evidence: ['reports/vitest-results.json::app-update.test.ts,app-update-service.test.ts', 'apps/desktop/src/main/app-update-service.ts,github-releases.ts,adapters/http-download.ts'] },
   { id: 'A-4.5-08', layer: 'L0', subject: '全局异常：崩溃报告含版本信息、不静默吞错、下次启动提示并留证', tests: ['crash-guard'], needs: ['vitest'], evidence: ['reports/vitest-results.json::crash-guard.test.ts', 'packages/core/src/crash/crash-guard.ts'] },
   { id: 'A-4.6-06', layer: 'L2', subject: '动态取色改为跟随系统强调色；触觉明确省略；减少动态效果生效', tests: ['appearance'], needs: ['vitest', 'e2e'], evidence: ['reports/vitest-results.json::appearance.test.ts', 'reports/e2e-summary.json::format-dark,settings-en-dark'] },
   { id: 'A-4.6-07', layer: 'L0', subject: '无 Android 残留（0 命中）；开机自启为可选 HKCU Run，无需管理员', tests: ['platform-policy'], needs: ['vitest'], evidence: ['reports/vitest-results.json::platform-policy.test.ts', 'packages/core/src/platform/platform-policy.ts'] },

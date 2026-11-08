@@ -15,7 +15,7 @@
 (function (global) {
   'use strict';
   var doc = global.document;
-  var FALLBACK_VERSION = '0.1.10';
+  var FALLBACK_VERSION = '0.2.2';
 
   function param(name) {
     var match = new RegExp('[?&]' + name + '=([^&]*)').exec(global.location ? global.location.search : '');

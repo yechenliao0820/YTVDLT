@@ -28,6 +28,8 @@ export interface BrowserWindowOptionsLike {
   readonly minHeight: number;
   readonly show: boolean;
   readonly backgroundColor: string;
+  /** 0.2.1 (D-97): optional window/taskbar icon (`.ico` path). */
+  readonly icon?: string;
   readonly webPreferences: {
     readonly preload: string;
     readonly contextIsolation: true;
@@ -207,6 +209,10 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
     minWidth: 1024,
     minHeight: 680,
     show: false,
+    // 0.2.1 (D-97): pin the window/taskbar icon as well. A packaged build inherits
+    // the exe icon, but a dev run (`electron .`) would otherwise show the stock
+    // Electron atom — the same visual bug as a stale desktop shortcut.
+    icon: options.trayIconPath,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#0e1720' : '#eef2f6',
     webPreferences: {
       preload: options.preloadPath,

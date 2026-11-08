@@ -16,20 +16,30 @@ import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeTheme, shell, Tray 
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { CorePorts, EngineUpdateSource } from '@ytvdlt/shared';
-import { ArtifactVerifier, ErrorMapper, Logger } from '@ytvdlt/core';
+import { ArtifactVerifier, ErrorMapper, Logger, expandEnvVars } from '@ytvdlt/core';
 import { createEngine } from '@ytvdlt/engine-ytdlp';
 import { createNodePorts } from './adapters/node-ports.js';
 import { createElectronShellPort } from './adapters/electron-shell-port.js';
+import { createPathPicker } from './adapters/path-picker.js';
 import { resolveFixtureDir, resolveRuntimeDir } from './runtime-paths.js';
 import { createNodeProbePort, resolveDataDir } from './data-dir.js';
 import { createQueueIntakeGate } from './adapters/queue-intake-gate.js';
 import { LocalDirUpdateSource } from './adapters/local-dir-update-source.js';
-import { AppUpdateCoordinator, UPDATE_CONFIG } from './app-updater.js';
+import { createAppUpdateService, type AppUpdateService } from './app-update-service.js';
+import { createThumbnailCache } from './thumbnail-cache.js';
 import {
   createComponentUpdater, type ComponentUpdatePort,
 } from './component-updater.js';
 import { createM5Host, type M5Host } from './m5-host.js';
 import { bootstrap, type BootstrapHandle, type ElectronLike } from './bootstrap.js';
+import type { AppUpdatePortLike } from './m5-channels.js';
+
+/** The public repository the updater reads (D-93). */
+export const UPDATE_REPO = Object.freeze({ owner: 'yechenliao0820', repo: 'YTVDLT' });
+
+/** yt-dlp publishes `yt-dlp.exe` + `SHA2-256SUMS` at this stable redirect. */
+export const YTDLP_COMPONENT_FEED = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download';
+export const YTDLP_VERSION_API = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest';
 
 export interface StartOptions {
   /** Defaults to `process.argv`. */
@@ -155,10 +165,42 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       status: async () => componentUpdater === null
         ? { components: [], source: null, updating: false }
         : componentUpdater.status(),
+      check: async () => componentUpdater === null
+        ? { checkedAt: '', results: [] }
+        : componentUpdater.check(),
       run: async () => componentUpdater === null
         ? { ok: false, source: null, reason: '组件更新尚未就绪', results: [] }
         : componentUpdater.run(),
     };
+
+    // 0.2.1 (D-93): same mutable-holder trick for the app updater.
+    let appUpdater: AppUpdateService | null = null;
+    const appUpdateProxy: AppUpdatePortLike = {
+      state: () => appUpdater === null
+        ? {
+          phase: 'idle', currentVersion: appVersion, latest: null, message: '更新器尚未就绪',
+          downloadedBytes: 0, totalBytes: null, skippedVersion: null,
+          lastCheckedAt: null, canAutoInstall: false,
+        }
+        : appUpdater.state(),
+      perform: async (action) => appUpdater === null
+        ? {
+          ok: false, action, message: '更新器尚未就绪',
+          state: {
+            phase: 'idle', currentVersion: appVersion, latest: null, message: '',
+            downloadedBytes: 0, totalBytes: null, skippedVersion: null,
+            lastCheckedAt: null, canAutoInstall: false,
+          },
+        }
+        : appUpdater.perform(action),
+    };
+
+    // 0.2.1 (D-96): covers are cached next to the config, never hot-linked.
+    const thumbnails = createThumbnailCache({
+      dir: join(dataDir.dataDir, 'thumbs'),
+      ...(ports.http === undefined ? {} : { http: ports.http }),
+      logger,
+    });
 
     const host = await createM5Host({
       ports,
@@ -173,6 +215,12 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       dataDirReason: dataDir.reason,
       ...(existsSync(aria2cPath) ? { bundledAria2cPath: aria2cPath } : {}),
       componentUpdate: componentUpdateProxy,
+      appUpdate: appUpdateProxy,
+      thumbnails,
+      // 0.2.1 (D-98): the output root is user-selectable. Expansion happens here
+      // (main owns `process.env`); the channel layer only persists/validates.
+      expandPath: (raw: string) => expandEnvVars(raw, process.env),
+      pathPicker: createPathPicker(),
       clipboard: { writeText: async (text: string) => { clipboard.writeText(text); } },
       systemAppearance: {
         prefersDark: () => nativeTheme.shouldUseDarkColors,
@@ -200,15 +248,85 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       ports,
       logger,
       components: [
-        { id: 'yt-dlp', label: 'yt-dlp', fileName: 'yt-dlp.exe', path: enginePath },
-        { id: 'aria2c', label: 'aria2c', fileName: 'aria2c.exe', path: aria2cPath },
+        {
+          id: 'yt-dlp',
+          label: 'yt-dlp',
+          fileName: 'yt-dlp.exe',
+          path: enginePath,
+          feedUrl: YTDLP_COMPONENT_FEED,
+          versionApiUrl: YTDLP_VERSION_API,
+        },
+        {
+          id: 'aria2c',
+          label: 'aria2c',
+          fileName: 'aria2c.exe',
+          path: aria2cPath,
+          // aria2c publishes no SHA2-256SUMS at a stable URL: it follows the
+          // operator mirror only, and stays hidden as "updatable" otherwise.
+          feedUrl: null,
+          versionApiUrl: null,
+        },
       ],
       baseUrl: resolveComponentFeed(host.m4.task.config),
       intakeGate,
     });
 
-    // Background app update: never awaited, never blocks the window.
-    void checkAppUpdateOnce(host, logger, appVersion);
+    // 0.2.1 (D-94): the engine gets its own startup check, throttled to once a
+    // day. It stays silent (a log line only) — a stale yt-dlp is worth telling
+    // the user about in Settings, not worth interrupting start-up with a modal.
+    const engineAuto = host.m4.task.config.get<boolean>('advanced', 'autoCheckEngineUpdate') !== false;
+    const lastEngineRaw = host.m4.task.config.get<string>('advanced', 'lastEngineUpdateCheckAt');
+    const lastEngineMs = typeof lastEngineRaw === 'string' && lastEngineRaw.trim() !== ''
+      ? Date.parse(lastEngineRaw)
+      : Number.NaN;
+    const engineDue = Number.isNaN(lastEngineMs) || Date.now() - lastEngineMs >= 24 * 60 * 60 * 1000;
+    if (engineAuto && engineDue) {
+      void componentUpdater.check().then(async (report) => {
+        await host.m4.task.config.setDomain('advanced', {
+          lastEngineUpdateCheckAt: ports.clock.nowIso(),
+        });
+        const updatable = report.results.filter((item) => item.updateAvailable);
+        if (updatable.length > 0) {
+          await logger.info('component-check', 'engine update available', {
+            components: updatable.map((item) => `${item.id}:${item.installedVersion}->${item.latestVersion}`),
+          });
+        }
+      }).catch(() => undefined);
+    }
+
+    // 0.2.1 (D-93): the app updater, now on GitHub Releases rather than the
+    // electron-updater generic feed (which needs `latest.yml` we do not publish).
+    appUpdater = createAppUpdateService({
+      ports,
+      logger,
+      config: host.m4.task.config,
+      currentVersion: appVersion,
+      source: UPDATE_REPO,
+      updatesDir: join(dataDir.dataDir, 'updates'),
+      openExternal: async (url: string) => { await shell.openExternal(url); },
+      openPath: async (path: string) => shell.openPath(path),
+      quit: () => { app.quit(); },
+    });
+
+    // Covers: one attempt per task, triggered the moment the probe result is
+    // known (first progress event) and once at boot for restored tasks.
+    const ensureCover = (taskId: string): void => {
+      const record = host.m4.task.queue.get(taskId);
+      const url = record?.mediaInfo?.thumbnail ?? null;
+      if (url !== null) void thumbnails.ensure(taskId, url);
+    };
+    host.m4.task.queue.onEvent((event) => {
+      if (event.type === 'progress') { ensureCover(event.taskId); return; }
+      if (event.type === 'state-changed' && event.to === 'Running') ensureCover(event.taskId);
+    });
+    let bootCovers = 0;
+    for (const record of host.m4.task.queue.list()) {
+      if (bootCovers >= 20) break;
+      if (record.mediaInfo?.thumbnail) { ensureCover(record.id); bootCovers += 1; }
+    }
+
+    // Never awaited: a slow network must not delay the first frame.
+    if (appUpdater.shouldAutoCheck()) void appUpdater.check();
     await logger.info('data-dir', 'resolved', {
       mode: dataDir.mode, dataDir: dataDir.dataDir, reason: dataDir.reason,
     });
@@ -260,6 +378,10 @@ function resolveEngineUpdateSource(ports: CorePorts, _runtimeDir: string): Engin
  *
  * Precedence: `YTVDLT_COMPONENT_FEED` (deployment override) →
  * `advanced.componentFeedUrl` (user setting). Only http(s) is accepted.
+ *
+ * 0.2.1 (D-94): yt-dlp no longer depends on this — it carries its own official
+ * feed. This value now only feeds components that have no feed of their own
+ * (aria2c), which is the domestic-mirror case.
  */
 function resolveComponentFeed(config: M5Host['m4']['task']['config']): string | null {
   const fromEnv = (process.env['YTVDLT_COMPONENT_FEED'] ?? '').trim();
@@ -269,25 +391,11 @@ function resolveComponentFeed(config: M5Host['m4']['task']['config']): string | 
   return /^https?:\/\//i.test(raw) ? raw : null;
 }
 
-async function checkAppUpdateOnce(host: M5Host, logger: Logger, appVersion: string): Promise<void> {
-  const feed = host.m4.task.config.get<string>(UPDATE_CONFIG.domain, UPDATE_CONFIG.feedKey);
-  if (typeof feed !== 'string' || feed.trim() === '') return;
-  try {
-    const { createElectronUpdaterPort } = await import('./adapters/electron-updater-adapter.js');
-    const updater = await createElectronUpdaterPort({ currentVersion: () => appVersion });
-    const coordinator = new AppUpdateCoordinator({
-      updater,
-      config: host.m4.task.config,
-      logger,
-      notifyOnce: (message: string) => {
-        // Non-blocking by construction: a log line plus the renderer's own hint.
-        void logger.info('app-update', 'user-notified', { message });
-      },
-    });
-    await coordinator.checkAndApply();
-  } catch (error) {
-    await logger.warn('app-update', 'updater module unavailable; skipped', {
-      detail: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
+/**
+ * The `electron-updater` path (`app-updater.ts`) is deliberately no longer
+ * called from start-up: the public releases ship no `latest.yml`, so the
+ * generic feed can only answer 404. `app-update-service.ts` replaces it with a
+ * GitHub-Releases check that verifies the installer itself before running it.
+ * `app-updater.ts` stays compiled because its coordinator/interval rules are
+ * still the reference for a future self-hosted feed (D-93).
+ */

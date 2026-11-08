@@ -15,6 +15,7 @@ import type {
 } from '@ytvdlt/shared';
 import type { ICancelHandle, IArtifactVerifier, IHistoryStore, ITaskQueue, ITaskStore } from '../ports.js';
 import { detectPostprocessed } from '../download-flags.js';
+import { applyCopySuffix, nextCopySuffix } from '../path-resolver/copy-suffix.js';
 import { assertTransition } from './state-machine.js';
 
 export interface TaskQueueDeps {
@@ -245,9 +246,14 @@ export class TaskQueue implements ITaskQueue {
         return;
       }
       record.postprocessed = detectPostprocessed(request);
+      // D-101: yt-dlp refuses to overwrite an existing file and exits 0, so a
+      // second download of the same video used to end as ALREADY_DOWNLOADED.
+      // Give this attempt its own ` (n)` name first — the user asked for another
+      // copy, not for an error.
+      const effectiveRequest = await this.withCopySuffix(record, request);
       this.transition(record, 'Running');
 
-      const outcome = await this.executeDownload(record, request);
+      const outcome = await this.executeDownload(record, effectiveRequest);
       if (outcome.kind === 'canceled') {
         this.transition(record, 'Canceled');
         return;
@@ -288,11 +294,12 @@ export class TaskQueue implements ITaskQueue {
       const entry = buildHistoryEntry(record, outcome.artifacts, this.deps.ports);
       const addResult = await this.deps.history.add(entry, { privateMode: record.privateMode });
       if (addResult.added === false && addResult.reason === 'duplicate') {
-        record.error = {
-          code: 'ALREADY_DOWNLOADED', message: '该产物已在历史记录中', detail: addResult.existing.videoPath,
-          retryable: false, report: 'ALREADY_DOWNLOADED: duplicate history entry',
-        };
-        this.transition(record, 'Error');
+        // D-101: the artifact passed every verification criterion and exists on
+        // disk — failing the task here told the user "download failed" when the
+        // file was right in front of them. Completing without a new history row
+        // is the honest outcome; `avoidOverwritingExisting()` prevents this path
+        // in the normal case by giving the copy its own name.
+        this.transition(record, 'Completed');
         return;
       }
       this.transition(record, 'Completed');
@@ -303,6 +310,43 @@ export class TaskQueue implements ITaskQueue {
       // A freed slot is immediately offered to the FIFO (auto-fill, ①).
       this.pump();
     }
+  }
+
+  /**
+   * D-101: return a request whose output template avoids an existing file.
+   *
+   * The default template carries `[%(id)s]`, which is what makes detection
+   * possible: scan the output directory for names containing `[<id>]`, take the
+   * highest ` (n)` already there, and hand yt-dlp ` (n+1)`. Anything unexpected
+   * (custom template without the id token, unreadable directory, template with
+   * no `%(ext)s`) returns the request untouched — naming is then left exactly as
+   * the user configured it, and the duplicate is handled by the history step
+   * instead of by guessing a filename.
+   */
+  private async withCopySuffix(
+    record: TaskRecord,
+    request: NonNullable<TaskRecord['request']>,
+  ): Promise<NonNullable<TaskRecord['request']>> {
+    const mediaId = record.mediaInfo?.id ?? '';
+    const template = request.paths.outputTemplate;
+    if (mediaId === '' || typeof template !== 'string' || !template.includes('%(id)s')) {
+      return request;
+    }
+    const dir = request.format.extractAudio ? request.paths.audioDir : request.paths.videoDir;
+    if (typeof dir !== 'string' || dir.trim() === '') return request;
+
+    let names: readonly string[];
+    try {
+      names = await this.deps.ports.fs.readdir(dir);
+    } catch {
+      // Not created yet (first download into a new folder) — nothing to collide.
+      return request;
+    }
+    const suffix = nextCopySuffix(names, mediaId);
+    if (suffix === '') return request;
+    const outputTemplate = applyCopySuffix(template, suffix);
+    if (outputTemplate === null) return request;
+    return { ...request, paths: { ...request.paths, outputTemplate } };
   }
 
   /** Wrap the engine's callback API into a single awaited outcome. */
@@ -326,6 +370,20 @@ export class TaskQueue implements ITaskQueue {
         this.emit(event);
         if (event.type === 'progress') {
           record.lastPercent = event.percent ?? record.lastPercent;
+          // 0.2.1 (D-95): keep the raw transfer numbers too — the queue card
+          // needs size/speed/ETA, and recomputing them from percent is guessing.
+          if (event.downloadedBytes !== null && event.downloadedBytes !== undefined) {
+            record.lastDownloadedBytes = event.downloadedBytes;
+          }
+          if (event.totalBytes !== null && event.totalBytes !== undefined) {
+            record.lastTotalBytes = event.totalBytes;
+          }
+          if (event.speedBps !== null && event.speedBps !== undefined) {
+            record.lastSpeedBps = event.speedBps;
+          }
+          if (event.etaSec !== null && event.etaSec !== undefined) {
+            record.lastEtaSec = event.etaSec;
+          }
           // M4-3: a hard kill mid-download must leave a usable snapshot, so
           // progress is persisted (throttled by time, not by percentage).
           const now = this.deps.ports.clock.nowEpochMs();

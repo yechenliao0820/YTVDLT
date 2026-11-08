@@ -1,9 +1,54 @@
-# YTVDLT 交付报告（0.1.10 · 最新）
+# YTVDLT 交付报告（0.2.1 · 最新）
+
+> 交付日期：2026-11-08 ｜ 交付人：Buddy（AI） ｜ 接收人：LeoLee
+> 本轮四件事：更新（本体 + yt-dlp 分开）、下载进度、视频封面、桌面图标；外加按业主追加要求补上「下载位置可选」。
+
+## 一、交付物
+
+| 交付物 | 位置 | 大小 |
+|---|---|---|
+| 安装版（NSIS） | `dist-0.2.1\YTVDLT Setup 0.2.1.exe` | 226,274,545 B（215.8 MiB） |
+| 差分清单 | `dist-0.2.1\YTVDLT Setup 0.2.1.exe.blockmap` | 237,711 B |
+| 更新清单 | `dist-0.2.1\latest.yml` | 341 B |
+| 免安装目录 | `dist-0.2.1\win-unpacked\` | 真机 CDP 验证用 |
+
+两个 `package.json` 打包后已还原（sha256 与打包前逐字节一致：`08585fe9…` / `ca7deb3c…`）。
+
+## 二、逐项落地
+
+| # | 诉求 | 落地 |
+|---|---|---|
+| 1 | 本体更新：检查 + 说明弹窗 + 一键安装 | 走 GitHub Releases API（`latest.yml` 我们从不发布，electron-updater 的 generic 通道无解，见 D-93）。发现新版弹窗显示 Release 说明，勾选「以后不再提示此版本」才持久化忽略；下载 216 MiB 流式落盘，校验 大小 + GitHub `digest` SHA-256 + `MZ` 头，三项任一不过就改名 `.rejected`；安装交给 NSIS 并要求确认，**不做静默升级**。 |
+| 2 | yt-dlp 独立更新 | 设置页独立一块：已安装 / 远端最新 / 检查 / 立即更新，另有「启动时自动检查」开关（24 h 节流）。官方 feed 带 `SHA2-256SUMS`，替换沿用 `.new → rename → 校验 → 回滚 .bak`。aria2c 不参与（官方无清单）。 |
+| 3 | 进度显示总大小/速度/剩余 | 卡片行：`42.0% · 90.0 MB / 214 MB · 4.0 MB/s · 剩余 1:36`；三段独立出现/消失，`null` 恒等于未知。 |
+| 4 | 视频略缩图 | 主进程缓存到 `<dataDir>\thumbs\<sha1(url)>.<ext>`，DTO 只回本地路径，取不到自动回退首字母。 |
+| 5 | 桌面图标还是原子核 | 实测 0.1.10 的 exe 与 Setup 都已内嵌品牌图标（DIB 字节比对命中），问题在 Windows 快捷方式图标缓存；新增 `installer.nsh` 在安装结束时 `SHChangeNotify` 刷缓存，并给窗口显式 `icon`。 |
+| 6 | 下载到哪个文件夹 | 设置页新增「下载位置」：视频 / 音频两行，各有 打开 / 更改… / 恢复默认。路径只能由原生对话框选出，渲染层无法写任意路径；选完先探可写，不可写直接拒绝保存；空白回落默认 `%USERPROFILE%\Downloads\YTVDLT`。 |
+
+## 三、验收结果
+
+| 门禁 | 结果 |
+|---|---|
+| `npm run typecheck` | 5/5 successful |
+| `npm test` | 830/830 |
+| e2e | 31/31 + 反例 5/5（按 case 重建 9 张：queue×7、settings×2） |
+| M5 验收 | 8/10 PASS + 2 SKIPPED，10/10 gate，allGreen=true |
+| 打包产物真机 | 启动 `win-unpacked\YTVDLT.exe`（CDP 9223）：URL `?v=0.2.1`、页脚 `v0.2.1`；`SETTINGS_GET` 返回 `C:\Users\leolee\Downloads\YTVDLT` 与 `…\YTVDLT\Audio`；`PATH_ACTION reset` 成功；本体更新状态「已是最新版本（0.2.1）」；组件 `yt-dlp@2026.10.26 / aria2c@1.35.0`；设置页路径行实测有值。 |
+
+## 四、已知边界
+
+1. **没有在新机器上跑完「下载 216 MiB → 安装 → 重启」这条自更新闭环**，验收里 A-4.4-29 仍是 SKIPPED，没有改判 PASS。
+2. 便携版不参与自更新（只认 `Setup` 资产）。
+3. 安装包未签名，SmartScreen 会拦一次「更多信息 → 仍要运行」。
+4. 原生文件夹对话框没有自动化用例（必须人手点），可写探测与失败回传有单测。
+5. 后处理阶段 yt-dlp 不报 `speed`，那段卡片只有百分比。
+
+---
+
+## 以下为 0.1.10 历史交付报告（原文存档，未改动）
 
 > 交付日期：2026-11-08 ｜ 交付人：Buddy（AI） ｜ 接收人：LeoLee
 > 本轮先在 VM 复测中暴露 `PERMISSION_DENIED`，按「先修 BUG」处理，再补图标与关于/版本号。
-
----
 
 ## 一、先回答 VM 里那个问题
 

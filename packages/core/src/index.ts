@@ -40,3 +40,5 @@ export * from './task-view/index.js';
 // M5 additions (append-only): crash guard + desktop platform policy.
 export * from './crash/index.js';
 export * from './platform/index.js';
+// 0.2.1 additions (append-only): GitHub-release app update (D-93).
+export * from './app-update/index.js';

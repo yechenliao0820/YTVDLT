@@ -125,11 +125,136 @@
   }
 
 
-  /* --- D-67: bundled component (yt-dlp / aria2c) updates ------------------ */
+  /* --- 0.2.1 (D-93): 应用本体更新 --------------------------------------- */
+
+  var APP_CHANNELS = {
+    status: 'ytvdlt:appUpdate:status',
+    action: 'ytvdlt:appUpdate:action'
+  };
+
+  function formatBytes(value) {
+    if (typeof value !== 'number' || !isFinite(value) || value < 0) return '—';
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var size = value;
+    var index = 0;
+    while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; }
+    var digits = size >= 100 || index === 0 ? 0 : 1;
+    return size.toFixed(digits) + ' ' + units[index];
+  }
+
+  function paintApp(update) {
+    var block = doc.getElementById('settings-app-block');
+    var current = doc.getElementById('settings-app-current');
+    var stateNode = doc.getElementById('settings-app-state');
+    var checkButton = doc.getElementById('settings-app-update');
+    var pageButton = doc.getElementById('settings-app-page');
+    if (update === null || typeof update !== 'object') {
+      if (stateNode !== null) stateNode.textContent = offlineText();
+      if (checkButton !== null) checkButton.disabled = true;
+      return;
+    }
+
+    var version = update.currentVersion || '';
+    if (current !== null && version !== '') current.textContent = t('settings.app.current', { version: version });
+
+    var phase = String(update.phase || 'idle');
+    var text = '';
+    if (phase === 'checking') text = t('settings.app.checking');
+    else if (phase === 'available') text = t('settings.app.available', { version: (update.latest && update.latest.version) || '' });
+    else if (phase === 'downloading') {
+      var total = typeof update.totalBytes === 'number' ? update.totalBytes : null;
+      text = t('update.downloading', {
+        done: formatBytes(update.downloadedBytes || 0),
+        total: total === null ? '—' : formatBytes(total)
+      });
+    } else if (phase === 'ready') text = t('update.ready');
+    else if (phase === 'error') text = t('settings.app.error', { reason: update.message || '—' });
+    else if (update.message) text = update.message;
+    else text = t('settings.app.uptodate');
+
+    if (stateNode !== null) {
+      stateNode.textContent = text;
+      stateNode.setAttribute('data-update-state', phase);
+    }
+    if (block !== null) block.setAttribute('data-update-state', phase);
+    if (checkButton !== null) {
+      checkButton.disabled = phase === 'checking' || phase === 'downloading';
+      checkButton.removeAttribute('data-i18n');
+      checkButton.textContent = phase === 'available' || phase === 'ready'
+        ? t('update.download')
+        : t('settings.app.check');
+    }
+    if (pageButton !== null) {
+      var hasPage = Boolean(update.latest && update.latest.pageUrl);
+      setHidden(pageButton, !hasPage);
+      pageButton.removeAttribute('data-i18n');
+      pageButton.textContent = t('settings.app.page');
+    }
+  }
+
+  function readAppState() {
+    var pending = invokeBridge(APP_CHANNELS.status, {});
+    if (pending === null) { paintApp(null); return; }
+    Promise.resolve(pending).then(paintApp).catch(function () { paintApp(null); });
+  }
+
+  function appAction(action) {
+    var pending = invokeBridge(APP_CHANNELS.action, { action: action });
+    if (pending === null) { paintApp(null); return; }
+    Promise.resolve(pending).then(function (result) {
+      if (result && result.state) paintApp(result.state);
+      else readAppState();
+    }).catch(function () { readAppState(); });
+  }
+
+  /* --- 0.2.1 (D-98): 下载位置 ------------------------------------------- */
+
+  var PATH_CHANNEL = 'ytvdlt:path:action';
+
+  function paintPaths(snapshot) {
+    ['video', 'audio'].forEach(function (kind) {
+      var node = doc.getElementById('settings-path-' + kind);
+      if (node === null) return;
+      var value = snapshot && typeof snapshot[kind + 'Dir'] === 'string' ? snapshot[kind + 'Dir'] : '';
+      node.textContent = value === '' ? '—' : value;
+      // The row is elided; `title` is the only way to read the whole path.
+      node.setAttribute('title', value);
+    });
+  }
+
+  function pathNote(text, state) {
+    var note = doc.getElementById('settings-path-note');
+    if (note === null) return;
+    note.removeAttribute('data-i18n');
+    note.textContent = text;
+    note.setAttribute('data-path-state', state);
+  }
+
+  /** pick / reset / open — the main process owns the dialog and the write. */
+  function pathAction(action, kind) {
+    var pending = invokeBridge(PATH_CHANNEL, { action: action, kind: kind });
+    if (pending === null) { pathNote(offlineText(), 'error'); return; }
+    Promise.resolve(pending).then(function (result) {
+      if (result && result.paths) paintPaths(result.paths);
+      if (result === null || result === undefined) return;
+      if (result.canceled === true) return;
+      if (result.ok === true) {
+        if (action === 'open') { pathNote(t('settings.paths.hint'), 'idle'); return; }
+        pathNote(t('settings.paths.saved', { path: result.path || '' }), 'ok');
+        return;
+      }
+      pathNote(t('settings.paths.failed', { reason: result.error || '' }), 'error');
+    }).catch(function (error) {
+      pathNote(t('settings.paths.failed', { reason: String(error) }), 'error');
+    });
+  }
+
+  /* --- D-67 / 0.2.1 (D-94): yt-dlp 引擎更新 ----------------------------- */
 
   var COMPONENT_CHANNELS = {
     status: 'ytvdlt:component:status',
-    update: 'ytvdlt:component:update'
+    update: 'ytvdlt:component:update',
+    check: 'ytvdlt:component:check'
   };
 
   /** Catalogue lookup with `{name}` substitution; empty string when missing. */
@@ -173,30 +298,114 @@
     try { return bridge.invoke(channel, payload || {}); } catch (error) { return null; }
   }
 
-  function refreshComponents() {
+  function setHidden(node, hidden) {
+    if (node !== null && node !== undefined) node.setAttribute('hidden', hidden ? 'true' : 'false');
+  }
+
+  /** yt-dlp is the only component that matters for "downloads stop working". */
+  function ytdlpOf(components) {
+    var list = components || [];
+    for (var i = 0; i < list.length; i += 1) {
+      if (list[i] && list[i].id === 'yt-dlp') return list[i];
+    }
+    return list.length > 0 ? list[0] : null;
+  }
+
+  function paintEngine(status) {
+    var component = ytdlpOf(status && status.components);
+    var current = doc.getElementById('settings-engine-current');
+    var latest = doc.getElementById('settings-engine-latest');
     var button = doc.getElementById('settings-engine-update');
+    var check = doc.getElementById('settings-engine-check');
+    if (component === null) {
+      setComponentState('no-source', t('settings.engine.nofeed'));
+      if (button !== null) button.disabled = true;
+      if (check !== null) check.disabled = true;
+      return;
+    }
+    if (current !== null) {
+      current.textContent = component.installed
+        ? t('settings.engine.installed', { version: component.version || '?' })
+        : t('settings.engine.missing');
+    }
+    if (latest !== null) {
+      latest.textContent = component.latestVersion
+        ? t('settings.engine.latest', { version: component.latestVersion })
+        : t('settings.engine.unknown');
+    }
+    var updatable = Boolean(component.feedUrl);
+    if (button !== null) button.disabled = !updatable;
+    if (check !== null) check.disabled = !component.versionApiUrl && !updatable;
+
+    if (!updatable) {
+      setComponentState('no-source', t('settings.engine.nofeed'));
+      return;
+    }
+    if (component.updateAvailable && component.latestVersion) {
+      setComponentState('available', t('settings.engine.available', {
+        from: component.version || '?',
+        to: component.latestVersion
+      }));
+      return;
+    }
+    if (component.latestVersion) {
+      setComponentState('idle', t('settings.engine.uptodate') + ' · ' + versionList(status.components));
+      return;
+    }
+    setComponentState('idle', t('settings.component.idle', { list: versionList(status.components) }));
+  }
+
+  function refreshComponents() {
     var pending = invokeBridge(COMPONENT_CHANNELS.status, {});
     if (pending === null) {
       setComponentState('offline', offlineText());
+      var button = doc.getElementById('settings-engine-update');
       if (button !== null) button.disabled = true;
       return;
     }
-    Promise.resolve(pending).then(function (status) {
-      var hasSource = Boolean(status && status.source);
-      setComponentState(hasSource ? 'idle' : 'no-source',
-        hasSource
-          ? t('settings.component.idle', { list: versionList(status.components) })
-          : t('settings.component.nosource'));
-      if (button !== null) button.disabled = !hasSource;
-    }).catch(function () {
+    Promise.resolve(pending).then(paintEngine).catch(function () {
       setComponentState('offline', offlineText());
+    });
+  }
+
+  function checkEngine() {
+    var button = doc.getElementById('settings-engine-check');
+    if (button !== null) button.disabled = true;
+    setComponentState('checking', t('settings.app.checking'));
+    var pending = invokeBridge(COMPONENT_CHANNELS.check, {});
+    if (pending === null) {
+      setComponentState('offline', offlineText());
+      return;
+    }
+    Promise.resolve(pending).then(function (report) {
+      var result = report && Array.isArray(report.results) ? report.results[0] : null;
+      if (result === null) {
+        setComponentState('failed', t('settings.engine.unknown'));
+        return;
+      }
+      if (result.error) {
+        setComponentState('failed', t('settings.engine.checkFailed', { reason: result.error }));
+        return;
+      }
+      // A fresh check must land in the same shape `paintEngine` expects.
+      refreshComponents();
+      if (result.updateAvailable) {
+        setComponentState('available', t('settings.engine.available', {
+          from: result.installedVersion || '?',
+          to: result.latestVersion || '?'
+        }));
+      }
+    }).catch(function (error) {
+      setComponentState('failed', t('settings.engine.checkFailed', { reason: String(error) }));
+    }).then(function () {
+      if (button !== null) button.disabled = false;
     });
   }
 
   function runComponentUpdate() {
     var button = doc.getElementById('settings-engine-update');
     if (button !== null) button.disabled = true;
-    setComponentState('running', t('settings.component.running'));
+    setComponentState('running', t('settings.engine.updating'));
     var pending = invokeBridge(COMPONENT_CHANNELS.update, {});
     if (pending === null) {
       setComponentState('offline', offlineText());
@@ -204,21 +413,110 @@
     }
     Promise.resolve(pending).then(function (result) {
       if (result && result.ok) {
-        var changed = (result.results || []).filter(function (item) { return item.changed; })
-          .map(function (item) { return item.label + ' ' + (item.toVersion || ''); })
-          .join(', ');
-        setComponentState('done',
-          changed ? t('settings.component.done', { list: changed }) : t('settings.component.idle', { list: '' }));
+        var changed = (result.results || []).filter(function (item) { return item.changed; });
+        setComponentState('done', changed.length > 0
+          ? t('settings.engine.done', { version: changed[0].toVersion || '?' })
+          : t('settings.engine.uptodate'));
+      } else if (result && result.reason === 'up-to-date') {
+        setComponentState('done', t('settings.engine.uptodate'));
+      } else if (result && result.ok === false && (result.reason === 'up-to-date')) {
+        setComponentState('done', t('settings.engine.uptodate'));
       } else {
-        setComponentState('failed',
-          t('settings.component.failed', { reason: (result && result.reason) || 'unknown' }));
+        var failed = result && result.results
+          ? result.results.filter(function (item) { return item.error || (item.reason && item.reason !== 'up-to-date'); })
+          : [];
+        var reason = failed.length > 0
+          ? (failed[0].error || failed[0].reason || '')
+          : ((result && result.reason) || 'unknown');
+        setComponentState('failed', t('settings.engine.failed', { reason: reason }));
       }
     }).catch(function (error) {
-      setComponentState('failed', t('settings.component.failed', { reason: String(error) }));
+      setComponentState('failed', t('settings.engine.failed', { reason: String(error) }));
     }).then(function () {
-      if (button !== null) button.disabled = false;
       refreshComponents();
     });
+  }
+
+  /* --- 0.2.2 (D-99): 目录侧边栏 + 滚动联动 ------------------------------ */
+  /**
+   * Two behaviours, no dependencies:
+   *   - clicking an entry scrolls the inner column (smooth unless the user asked
+   *     for reduced motion);
+   *   - scrolling moves the highlight (scrollspy), so the sidebar always says
+   *     which pane you are looking at.
+   *
+   * Measured with `getBoundingClientRect()` instead of `offsetTop`: the sections
+   * sit in different offsetParents (the two-column grid vs the scroll column),
+   * and `offsetTop` would be relative to whichever one happens to be positioned.
+   */
+  function installSectionNav() {
+    var host = doc.getElementById('settings-scroll');
+    var nav = doc.getElementById('settings-nav');
+    if (host === null || nav === null) return;
+    var links = Array.prototype.slice.call(nav.querySelectorAll('[data-nav-target]'));
+    if (links.length === 0) return;
+    var sections = links.map(function (link) { return doc.getElementById(link.getAttribute('data-nav-target')); });
+
+    function offsetInHost(node) {
+      return node.getBoundingClientRect().top - host.getBoundingClientRect().top + host.scrollTop;
+    }
+
+    function paint() {
+      var probe = host.scrollTop + 28;
+      var active = 0;
+      for (var i = 0; i < sections.length; i += 1) {
+        var node = sections[i];
+        if (node !== null && offsetInHost(node) <= probe) active = i;
+      }
+      // At the very bottom the last section is the honest answer even when its
+      // heading never crosses the probe line (a short tail section). Only when
+      // the column actually overflows — otherwise the page is "all visible" and
+      // the first entry is the right one.
+      if (host.scrollHeight > host.clientHeight + 2
+        && host.scrollTop + host.clientHeight >= host.scrollHeight - 4) {
+        active = sections.length - 1;
+      }
+
+      links.forEach(function (link, index) {
+        link.setAttribute('aria-current', index === active ? 'true' : 'false');
+      });
+
+      nav.setAttribute('data-active', links[active] === undefined ? '' : links[active].getAttribute('data-nav-target'));
+      nav.setAttribute('data-scrollable', host.scrollHeight > host.clientHeight + 2 ? '1' : '0');
+    }
+
+    // No requestAnimationFrame gate: four rect reads per scroll event is cheaper
+    // than a frame of lag, and scroll events are already frame-aligned.
+    host.addEventListener('scroll', paint, { passive: true });
+
+    links.forEach(function (link) {
+      link.addEventListener('click', function (event) {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        var target = doc.getElementById(link.getAttribute('data-nav-target'));
+        if (target === null) return;
+        var reduced = doc.documentElement.getAttribute('data-motion') === 'reduced';
+        var top = Math.max(0, offsetInHost(target) - 4);
+        if (typeof host.scrollTo === 'function') host.scrollTo({ top: top, behavior: reduced ? 'auto' : 'smooth' });
+        else host.scrollTop = top;
+        // Optimistic highlight: the click should feel instant, even though the
+        // smooth scroll then emits a burst of scroll events.
+        links.forEach(function (other) {
+          other.setAttribute('aria-current', other === link ? 'true' : 'false');
+        });
+      });
+    });
+
+    global.addEventListener('resize', paint);
+    // `wire()` runs before layout settles (and before the settings promise fills
+    // the path rows), so the first measurement can be wrong. Re-measure when the
+    // document is ready and whenever a pane changes height.
+    global.addEventListener('load', paint);
+    if (typeof global.ResizeObserver === 'function') {
+      var observer = new global.ResizeObserver(function () { paint(); });
+      observer.observe(host);
+      sections.forEach(function (node) { if (node !== null) observer.observe(node); });
+    }
+    paint();
   }
 
   function wire() {
@@ -241,23 +539,81 @@
       autostart.checked = settingsInjected().autostart === true;
       autostart.addEventListener('change', function () { emit('autostart', autostart.checked); });
     }
-    var channel = doc.getElementById('settings-channel');
-    if (channel !== null) {
-      channel.value = settingsInjected().updateChannel === 'nightly' ? 'nightly' : 'stable';
-      channel.addEventListener('change', function () { emit('update-channel', channel.value); });
+    // 0.2.1 (D-93 / D-94): the two update switches persist through SETTINGS_SET,
+    // which is the only channel that actually writes config.json.
+    var appAuto = doc.getElementById('settings-app-auto');
+    if (appAuto !== null) {
+      appAuto.checked = settingsInjected().autoCheckAppUpdate !== false;
+      appAuto.addEventListener('change', function () {
+        var bridge = global.ytvdltBridge;
+        if (bridge && typeof bridge.invoke === 'function') {
+          try { bridge.invoke('ytvdlt:settings:set', { autoCheckAppUpdate: appAuto.checked }); } catch (error) { /* offline */ }
+        }
+      });
     }
-    var interval = doc.getElementById('settings-interval');
-    if (interval !== null) {
-      var value = settingsInjected().updateInterval;
-      interval.value = value === 'daily' || value === 'never' ? value : 'weekly';
-      interval.addEventListener('change', function () { emit('update-interval', interval.value); });
+    var engineAuto = doc.getElementById('settings-engine-auto');
+    if (engineAuto !== null) {
+      engineAuto.checked = settingsInjected().autoCheckEngineUpdate !== false;
+      engineAuto.addEventListener('change', function () {
+        var bridge = global.ytvdltBridge;
+        if (bridge && typeof bridge.invoke === 'function') {
+          try { bridge.invoke('ytvdlt:settings:set', { autoCheckEngineUpdate: engineAuto.checked }); } catch (error) { /* offline */ }
+        }
+      });
     }
+
+    // The persisted values are the truth, not `__YTVDLT_SETTINGS__` (which the
+    // packaged app never injects — the settings page is a static file:// page).
+    var pendingSettings = invokeBridge('ytvdlt:settings:get', {});
+    if (pendingSettings !== null) {
+      Promise.resolve(pendingSettings).then(function (snapshot) {
+        if (snapshot === null || typeof snapshot !== 'object') return;
+        paintPaths(snapshot);
+        if (appAuto !== null && typeof snapshot.autoCheckAppUpdate === 'boolean') {
+          appAuto.checked = snapshot.autoCheckAppUpdate;
+        }
+        if (engineAuto !== null && typeof snapshot.autoCheckEngineUpdate === 'boolean') {
+          engineAuto.checked = snapshot.autoCheckEngineUpdate;
+        }
+      }).catch(function () { /* keep the defaults */ });
+    }
+
+    doc.querySelectorAll('[data-path-action]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        pathAction(
+          button.getAttribute('data-path-action'),
+          button.getAttribute('data-path-kind') === 'audio' ? 'audio' : 'video'
+        );
+      });
+    });
+
+    var engineCheck = doc.getElementById('settings-engine-check');
+    if (engineCheck !== null) engineCheck.addEventListener('click', checkEngine);
     var engineUpdate = doc.getElementById('settings-engine-update');
     if (engineUpdate !== null) engineUpdate.addEventListener('click', runComponentUpdate);
-    // App updates stay disabled until the GitHub repo + feed exist (D-67).
-    var appUpdate = doc.getElementById('settings-app-update');
-    if (appUpdate !== null) appUpdate.disabled = true;
+
+    var appCheck = doc.getElementById('settings-app-update');
+    if (appCheck !== null) {
+      appCheck.addEventListener('click', function () {
+        var current = doc.getElementById('settings-app-block');
+        var phase = current === null ? 'idle' : current.getAttribute('data-update-state');
+        appAction(phase === 'available' || phase === 'ready' ? 'download' : 'check');
+      });
+    }
+    var appPage = doc.getElementById('settings-app-page');
+    if (appPage !== null) appPage.addEventListener('click', function () { appAction('open-page'); });
+
     refreshComponents();
+    readAppState();
+    installSectionNav();
+    // The queue dialog polls the same state; here it only has to keep the card
+    // honest while a download is in flight.
+    setInterval(function () {
+      if (doc.visibilityState === 'hidden') return;
+      var block = doc.getElementById('settings-app-block');
+      var phase = block === null ? 'idle' : block.getAttribute('data-update-state');
+      if (phase === 'downloading' || phase === 'checking') readAppState();
+    }, 1500);
   }
 
   THEME_STATE = initial();

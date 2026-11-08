@@ -84,10 +84,15 @@
   .card:hover { border-color: var(--accent); }
   .card[data-selected="true"] { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
   .card-check { position: absolute; top: 8px; right: 8px; width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
-  .thumb { width: 118px; height: 66px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px; flex: 0 0 auto; }
+  .thumb { width: 118px; height: 66px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px; flex: 0 0 auto; overflow: hidden; position: relative; }
+  /* 0.2.1 (D-96): the cached cover fills the same 118x66 slot as the letter badge. */
+  .thumb-img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: 6px; background: var(--line); }
+  .thumb[data-thumb="image"]::after { content: ""; position: absolute; inset: 0; border-radius: 6px; box-shadow: inset 0 0 0 1px rgba(15, 30, 50, .10); pointer-events: none; }
   .card-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .card-title { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 20px; }
   .card-meta { color: var(--muted); font-size: 12px; }
+  /* 0.2.1 (D-95): numbers must not jitter while the queue polls every 1.2 s. */
+  .card-progress { font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 11px; font-weight: 700; background: var(--accent-soft); color: var(--accent); }
   .badge[data-state="Completed"] { background: #e3f7ec; color: var(--ok); }
   .badge[data-state="Canceled"] { background: #eef1f5; color: var(--muted); }
@@ -97,6 +102,35 @@
   html[data-theme="dark"] .badge[data-state="Error"] { background: #3a1a20; }
   .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
   .bar > i { display: block; height: 6px; background: var(--accent); }
+  /* 0.2.2 (D-102): 等待态（排队 / 解析 / 待下载）复用同一条 6px 轨道，
+     换成线性不确定指示器：短条从左到右循环扫过，不显示百分比（下载尚未开始）。
+     渐变按运动方向铺：左端（尾部）渐隐到透明，右端（头部）最深；
+     用 --accent 的低不透明度而非纯色，头部「较深但不过深」，
+     两端透明让循环接缝不可见，并自动跟随 5 套强调色 / 深浅主题。 */
+  .bar[data-mode="indeterminate"] { position: relative; }
+  .bar[data-mode="indeterminate"] > i {
+    position: absolute; top: 0; left: 0;
+    width: 36%; height: 6px; border-radius: 3px;
+    background: linear-gradient(90deg,
+      color-mix(in srgb, var(--accent) 0%, transparent) 0%,
+      color-mix(in srgb, var(--accent) 12%, transparent) 20%,
+      color-mix(in srgb, var(--accent) 34%, transparent) 45%,
+      color-mix(in srgb, var(--accent) 62%, transparent) 72%,
+      color-mix(in srgb, var(--accent) 82%, transparent) 94%,
+      color-mix(in srgb, var(--accent) 78%, transparent) 100%);
+    animation: ytv-wait-sweep 1.7s linear infinite;
+  }
+  /* 短条宽 36% 轨道；transform 百分比按元素自身宽度算。
+     278% = 1 / 0.36 - 1 → 左边缘从「完全在左外」正好走到「完全在右外」。 */
+  @keyframes ytv-wait-sweep {
+    from { transform: translateX(-100%); }
+    to   { transform: translateX(278%); }
+  }
+  /* 减少动效：不跑动画，但仍保留一条静态拖尾——空轨道会被误读成「没在干活」。 */
+  html[data-motion="reduced"] .bar[data-mode="indeterminate"] > i { transform: none; }
+  @media (prefers-reduced-motion: reduce) {
+    .bar[data-mode="indeterminate"] > i { animation: none; transform: none; }
+  }
   .card-foot { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .card-foot .spacer { flex: 1 1 auto; }
   .card-foot button { height: 26px; padding: 0 10px; font-size: 12px; }
@@ -275,5 +309,6 @@
 <script src="../../app-shell.js"></script>
 <script src="./queue.js"></script>
 <script src="../../about/about.js"></script>
+<script src="../../updates/update-dialog.js"></script>
 </body>
 </html>

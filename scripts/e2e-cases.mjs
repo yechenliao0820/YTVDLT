@@ -380,6 +380,9 @@ export const E2E_CASES = [
       { name: 'accent-system', pattern: 'data-accent="system" aria-pressed="true"' },
       { name: 'motion-select', pattern: 'id="settings-motion"' },
       { name: 'autostart-optional', pattern: 'id="settings-autostart"' },
+      // 0.2.2 (D-99): the section sidebar must exist and mark the first pane.
+      { name: 'section-nav', pattern: 'data-nav-target="section-appearance"' },
+      { name: 'nav-active', pattern: 'aria-current="true"' },
       { name: 'license-notice', pattern: 'LGPL-3.0' },
       { name: 'haptics-omitted', pattern: '触觉反馈' },
     ],
@@ -397,6 +400,7 @@ export const E2E_CASES = [
       { name: 'translated-title', pattern: '>Settings<' },
       { name: 'no-overflow', pattern: 'data-text-overflow="0"' },
       { name: 'no-missing-keys', pattern: 'data-i18n-missing="0"' },
+      { name: 'nav-en', pattern: 'data-nav-target="section-about"' },
     ],
   },
 

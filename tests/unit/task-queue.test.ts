@@ -8,7 +8,7 @@ import {
   LEGAL_TRANSITIONS, IllegalTaskTransitionError, TaskQueue, HistoryStore,
 } from '@ytvdlt/core';
 import type {
-  DownloadEngine, EngineEvent, DownloadRequest, MediaInfo, TaskRecord,
+  DownloadEngine, EngineEvent, DownloadRequest, HistoryEntry, MediaInfo, TaskRecord,
 } from '@ytvdlt/shared';
 import { createInMemoryPorts } from './helpers/in-memory-ports.js';
 
@@ -47,10 +47,12 @@ interface EngineState {
   downloadCalls: number;
   active: number;
   maxActive: number;
+  /** D-101: the request the engine was actually handed (output template etc.). */
+  lastRequest: DownloadRequest | null;
 }
 
 const newEngineState = (behaviour: Behaviour): EngineState => ({
-  behaviour, probeCalls: 0, downloadCalls: 0, active: 0, maxActive: 0,
+  behaviour, probeCalls: 0, downloadCalls: 0, active: 0, maxActive: 0, lastRequest: null,
 });
 
 function fakeEngine(state: EngineState): DownloadEngine {
@@ -68,6 +70,7 @@ function fakeEngine(state: EngineState): DownloadEngine {
     },
     download(req: DownloadRequest, onEvent: (e: EngineEvent) => void) {
       state.downloadCalls += 1;
+      state.lastRequest = req;
       state.active += 1;
       state.maxActive = Math.max(state.maxActive, state.active);
       let settled = false;
@@ -375,5 +378,59 @@ describe('M3 C11 · verify() receives a real historyEntry (C12 ordering preserve
     await tick();
     expect(queue.get('t1')?.state).toBe('Error');
     expect(await history.query({})).toHaveLength(0);
+  });
+});
+
+describe('D-101 · 重复下载：给出独立文件名，而不是报错', () => {
+    /** The production template carries [%(id)s]; the default test one does not. */
+  const recordWithIdTemplate = (taskId: string): TaskRecord => {
+    const base = record(taskId);
+    const req = base.request;
+    if (req === null) return base;
+    return { ...base, request: { ...req, paths: { ...req.paths, outputTemplate: '%(title)s [%(id)s].%(ext)s' } } };
+  };
+
+  const historyEntry = (videoPath: string): HistoryEntry => ({
+    id: 'old-task', taskId: 'old-task', url: 'https://example.org/v', title: 'fixture',
+    uploader: null, durationSec: 10, videoPath, audioPath: null, thumbnailPath: null,
+    subtitlePaths: [], sizeBytes: 10, extractorKey: 'generic', downloadType: 'video',
+    formatId: null, createdAt: '2026-11-05T00:00:00.000Z', completedAt: '2026-11-05T00:00:00.000Z',
+  });
+
+  it('第一次下载不加后缀（目录里没有同名产物）', async () => {
+    const { queue, engineState } = setup('completed');
+    await queue.enqueue(recordWithIdTemplate('t1'));
+    await tick();
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(title)s [%(id)s].%(ext)s');
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+
+  it('同名产物已在目录里时，第二次下载自动变成 (1)', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    mem.state.files.set('C:/out/Title [fixture].mp4', 'old-bytes');
+    await queue.enqueue(recordWithIdTemplate('t1'));
+    await tick();
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(title)s [%(id)s]_(1).%(ext)s');
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+
+  it('(1) 已存在时继续递增到 (2)', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    mem.state.files.set('C:/out/Title [fixture].mp4', 'old');
+    mem.state.files.set('C:/out/Title [fixture] (1).mp4', 'old-1');
+    await queue.enqueue(recordWithIdTemplate('t1'));
+    await tick();
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(title)s [%(id)s]_(2).%(ext)s');
+  });
+
+  it('历史里已有同一产物时判完成，不再报 ALREADY_DOWNLOADED', async () => {
+    const { queue, history, engineState } = setup('completed');
+    await history.add(historyEntry('C:/out/t1.mp4'));
+    await queue.enqueue(record('t1'));
+    await tick();
+    const finished = queue.get('t1');
+    expect(finished?.state).toBe('Completed');
+    expect(finished?.error).toBeNull();
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(title)s.%(ext)s');
   });
 });

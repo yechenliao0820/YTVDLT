@@ -24,3 +24,5 @@ export * from './download-plan.js';
 export * from './dialog-dto.js';
 // M5 additions (append-only): update domain types, no I/O.
 export * from './update.js';
+// 0.2.1 (append-only): GitHub-release app update + component version lookup.
+export * from './app-update.js';

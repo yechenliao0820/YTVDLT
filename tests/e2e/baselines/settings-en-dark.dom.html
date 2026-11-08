@@ -5,13 +5,46 @@
 <link rel="stylesheet" href="../../styles/ytvdlt.css">
 <link rel="stylesheet" href="../../styles/theme.css">
 <style>
-  .settings-page { height: 800px; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
-  .settings-head { display: flex; align-items: baseline; gap: 12px; border-bottom: 2px solid var(--accent); padding-bottom: 8px; }
+  /* 0.2.2 (D-99): the page is now a fixed header + a scrolling content column
+     with a sticky section list. `height:100%` (was a hard-coded 800px) is what
+     lets the inner column scroll instead of the whole document. */
+  .settings-page { height: 100%; padding: 16px 20px 12px; display: flex; flex-direction: column; gap: 12px; }
+  .settings-head { display: flex; align-items: baseline; gap: 12px; border-bottom: 2px solid var(--accent); padding-bottom: 8px; flex: 0 0 auto; }
   .settings-head h1 { font-size: 20px; margin: 0; font-weight: 700; }
   .settings-head .meta { color: var(--muted); font-size: 12px; }
-  /* No flex-grow: a fixed 800px page with two short cards otherwise leaves a
-     250px void between the cards and the About section. */
-  .settings-body { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 12px; flex: 0 0 auto; align-items: start; }
+  .settings-shell { flex: 1 1 auto; min-height: 0; display: flex; gap: 16px; }
+
+  /* Section list: one click scrolls, scrolling moves the highlight. */
+  .settings-nav { position: relative; flex: 0 0 156px; padding: 2px 10px 2px 0; display: flex; flex-direction: column; gap: 2px; }
+  .settings-nav a { display: block; padding: 6px 10px; border-radius: 6px; border-left: 2px solid transparent;
+    color: var(--muted); font-size: 12px; line-height: 1.35; text-decoration: none;
+    transition: color .18s ease, background-color .18s ease, border-color .18s ease; }
+  /* Hover changes text colour only: a filled hover state is indistinguishable
+     from the active entry in dark mode. */
+  .settings-nav a:hover { color: var(--ink); }
+  .settings-nav a[aria-current="true"] { color: var(--accent); background: var(--accent-soft);
+    border-left-color: var(--accent); font-weight: 700; }
+
+  .settings-scroll { flex: 1 1 auto; min-width: 0; overflow-y: auto; overflow-x: hidden;
+    padding-right: 6px; scroll-behavior: smooth;
+    /* 0.2.2 (D-99): enough tail room that the LAST pane can be scrolled to the
+       top. Without it the bottom panes never reach the probe line, and clicking
+       「关于」 would land with 「下载位置」 still highlighted. */
+    padding-bottom: max(140px, 60vh); }
+  /* Slim scrollbar so the column does not look like a browser window. */
+  .settings-scroll::-webkit-scrollbar { width: 8px; }
+  .settings-scroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  .settings-scroll::-webkit-scrollbar-track { background: transparent; }
+  html[data-motion="reduced"] .settings-scroll { scroll-behavior: auto; }
+  html[data-motion="reduced"] .settings-nav a { transition: none; }
+
+  /* No flex-grow: the two short cards would otherwise leave a void between the
+     cards and the sections below. */
+  /* 0.2.2 (D-99): one vertical column of panes inside the scroll host; the
+     sidebar targets these four anchors. 960px keeps label/control rows from
+     stretching across a 1280px window. */
+  .settings-scroll > .section { max-width: 960px; margin-top: 14px; }
+  .settings-scroll > .section:first-child { margin-top: 0; }
   .section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
   .section h2 { font-size: 14px; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
   .row { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; }
@@ -32,6 +65,35 @@
   .swatch[data-accent="system"] { background: linear-gradient(135deg, #1d63b8 50%, #46c98a 50%); }
   .swatch[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 2px; }
   .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  /* 0.2.1 (D-93 / D-94): two independent update blocks in one card. */
+  .update-block { border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 8px; }
+  .update-block:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+  .update-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+  .update-head b { font-size: 13px; }
+  .update-meta { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .update-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+  .update-row button { height: 28px; padding: 0 11px; font-size: 12px; }
+  .update-row button.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 700; }
+  .update-row button:disabled { opacity: .55; cursor: default; }
+  .check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .check input { accent-color: var(--accent); }
+  #settings-app-state[data-update-state="error"] { color: var(--danger); }
+  #settings-app-state[data-update-state="available"] { color: var(--accent); font-weight: 700; }
+  #settings-components[data-component-state="failed"] { color: var(--danger); }
+  #settings-components[data-component-state="available"] { color: var(--accent); font-weight: 700; }
+  /* 0.2.1 (D-98): download roots. The value is a path, so it is elided from the
+     left edge only after the drive letter — `title` carries the full string. */
+  .path-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; }
+  .path-row .spacer { flex: 1 1 auto; }
+  .path-label { width: 34px; color: var(--muted); flex: 0 0 auto; }
+  .path-value { flex: 0 1 auto; max-width: 60%; padding: 4px 9px; border-radius: 5px;
+    background: #f3f4f6; color: var(--ink); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  html[data-theme="dark"] .path-value { background: #0a1119; color: #cfe3f7; }
+  .path-row button { height: 26px; padding: 0 10px; font-size: 12px; }
+  .path-row button.ghost { color: var(--muted); }
+  #settings-path-note[data-path-state="error"] { color: var(--danger); }
+  #settings-path-note[data-path-state="ok"] { color: var(--accent); }
   select { height: 30px; font-family: inherit; font-size: 13px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--ink); }
   .about-line { display: flex; gap: 8px; font-size: 12px; color: var(--muted); padding: 4px 0; }
   .about-line b { color: var(--ink); font-weight: 700; }
@@ -44,102 +106,139 @@
 <main class="settings-page" id="settings-root" data-state="ready" data-theme-value="dark" data-accent-value="teal" data-locale-value="en" data-motion-value="system">
   <header class="settings-head">
     <h1 id="settings-title" data-i18n="settings.title" data-fit="">Settings</h1>
-    <span class="meta" id="settings-meta">v0.1.10</span>
+    <span class="meta" id="settings-meta">v0.2.2</span>
   </header>
 
-  <div class="settings-body">
-    <section class="section" id="section-appearance">
-      <h2 data-i18n="settings.appearance" data-fit="">Appearance</h2>
+  <div class="settings-shell">
+    <nav class="settings-nav" id="settings-nav" aria-label="Sections" data-i18n-aria-label="settings.nav.label" data-active="section-appearance" data-scrollable="1">
+      <a href="#section-appearance" data-nav-target="section-appearance" aria-current="true" data-i18n="settings.nav.appearance" data-fit="">Theme &amp; appearance</a>
+      <a href="#section-updates" data-nav-target="section-updates" aria-current="false" data-i18n="settings.nav.updates" data-fit="">Updates</a>
+      <a href="#section-paths" data-nav-target="section-paths" aria-current="false" data-i18n="settings.nav.paths" data-fit="">Download location</a>
+      <a href="#section-about" data-nav-target="section-about" aria-current="false" data-i18n="settings.nav.about" data-fit="">About</a>
+    </nav>
 
-      <div class="row">
-        <span class="label" data-i18n="settings.theme" data-fit="">Theme</span>
-        <div class="segmented" id="settings-theme" role="group" aria-label="主题">
-          <button type="button" data-theme="light" aria-pressed="false" data-i18n="settings.theme.light" data-fit="">Light</button>
-          <button type="button" data-theme="dark" aria-pressed="true" data-i18n="settings.theme.dark" data-fit="">Dark</button>
-          <button type="button" data-theme="system" aria-pressed="false" data-i18n="settings.theme.system" data-fit="">System</button>
-        </div>
-      </div>
+    <div class="settings-scroll" id="settings-scroll" tabindex="0">
+      <section class="section" id="section-appearance">
+        <h2 data-i18n="settings.appearance" data-fit="">Theme &amp; appearance</h2>
 
-      <div class="row">
-        <span class="label" data-i18n="settings.accent" data-fit="">Accent</span>
-        <div class="swatches" id="settings-accent" role="group" aria-label="强调色">
-          <button class="swatch" type="button" data-accent="system" aria-pressed="false" title="跟随系统" aria-label="跟随系统"></button>
-          <button class="swatch" type="button" data-accent="blue" aria-pressed="false" title="蓝" aria-label="蓝"></button>
-          <button class="swatch" type="button" data-accent="teal" aria-pressed="true" title="青" aria-label="青"></button>
-          <button class="swatch" type="button" data-accent="violet" aria-pressed="false" title="紫" aria-label="紫"></button>
-          <button class="swatch" type="button" data-accent="amber" aria-pressed="false" title="琥珀" aria-label="琥珀"></button>
-          <button class="swatch" type="button" data-accent="rose" aria-pressed="false" title="玫红" aria-label="玫红"></button>
+        <div class="row">
+          <span class="label" data-i18n="settings.theme" data-fit="">Theme</span>
+          <div class="segmented" id="settings-theme" role="group" aria-label="主题">
+            <button type="button" data-theme="light" aria-pressed="false" data-i18n="settings.theme.light" data-fit="">Light</button>
+            <button type="button" data-theme="dark" aria-pressed="true" data-i18n="settings.theme.dark" data-fit="">Dark</button>
+            <button type="button" data-theme="system" aria-pressed="false" data-i18n="settings.theme.system" data-fit="">System</button>
+          </div>
         </div>
+
+        <div class="row">
+          <span class="label" data-i18n="settings.accent" data-fit="">Accent</span>
+          <div class="swatches" id="settings-accent" role="group" aria-label="强调色">
+            <button class="swatch" type="button" data-accent="system" aria-pressed="false" title="跟随系统" aria-label="跟随系统"></button>
+            <button class="swatch" type="button" data-accent="blue" aria-pressed="false" title="蓝" aria-label="蓝"></button>
+            <button class="swatch" type="button" data-accent="teal" aria-pressed="true" title="青" aria-label="青"></button>
+            <button class="swatch" type="button" data-accent="violet" aria-pressed="false" title="紫" aria-label="紫"></button>
+            <button class="swatch" type="button" data-accent="amber" aria-pressed="false" title="琥珀" aria-label="琥珀"></button>
+            <button class="swatch" type="button" data-accent="rose" aria-pressed="false" title="玫红" aria-label="玫红"></button>
+          </div>
+          <span class="spacer"></span>
+          <span class="note" id="settings-accent-note" data-i18n="settings.accent.note" data-fit="">Dynamic colour: follows the Windows accent</span>
+        </div>
+
+        <div class="row">
+          <span class="label" data-i18n="settings.motion" data-fit="">Motion</span>
+          <select id="settings-motion" aria-label="动态效果">
+            <option value="system" data-i18n="settings.motion.system">Follow system</option>
+            <option value="reduced" data-i18n="settings.motion.reduced">Reduce motion</option>
+            <option value="full" data-i18n="settings.motion.full">Full motion</option>
+          </select>
+        </div>
+
+        <div class="row">
+          <span class="label" data-i18n="settings.language" data-fit="">Language</span>
+          <div class="segmented" id="settings-language" role="group" aria-label="语言">
+            <button type="button" data-locale="zh-CN" aria-pressed="false" data-fit="">简体中文</button>
+            <button type="button" data-locale="en" aria-pressed="true" data-fit="">English</button>
+          </div>
+        </div>
+        <div class="row">
+          <span class="label" data-i18n="settings.autostart" data-fit="">Start with Windows</span>
+          <input type="checkbox" id="settings-autostart" aria-label="开机自启">
+          <span class="spacer"></span>
+          <span class="note" data-i18n="settings.autostart.note" data-fit="">per-user, no administrator rights</span>
+        </div>
+        <p class="note" data-i18n="settings.autostart.hint">Optional; off means no Run entry in the registry (A-4.6-07).</p>
+      </section>
+
+      <section class="section" id="section-updates">
+        <h2 data-i18n="settings.updates" data-fit="">Updates</h2>
+        <!-- 0.2.1 (D-93)：应用本体更新。通道/间隔两项已删除——它们只写进 M3
+             的 fixture 通道，从来不会持久化，留着就是骗人。 -->
+        <div class="update-block" id="settings-app-block" data-update-state="idle">
+          <div class="update-head">
+            <b data-i18n="settings.app.update" data-fit="">Application</b>
+            <span class="update-meta" id="settings-app-current">—</span>
+          </div>
+          <div class="update-row">
+            <label class="check"><input type="checkbox" id="settings-app-auto"><span data-i18n="settings.app.autocheck" data-fit="">Check on startup</span></label>
+            <span class="spacer"></span>
+            <button type="button" id="settings-app-update" data-action="app-update" data-i18n="settings.app.check" data-fit="" disabled="">Check for updates</button>
+            <button type="button" id="settings-app-page" class="primary" data-i18n="settings.app.page" data-fit="" hidden="true">Open release page</button>
+          </div>
+          <p class="note" id="settings-app-state" data-update-state="idle">Offline: main process not connected</p>
+        </div>
+
+        <!-- 0.2.1 (D-94)：yt-dlp 引擎单独一块。它坏掉时软件整体下不动，
+             和本体更新是两回事，因此不做成同一个按钮。 -->
+        <div class="update-block" id="settings-engine-block" data-update-state="idle">
+          <div class="update-head">
+            <b data-i18n="settings.engine.title" data-fit="">yt-dlp engine</b>
+            <span class="update-meta" id="settings-engine-current">—</span>
+            <span class="update-meta" id="settings-engine-latest"></span>
+          </div>
+          <div class="update-row">
+            <label class="check"><input type="checkbox" id="settings-engine-auto"><span data-i18n="settings.engine.autocheck" data-fit="">Check on startup</span></label>
+            <span class="spacer"></span>
+            <button type="button" id="settings-engine-check" data-i18n="settings.engine.check" data-fit="">Check for updates</button>
+            <button type="button" id="settings-engine-update" class="primary" data-action="engine-update" data-i18n="settings.engine.update" data-fit="" disabled="">Update now</button>
+          </div>
+          <p class="note" id="settings-components" data-component-state="offline">Offline: main process not connected</p>
+        </div>
+      </section>
+
+    <section class="section" id="section-paths">
+      <h2 data-i18n="settings.paths.title" data-fit="">Download location</h2>
+      <div class="path-row" data-path-kind="video">
+        <span class="path-label" data-i18n="settings.paths.video" data-fit="">Video</span>
+        <span class="path-value" id="settings-path-video">%USERPROFILE%\Downloads\YTVDLT</span>
         <span class="spacer"></span>
-        <span class="note" id="settings-accent-note" data-i18n="settings.accent.note" data-fit="">Dynamic colour: follows the Windows accent</span>
+        <button type="button" data-path-action="open" data-path-kind="video" data-i18n="settings.paths.open" data-fit="">Open</button>
+        <button type="button" data-path-action="pick" data-path-kind="video" data-i18n="settings.paths.change" data-fit="">Change…</button>
+        <button type="button" class="ghost" data-path-action="reset" data-path-kind="video" data-i18n="settings.paths.reset" data-fit="">Reset</button>
       </div>
-
-      <div class="row">
-        <span class="label" data-i18n="settings.motion" data-fit="">Motion</span>
-        <select id="settings-motion" aria-label="动态效果">
-          <option value="system" data-i18n="settings.motion.system">Follow system</option>
-          <option value="reduced" data-i18n="settings.motion.reduced">Reduce motion</option>
-          <option value="full" data-i18n="settings.motion.full">Full motion</option>
-        </select>
+      <div class="path-row" data-path-kind="audio">
+        <span class="path-label" data-i18n="settings.paths.audio" data-fit="">Audio</span>
+        <span class="path-value" id="settings-path-audio">%USERPROFILE%\Downloads\YTVDLT\Audio</span>
+        <span class="spacer"></span>
+        <button type="button" data-path-action="open" data-path-kind="audio" data-i18n="settings.paths.open" data-fit="">Open</button>
+        <button type="button" data-path-action="pick" data-path-kind="audio" data-i18n="settings.paths.change" data-fit="">Change…</button>
+        <button type="button" class="ghost" data-path-action="reset" data-path-kind="audio" data-i18n="settings.paths.reset" data-fit="">Reset</button>
       </div>
-
-      <div class="row">
-        <span class="label" data-i18n="settings.language" data-fit="">Language</span>
-        <div class="segmented" id="settings-language" role="group" aria-label="语言">
-          <button type="button" data-locale="zh-CN" aria-pressed="false" data-fit="">简体中文</button>
-          <button type="button" data-locale="en" aria-pressed="true" data-fit="">English</button>
-        </div>
-      </div>
-      <p class="note" data-i18n="settings.autostart.hint">Optional; off means no Run entry in the registry (A-4.6-07).</p>
+      <p class="note" id="settings-path-note" data-i18n="settings.paths.hint" data-path-state="idle">Video and audio can live in different folders. The folder is checked for write access before it is saved.</p>
     </section>
 
-    <section class="section" id="section-updates">
-      <h2 data-i18n="settings.updates" data-fit="">Updates</h2>
-      <div class="row">
-        <span class="label" data-i18n="settings.autostart" data-fit="">Start with Windows</span>
-        <input type="checkbox" id="settings-autostart" aria-label="开机自启">
-        <span class="spacer"></span>
-        <span class="note" data-i18n="settings.autostart.note" data-fit="">per-user, no administrator rights</span>
-      </div>
-      <div class="row">
-        <span class="label" data-i18n="settings.update.channel" data-fit="">Update channel</span>
-        <select id="settings-channel" aria-label="更新通道">
-          <option value="stable">stable</option>
-          <option value="nightly">nightly</option>
-        </select>
-      </div>
-      <div class="row">
-        <span class="label" data-i18n="settings.update.interval" data-fit="">Check interval</span>
-        <select id="settings-interval" aria-label="检查间隔">
-          <option value="weekly">weekly</option>
-          <option value="daily">daily</option>
-          <option value="never">never</option>
-        </select>
-      </div>
-      <div class="row">
-        <span class="label" data-i18n="settings.engine.update" data-fit="">Component updates: yt-dlp/aria2c</span>
-        <button type="button" id="settings-engine-update" data-action="engine-update" data-i18n="common.check" data-fit="" disabled="">Check</button>
-      </div>
-      <p class="note" id="settings-components" data-component-state="offline">Offline: main process not connected</p>
-      <div class="row">
-        <span class="label" data-i18n="settings.app.update" data-fit="">Check app update</span>
-        <button type="button" id="settings-app-update" data-action="app-update" data-i18n="common.check" data-fit="" disabled="">Check</button>
-      </div>
-      <p class="note" id="settings-offline" data-i18n="settings.offline">Component updates need a feed; app updates wait for the GitHub repo</p>
+    <section class="section" id="section-about">
+      <h2 data-i18n="about.title" data-fit="">About YTVDLT</h2>
+      <div class="about-line"><b data-i18n="about.version" data-fit="">Version</b><span id="about-version">v0.2.2</span></div>
+      <div class="about-line"><b data-i18n="about.author" data-fit="">Author</b><span data-i18n="about.author.name">Yechen Liao</span></div>
+      <div class="about-line" data-i18n="about.runtime">Runtime: yt-dlp / node / ffmpeg (bundled, never inside asar)</div>
+      <div class="about-line"><b data-i18n="about.license.title" data-fit="">Open source licences</b></div>
+      <p class="note" data-i18n="about.license.body">Bundled components: yt-dlp (Unlicense), FFmpeg (LGPL-3.0), Electron (MIT) and Node.js (MIT). Full licence texts are in THIRD_PARTY_NOTICES; source is available under each component's licence.</p>
+      <div class="about-line" data-i18n="about.license">FFmpeg is LGPL-3.0; see THIRD_PARTY_NOTICES for sources and the full licence.</div>
+      <div class="about-line" data-i18n="about.haptics">Haptics: no equivalent hardware on desktop, explicitly omitted.</div>
+      <div class="about-line" data-i18n="about.transitions">Transitions are limited to state changes and dialogs, and respect reduce-motion.</div>
     </section>
+    </div>
   </div>
-
-  <section class="section" id="section-about">
-    <h2 data-i18n="about.title" data-fit="">About YTVDLT</h2>
-    <div class="about-line"><b data-i18n="about.version" data-fit="">Version</b><span id="about-version">v0.1.10</span></div>
-    <div class="about-line"><b data-i18n="about.author" data-fit="">Author</b><span data-i18n="about.author.name">Yechen Liao</span></div>
-    <div class="about-line" data-i18n="about.runtime">Runtime: yt-dlp / node / ffmpeg (bundled, never inside asar)</div>
-    <div class="about-line"><b data-i18n="about.license.title" data-fit="">Open source licences</b></div>
-    <p class="note" data-i18n="about.license.body">Bundled components: yt-dlp (Unlicense), FFmpeg (LGPL-3.0), Electron (MIT) and Node.js (MIT). Full licence texts are in THIRD_PARTY_NOTICES; source is available under each component's licence.</p>
-    <div class="about-line" data-i18n="about.license">FFmpeg is LGPL-3.0; see THIRD_PARTY_NOTICES for sources and the full licence.</div>
-    <div class="about-line" data-i18n="about.haptics">Haptics: no equivalent hardware on desktop, explicitly omitted.</div>
-    <div class="about-line" data-i18n="about.transitions">Transitions are limited to state changes and dialogs, and respect reduce-motion.</div>
-  </section>
 
   <pre id="ytvdlt-output" aria-live="polite" hidden="true">{}</pre>
 </main>

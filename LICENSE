@@ -1,11 +1,78 @@
 YTVDLT Non-Commercial License 1.0
-（YTVDLT 非商业许可 1.0 · 自定义许可，非 OSI 认证）
 
 Copyright (c) 2026 LeoLee. All rights reserved.
 
+This license is published in English and Simplified Chinese. Both texts are
+equally authentic and together form the license. In case of any conflict or
+ambiguity, the Simplified Chinese text prevails.
+
 ---
 
-## 中文（以本段与下方英文条款共同构成许可；如有歧义，以中文为准）
+## English
+
+### 1. Grant of Rights
+
+Subject to all terms below, you are granted, **free of charge**:
+
+1. **Use** — to run this software for any **non-commercial purpose**, including
+   personal study, research, teaching, and charitable use.
+2. **Modify** — to read and modify the source code, and to use modified versions
+   non-commercially.
+3. **Distribute** — to provide this software, modified or not, in source or
+   binary form, provided that you:
+   - include this license in full, unmodified;
+   - retain the original author's copyright notice and attribution;
+   - **prominently mark** modified versions as changed and different from the
+     original.
+
+### 2. Prohibited Conduct
+
+1. **Commercial use** — you may not use this software (including modified
+   versions, derivatives and binaries) for any commercial purpose, including but
+   not limited to: selling it, bundling it with a paid product, offering it as
+   part of a paid service, using it in paid client deliverables, or productive
+   use inside a commercial organization.
+2. **Removing notices** — you may not remove or obscure this license, the
+   copyright notice, or the author's attribution.
+3. **Implied endorsement** — you may not imply that the original author endorses
+   you or your version.
+
+### 3. Commercial Licensing
+
+Commercial use requires **prior written permission from the author** (paid or
+free, at the author's discretion). Until such permission is granted, Section 2.1
+applies.
+
+### 4. Termination
+
+Any violation of these terms **automatically terminates** all rights granted to
+you. Continued use after termination constitutes infringement.
+
+### 5. Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHOR BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+### 6. Third-Party Components
+
+Bundled third-party components keep their own licenses and are **not** governed
+by this license — see [`docs/THIRD_PARTY_NOTICES.md`](docs/THIRD_PARTY_NOTICES.md):
+
+- FFmpeg / ffprobe — LGPL-3.0 (dynamically linked)
+- aria2c — GPL-2.0-or-later (separate process)
+- yt-dlp — Unlicense
+- Node.js — MIT
+- Electron — MIT
+
+This license does not alter those terms and does not restrict your rights to
+use, modify or replace those components under their own licenses.
+
+---
+
+## 简体中文
 
 ### 1. 授予的权利
 
@@ -30,7 +97,7 @@ Copyright (c) 2026 LeoLee. All rights reserved.
 
 ### 4. 终止
 
-违反本许可任一 term，你依本许可获得的全部权利**立即自动终止**。终止后继续使用即构成侵权。
+违反本许可任一条款，你依本许可获得的全部权利**立即自动终止**。终止后继续使用即构成侵权。
 
 ### 5. 免责
 
@@ -38,7 +105,8 @@ Copyright (c) 2026 LeoLee. All rights reserved.
 
 ### 6. 第三方组件不受本许可约束
 
-随包分发的第三方组件各自遵循其原有许可，**不受本许可影响**，详见 `docs/THIRD_PARTY_NOTICES.md`：
+随包分发的第三方组件各自遵循其原有许可，**不受本许可影响**，详见 [`docs/THIRD_PARTY_NOTICES.md`](docs/THIRD_PARTY_NOTICES.md)：
+
 - FFmpeg / ffprobe（LGPL-3.0，动态链接）
 - aria2c（GPL-2.0-or-later，独立进程）
 - yt-dlp（Unlicense）、Node.js（MIT）、Electron（MIT）
@@ -47,47 +115,22 @@ Copyright (c) 2026 LeoLee. All rights reserved.
 
 ---
 
-## English
+## Notes (not part of the license terms)
 
-### 1. Grant of Rights
-
-Subject to the terms below, you are granted, **free of charge**:
-
-1. **Use** — to run this software for any **non-commercial purpose**, including personal study, research, teaching, and charitable use.
-2. **Modify** — to read and modify the source code, and to use modified versions non-commercially.
-3. **Distribute** — to provide this software, modified or not, in source or binary form, provided that you: include this license unmodified; retain the original author's copyright notice; and **prominently mark** modified versions as changed and different from the original.
-
-### 2. Prohibited Conduct
-
-1. **Commercial use** — you may not use this software (including modified versions, derivatives and binaries) for any commercial purpose, including but not limited to: selling it, bundling it with a paid product, offering it as part of a paid service, using it in paid client deliverables, or productive use inside a commercial organization.
-2. **Removing notices** — you may not remove or obscure this license, the copyright notice, or the author's attribution.
-3. **Implied endorsement** — you may not imply that the original author endorses you or your version.
-
-### 3. Commercial Licensing
-
-Commercial use requires **prior written permission from the author** (paid or free, at the author's discretion). Until such permission is granted, Section 2.1 applies.
-
-### 4. Termination
-
-Any violation of these terms **automatically terminates** all rights granted to you. Continued use after termination is infringement.
-
-### 5. Disclaimer of Warranty
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
-
-### 6. Third-Party Components
-
-Bundled third-party components keep their own licenses and are **not** governed by this license — see `docs/THIRD_PARTY_NOTICES.md`:
-- FFmpeg / ffprobe — LGPL-3.0 (dynamic linking)
-- aria2c — GPL-2.0-or-later (separate process)
-- yt-dlp — Unlicense; Node.js — MIT; Electron — MIT
-
-This license does not alter those terms and does not restrict your rights to use, modify or replace those components under their own licenses.
-
----
+- **This is not MIT.** MIT permits commercial use; this license does **not**.
+  You cannot have both. To allow commercial use, replace this file with the full
+  MIT text — but then you can no longer forbid others from selling it.
+- **This is not "open source" in the OSI sense.** The accurate term is
+  **source-available**: the code is public and may be read, modified and
+  redistributed, but only non-commercially. Please describe it as
+  "source-available / free for non-commercial use" rather than "open source".
+- If you ever want a standard text, the closest fit is
+  `PolyForm Noncommercial 1.0.0` (for code) or `CC BY-NC-SA 4.0` (for docs).
+  This license deliberately does not incorporate them by reference, to avoid
+  version drift. Switching requires the author's confirmation.
 
 ## 说明（不属于许可条款，仅供理解）
 
-- **这不是 MIT**。MIT 允许商业使用，本许可**不允许**；两者不可兼得。若日后要允许商用，把本文件替换为 MIT 全文即可（一行命令的事），但那时就不能再禁止他人商用。
+- **这不是 MIT**。MIT 允许商业使用，本许可**不允许**；两者不可兼得。若日后要允许商用，把本文件替换为 MIT 全文即可，但那时就不能再禁止他人商用。
 - **这不是 OSI 意义上的「开源」**，准确说法是 **source-available（源码可得）**：源码公开、可读可改可分发，但限非商业。对外宣传时请用「源码公开 / 非商业免费」，不要写「开源」，以免被指误导。
-- 若你想改用标准许可证，常见替代：`PolyForm Noncommercial 1.0.0`（与本许可意图最接近）、`CC BY-NC-SA 4.0`（更适合文档而非代码）。本许可不引用它们的全文，是为了避免版本漂移；如需换成标准文本，须由作者确认。
+- 若想改用标准许可证，常见替代：`PolyForm Noncommercial 1.0.0`（与本许可意图最接近）、`CC BY-NC-SA 4.0`（更适合文档而非代码）。本许可不引用它们的全文，是为了避免版本漂移；如需换成标准文本，须由作者确认。

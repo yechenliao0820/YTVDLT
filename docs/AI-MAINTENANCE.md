@@ -37,6 +37,7 @@
 10. **改了本手册或 `BUILD-HISTORY.md` 要同步外层阅读副本**：业主在 `C:/Users/leolee/Desktop/YTVDLT/docs/` 放了副本，两边不一致会让人拿着旧规则干活。
 11. **版本号按 §7 的十进制进位规则取**，任一段都不写两位数；发版前查 `CHANGELOG.md` 确认下一版号。
 12. **维护完成后不要主动推送仓库或发布 Release**。等业主明确说「上传仓库」/「发布 release」再执行；执行后把仓库地址、分支、提交号与上传方法一起交给业主或下一位接手者（见 §11）。推送和发布是对外动作，不是收尾的自动步骤。
+13. **`README.md` 与 `README.zh-CN.md` 必须同时改**（D-100）：英文是默认门面，中文是镜像，两份章节一一对应、顶部各有语言切换行。只改一份等于制造两种真相；`docs/assets/` 里的截图随之更新时也要确认两份引用一致。
 
 ### 0.1 删除文件的规定（一次真实事故换来，不可协商）
 
@@ -131,7 +132,13 @@ ui（零依赖） ← preload ← apps/desktop
 | 产物校验、错误码与中文提示、错误报告 | `core/src/artifact-verifier/`、`shared/src/errors.ts`、`core/src/error-mapper/`、`error-report/` |
 | 队列调度、并发、暂停、历史快照 | `core/src/task-queue/`、`task-store/`；数据目录判定在 `data-dir.ts` |
 | 详情页、日志页、设置页、M3 三个对话框 | `packages/ui/src/pages/*`、`packages/ui/src/dialogs/*` |
-| 打包配置、图标、安装包 | `apps/desktop/electron-builder.yml`、`scripts/make-icon.mjs` |
+| 打包配置、图标、安装包 | `apps/desktop/electron-builder.yml`、`scripts/make-icon.mjs`、`apps/desktop/build/installer.nsh` |
+| **应用本体更新（检查 / 说明弹窗 / 下载校验 / 安装 / 忽略版本）** | `main/app-update-service.ts`、`main/github-releases.ts`、`main/adapters/http-download.ts`；纯规则在 `core/src/app-update/`；弹窗在 `ui/src/updates/update-dialog.js` |
+| **yt-dlp 组件更新（版本查询 / 换文件 / 自动检查）** | `main/component-updater.ts`（`feedUrl` / `versionApiUrl`）、`engine-ytdlp/src/self-updater.ts` |
+| **队列进度（总大小 / 速度 / 剩余时间）** | `core/src/task-queue/task-queue.ts`（progress 分支）→ `main/m5-channels.ts::toTaskListItem` → `ui/src/pages/queue/queue.js::progressText` |
+| **队列封面缩略图** | `main/thumbnail-cache.ts`、`main/m5-channels.ts::ThumbnailPort`、`queue.js::thumbNode` |
+| **下载位置（视频 / 音频目录）** | `ui/src/pages/settings/*`（`#section-paths`）→ `main/m5-channels.ts::PATH_ACTION` → `core/config-store/defaults.ts::DEFAULT_PATH_TOKENS`；原生对话框在 `main/adapters/path-picker.ts` |
+| **设置页分区目录 + 滚动联动** | `ui/src/pages/settings/index.html`（`.settings-shell` / `.settings-nav` / `.settings-scroll`）、`settings.js::installSectionNav()` |
 | 截图基线用例 | `scripts/e2e-cases.mjs`、`tests/e2e/baselines/` |
 
 ---
@@ -152,6 +159,7 @@ ui（零依赖） ← preload ← apps/desktop
 | **e2e 全红** | ① 是否刚改了 UI（DOM/像素必然变）② 失败 case 的 `dom=true` 是否仍成立 ③ 是否只有预期 case 失败 | 基线是冻结快照，改 UI 不等于改坏 | 按 §6 逐 case 重建；**不要**改松断言或全量覆盖 |
 | **打包后界面还是旧的** | ① 是否先跑 `build-desktop.mjs` ② asar 内对应文件是否是新内容 ③ `package.json` 是否被构建改写未还原 | 顺序反了会把上一版前端塞进包 | 再查缓存、`dist/` 与输出目录、图标是否重生成 |
 | **改了代码没效果 / 行为异常** | ① `grep` 定位真实实现（别猜文件名）② 是否违反分层 ③ 是否改到了 fixture 分支 | 项目有多处同名的 M3/M4/M5 通道 | 再按 §1 优先级查日志与当场输出 |
+| **「检查更新」没反应 / 一直提示失败** | ① `logs/app-*.jsonl` 里 `app-update` 与 `component-check` ② GitHub API 是否可达（`api.github.com/repos/yechenliao0820/YTVDLT/releases/latest`）③ `advanced.autoCheckAppUpdate` / `lastAppUpdateCheckAt` 是否把自动检查挡在节流窗口内 ④ 该版本是否已被「以后不再提示」写进 `advanced.skippedAppVersion` | 更新链路不碰 UI 状态，失败只写日志、不动正在运行的版本 | 再查 Release 资产名是否还能被 `selectInstallerAsset` 认出来（改名成非 `Setup` 且带 portable 字样会被打 0 分） |
 
 ---
 
@@ -172,6 +180,9 @@ ui（零依赖） ← preload ← apps/desktop
 3. **删本地文件**：`TASK_ACTION` 的 `withFiles: true` 只允许配 `action: 'remove'`；主进程只取该任务 `artifacts`，经 `TrashFilesPort` 移入回收站，**部分失败保留记录**。
 4. **无痕**：`SETTINGS_SET` 的 `privateMode` 只收 boolean，`SETTINGS_GET` 回读；关闭窗口时清任务记录，**不动本地文件**。
 5. `PROBE` / `PROBE_PLAYLIST` / `DIALOG_CONFIRM` 仍是 fixture 通道，别当成真实能力。
+6. **更新三分家**（D-93 / D-94）：`APP_UPDATE_*` 管应用本体（GitHub Release），`COMPONENT_CHECK` / `COMPONENT_UPDATE` 管随包二进制，`COMPONENT_STATUS` 只读本地版本。`APP_UPDATE_STATUS` 是纯内存读，队列页与设置页都以轮询方式消费，**不要为它加主进程推送**。
+7. **`TASK_LIST` 只回本地封面路径 `thumbPath`**：远端缩略图 URL 由主进程缓存成文件，URL 本身永不出主进程（与 URL 脱敏同一条规则）。
+8. **`PATH_ACTION` 不接受路径字符串**（D-98）：渲染层只能发 `{action: pick|reset|open, kind: video|audio}`，能写进 `paths.*` 的只有主进程对话框选出来的目录。改这条等于给渲染层开一个"任意写配置路径"的口子。
 
 ---
 
@@ -181,7 +192,9 @@ ui（零依赖） ← preload ← apps/desktop
 |---|---|
 | exe 目录可写（便携 / 默认安装） | `<exe目录>\config\config.json`、`<exe目录>\logs\app-YYYYMMDD.jsonl` |
 | 装到 `C:\Program Files`（不可写） | `%APPDATA%\YTVDLT\config\…`（`data-dir.ts` 写探针实测可写性） |
-| 默认下载目录 | `%USERPROFILE%\Downloads\YTVDLT`（**运行时展开**，spawn 不经过 shell） |
+| 默认下载目录 | 视频 `%USERPROFILE%\Downloads\YTVDLT`、音频 `…\YTVDLT\Audio`（**运行时展开**，spawn 不经过 shell） |
+| 用户改过下载目录 | `paths.videoDir` / `paths.audioDir` 存**绝对路径**；未改过则存 token（`%USERPROFILE%/…`），换机器仍跟用户目录走（D-98） |
+| 封面缓存 / 更新包 | `<dataDir>\thumbs\<sha1(url)>.<ext>`、`<dataDir>\updates\YTVDLT-Setup-*.exe`（D-93 / D-96） |
 
 `config/config.json` 按域组织：`general / format / subtitle / paths / network / advanced`；
 `config/tasks.json` 是队列快照。
@@ -273,6 +286,9 @@ ui（零依赖） ← preload ← apps/desktop
 6. **真机 CDP 启动报 `bad option: --remote-debugging-port=...`**：会话继承了 `ELECTRON_RUN_AS_NODE=1`，Electron 被当成 Node。启动前用 `env -u ELECTRON_RUN_AS_NODE -u NODE_OPTIONS -u NODE_EXTRA_CA_CERTS ./YTVDLT.exe --remote-debugging-port=9222`。
 7. **任何子进程 spawn 都要带可写 `cwd` 与 `TEMP/TMP/TMPDIR`**：装到只读目录时，缺了它们 yt-dlp 的临时文件会落到安装目录。不要自己拼 `env: { PATH }`。
 8. **改 UI 后截图基线必然变**，这是预期；处理方式见 §7，不是「测试坏了」。
+9. **桌面图标是 shell 缓存问题，先证明打包没坏**：把 `build/icon.ico` 里 256 档的 DIB 载荷（跳过 40 字节头）在 `dist-<ver>/win-unpacked/YTVDLT.exe` 里搜一遍，命中就说明 `win.icon` 已生效，别再改打包配置；接着看 `build/installer.nsh`（`SHChangeNotify` 刷缓存）是否被执行，最后才是 `ie4uinit.exe -show` 或删快捷方式重装。
+10. **设置页的滚动发生在内层 `.settings-scroll`**：目录要跟着高亮，就必须用内层 `scrollTop` 而不是文档滚动；并且**底部要留出 `max(140px, 60vh)` 的空白**，否则最后两个分区永远滚不到探针线，点「关于」会停在高亮「下载位置」的位置（D-99）。首帧 rect 不可信，`load` + `ResizeObserver` 各复测一次。
+11. **yt-dlp 不会覆盖同名文件**：第二次下载只会打印 `has already been downloaded` 并退出 0，应用随后拿到的是**旧文件**。要让用户「再存一份」，必须在 spawn 之前把 ` (n)` 插进 `-o` 模板（`TaskQueue.withCopySuffix()`），而不是事后改历史（D-101）。同理：这种情况**不能判 Error**，文件在盘上、校验也过了。
 
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
@@ -289,7 +305,10 @@ ui（零依赖） ← preload ← apps/desktop
 | 干净机验收、部分 `SKIPPED` 验收项（按规则不改判） | `docs/M5-VM-CHECKLIST.md`、`scripts/acceptance.mjs` |
 | 托盘菜单与 NSIS 安装向导未双语；托盘右键无「设置/关于」 | `apps/desktop/src/main/tray.ts` |
 | M3 弹窗里 JS 拼接的文案可能中英混排 | `ui/src/i18n/messages.js::PHRASES` |
-| 关于弹窗无「检查更新」（更新通道是占位地址） | `ui/src/about/about.js` |
+| 便携版不参与自更新（只认 `Setup` 资产，`-portable` 被打 0 分） | `core/src/app-update/release.ts::selectInstallerAsset` |
+| 缩略图缓存按 URL 哈希去重但从不清理 | `apps/desktop/src/main/thumbnail-cache.ts` |
+| 后处理（合并/转码）阶段没有速度与剩余时间（引擎不报 `speed`） | `ui/src/pages/queue/queue.js::progressText` |
+| 应用更新没有差量下载，每次整包（约 216 MiB） | `apps/desktop/src/main/adapters/http-download.ts` |
 | 删本地文件、只读目录安装的在线下载，仍待目标环境真机复测 | §4 分诊表对应行 |
 
 > 这张表会随开发推进变短。**完成一项就删一行**，不要留着写「已做」——那是本手册最容易腐烂的地方。
@@ -301,6 +320,7 @@ ui（零依赖） ← preload ← apps/desktop
 | 想了解 | 看哪份 |
 |---|---|
 | **版本流水（某版改了什么）** | `docs/CHANGELOG.md` |
+| **给外部看的产品门面（安装 / 构建 / 功能）** | `README.md`（英，默认）与 `README.zh-CN.md`（中，镜像）；截图在 `docs/assets/` |
 | 做过哪些决策、为什么 | `docs/DECISIONS.md`（最新编号看 `handoff-check.mjs` 输出） |
 | 构建产物考据 / 淘汰版本 | `docs/BUILD-HISTORY.md` |
 | 对业主的交付口径 / 验收结论 | `docs/DELIVERY-REPORT.md` |

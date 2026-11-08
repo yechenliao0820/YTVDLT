@@ -90,8 +90,9 @@ async function harness(
 }
 
 describe('m5 ipc · channel inventory', () => {
-  it('exposes exactly the eleven M5 channels, all present in IPC_CHANNELS', () => {
-    expect(M5_CHANNELS).toHaveLength(11);
+  // 11 (M5) + COMPONENT_CHECK / APP_UPDATE_STATUS / APP_UPDATE_ACTION / PATH_ACTION (0.2.1).
+  it('exposes exactly the fifteen M5 channels, all present in IPC_CHANNELS', () => {
+    expect(M5_CHANNELS).toHaveLength(15);
     const values = Object.values(IPC_CHANNELS);
     for (const channel of M5_CHANNELS) expect(values).toContain(channel);
     expect(new Set(M5_CHANNELS).size).toBe(M5_CHANNELS.length);
@@ -420,5 +421,114 @@ describe('m5 ipc · private mode setting (D-88)', () => {
     const { handlers } = await harness();
     await expect(handlers.get(IPC_CHANNELS.SETTINGS_SET)?.({ privateMode: 'yes' }))
       .rejects.toThrow(/invalid privateMode/);
+  });
+});
+
+describe('m5 ipc · download location (D-98)', () => {
+  const expand = (raw: string): string => raw.split('%USERPROFILE%').join('C:/Users/leo');
+
+  function withPicker(result: { path: string | null; error: string | null }) {
+    const picked: Array<{ kind: string; startAt: string }> = [];
+    const opened: string[] = [];
+    return {
+      picked,
+      opened,
+      port: {
+        pick: async (kind: 'video' | 'audio', startAt: string) => {
+          picked.push({ kind, startAt });
+          return result;
+        },
+        open: async (path: string) => { opened.push(path); },
+      },
+    };
+  }
+
+  it('returns the expanded defaults through SETTINGS_GET, never an empty string', async () => {
+    const { handlers } = await harness(undefined, { expandPath: expand });
+    const settings = await handlers.get(IPC_CHANNELS.SETTINGS_GET)?.({}) as { videoDir: string; audioDir: string };
+    expect(settings.videoDir).toBe('C:/Users/leo/Downloads/YTVDLT');
+    expect(settings.audioDir).toBe('C:/Users/leo/Downloads/YTVDLT/Audio');
+  });
+
+  it('persists a picked folder and echoes the new resolved path', async () => {
+    const picker = withPicker({ path: 'D:/Video', error: null });
+    const { handlers, deps } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });
+    const result = await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'video' }) as {
+      ok: boolean; path: string; paths: { videoDir: string };
+    };
+    expect(result.ok).toBe(true);
+    expect(result.path).toBe('D:/Video');
+    expect(result.paths.videoDir).toBe('D:/Video');
+    expect(deps.config.get('paths', 'videoDir')).toBe('D:/Video');
+    expect(picker.picked[0]?.startAt).toBe('C:/Users/leo/Downloads/YTVDLT');
+  });
+
+  it('keeps audio and video independent', async () => {
+    const picker = withPicker({ path: 'D:/Music', error: null });
+    const { handlers, deps } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });
+    await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'audio' });
+    expect(deps.config.get('paths', 'audioDir')).toBe('D:/Music');
+    expect(deps.config.get('paths', 'videoDir')).toBe('%USERPROFILE%/Downloads/YTVDLT');
+  });
+
+  it('treats a cancelled dialog as "no change", not as an error', async () => {
+    const picker = withPicker({ path: null, error: null });
+    const { handlers, deps } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });
+    const result = await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'video' }) as {
+      ok: boolean; canceled: boolean; error: string | null;
+    };
+    expect(result.ok).toBe(false);
+    expect(result.canceled).toBe(true);
+    expect(result.error).toBeNull();
+    expect(deps.config.get('paths', 'videoDir')).toBe('%USERPROFILE%/Downloads/YTVDLT');
+  });
+
+  it('refuses to save a folder that is not writable', async () => {
+    const picker = withPicker({ path: null, error: '该文件夹不可写：C:/Windows/System32' });
+    const { handlers, deps } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });
+    const result = await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'video' }) as {
+      ok: boolean; canceled: boolean; error: string | null;
+    };
+    expect(result.ok).toBe(false);
+    expect(result.canceled).toBe(false);
+    expect(result.error).toContain('不可写');
+    expect(deps.config.get('paths', 'videoDir')).toBe('%USERPROFILE%/Downloads/YTVDLT');
+  });
+
+  it('resets to the shipped default token', async () => {
+    const picker = withPicker({ path: 'D:/Video', error: null });
+    const { handlers, deps } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });
+    await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'video' });
+    const result = await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'reset', kind: 'video' }) as {
+      ok: boolean; path: string;
+    };
+    expect(result.ok).toBe(true);
+    expect(deps.config.get('paths', 'videoDir')).toBe('%USERPROFILE%/Downloads/YTVDLT');
+    expect(result.path).toBe('C:/Users/leo/Downloads/YTVDLT');
+  });
+
+  it('opens the resolved folder through the picker port', async () => {
+    const picker = withPicker({ path: null, error: null });
+    const { handlers } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });
+    await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'open', kind: 'audio' });
+    expect(picker.opened).toEqual(['C:/Users/leo/Downloads/YTVDLT/Audio']);
+  });
+
+  it('rejects an unknown action or kind', async () => {
+    const picker = withPicker({ path: 'D:/x', error: null });
+    const { handlers } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });
+    await expect(handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'rm -rf', kind: 'video' }))
+      .rejects.toThrow(/unknown path action/);
+    await expect(handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'music' }))
+      .rejects.toThrow(/video\|audio/);
+  });
+
+  it('reports a disabled picker instead of pretending to save', async () => {
+    const { handlers } = await harness(undefined, { expandPath: expand });
+    const result = await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'video' }) as {
+      ok: boolean; error: string;
+    };
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('不支持');
   });
 });

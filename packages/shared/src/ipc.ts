@@ -37,6 +37,14 @@ export const IPC_CHANNELS = {
   // M5-5 follow-up (D-67): bundled component (yt-dlp / aria2c) updates.
   COMPONENT_STATUS: 'ytvdlt:component:status',
   COMPONENT_UPDATE: 'ytvdlt:component:update',
+  // 0.2.1 (append-only, D-93 / D-94): app update over GitHub Releases, and a
+  // network version lookup for the bundled components (separate on purpose:
+  // a stale yt-dlp must be fixable without touching the app itself).
+  APP_UPDATE_STATUS: 'ytvdlt:appUpdate:status',
+  APP_UPDATE_ACTION: 'ytvdlt:appUpdate:action',
+  COMPONENT_CHECK: 'ytvdlt:component:check',
+  // 0.2.1 (append-only, D-98): pick / reset / open a download directory.
+  PATH_ACTION: 'ytvdlt:path:action',
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];
