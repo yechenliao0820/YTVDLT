@@ -205,3 +205,41 @@ describe('M4 host · task detail service', () => {
     host.dispose();
   });
 });
+
+describe('M4 host · single enqueue applies the picked format (D-83)', () => {
+  it('audio: extractAudio + container + bitrate land in the request', async () => {
+    const { host } = await setup();
+    const ids = await host.enqueueSingle({
+      url: 'https://example.org/a', kind: 'audio', audioQuality: '128', audioFormat: 'mp3',
+    });
+    const record = host.task.queue.get(ids[0]);
+    expect(record?.kind).toBe('audio');
+    expect(record?.request?.format).toMatchObject({
+      extractAudio: true, audioFormat: 'mp3', audioQuality: '128',
+    });
+    host.dispose();
+  });
+
+  it('video: the resolution preset lands and audio extraction stays off', async () => {
+    const { host } = await setup();
+    const ids = await host.enqueueSingle({
+      url: 'https://example.org/v', kind: 'video', quality: '720p',
+    });
+    const record = host.task.queue.get(ids[0]);
+    expect(record?.request?.format).toMatchObject({
+      extractAudio: false, audioFormat: null, quality: '720p',
+    });
+    host.dispose();
+  });
+
+  it('audio with "auto" keeps the source codec (no transcode)', async () => {
+    const { host } = await setup();
+    const ids = await host.enqueueSingle({
+      url: 'https://example.org/a', kind: 'audio', audioFormat: 'auto',
+    });
+    expect(host.task.queue.get(ids[0])?.request?.format).toMatchObject({
+      extractAudio: true, audioFormat: null,
+    });
+    host.dispose();
+  });
+});

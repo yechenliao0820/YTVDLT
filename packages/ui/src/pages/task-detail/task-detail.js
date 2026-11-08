@@ -123,9 +123,13 @@
     });
   }
 
-  function runAction(action) {
+  function runAction(action, withFiles) {
     var output = doc.getElementById('ytvdlt-output');
-    invoke('TASK_ACTION', { taskId: current.model.id, action: action }).then(function (result) {
+    var payload = { taskId: current.model.id, action: action };
+    // D-87: `withFiles` is interpreted by the main process, which moves the
+    // task's artifacts to the OS Recycle Bin before dropping the record.
+    if (withFiles === true) payload.withFiles = true;
+    invoke('TASK_ACTION', payload).then(function (result) {
       var ok = result && result.ok === true;
       output.textContent = ok
         ? '已执行：' + action + (result && result.clipboardText ? '（已复制到剪贴板）' : '')
@@ -160,6 +164,83 @@
     host.insertBefore(back, host.firstChild);
   }
 
+  /**
+   * D-87: the old "删除" button removed the record without saying whether the
+   * downloaded file stays. The confirmation is injected in live mode ONLY, so
+   * the file:// screenshot baselines keep their exact DOM (same technique as
+   * installBackLink, D-80).
+   */
+  function tt(key) {
+    return global.YTVDLT && global.YTVDLT.i18n ? global.YTVDLT.i18n.t(key) : key;
+  }
+
+  function setModalHidden(node, hidden) {
+    if (node !== null) node.setAttribute('hidden', hidden ? 'true' : 'false');
+  }
+
+  function buildRemoveDialog() {
+    var wrap = doc.createElement('div');
+    wrap.id = 'detail-remove-modal';
+    wrap.setAttribute('role', 'dialog');
+    wrap.setAttribute('aria-modal', 'true');
+    wrap.style.cssText = [
+      'position:fixed', 'inset:0', 'z-index:80', 'display:flex',
+      'align-items:center', 'justify-content:center',
+      'background:rgba(12,22,34,.48)', 'padding:20px'
+    ].join(';');
+    var box = doc.createElement('div');
+    box.style.cssText = [
+      'width:min(440px,100%)', 'padding:20px 22px', 'border-radius:12px',
+      'background:var(--panel,#fff)', 'color:var(--ink,#111827)',
+      'border:1px solid var(--line,#d5dde5)', 'box-shadow:0 20px 60px rgba(10,20,32,.32)'
+    ].join(';');
+    var heading = doc.createElement('h2');
+    heading.style.cssText = 'margin:0 0 8px;font-size:17px;';
+    heading.textContent = tt('queue.delete.title');
+    var message = doc.createElement('p');
+    message.style.cssText = 'margin:0 0 10px;font-size:13px;line-height:1.6;color:var(--muted,#5c6b7a);';
+    message.textContent = tt('queue.delete.message');
+    var note = doc.createElement('p');
+    note.style.cssText = 'margin:0 0 16px;padding:8px 10px;font-size:11px;border-radius:6px;background:var(--accent-soft,#e5f0ff);';
+    note.textContent = tt('queue.delete.filesHint');
+    var actions = doc.createElement('div');
+    actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;';
+    var make = function (label, style, handler) {
+      var button = doc.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.style.cssText = 'height:32px;padding:0 14px;font-size:12px;border-radius:6px;cursor:pointer;' + style;
+      button.addEventListener('click', handler);
+      actions.appendChild(button);
+      return button;
+    };
+    var base = 'border:1px solid var(--line,#d5dde5);background:var(--panel,#fff);color:var(--ink,#111827);';
+    make(tt('queue.delete.cancel'), base, function () { setModalHidden(wrap, true); });
+    make(tt('queue.delete.onlyHistory'),
+      'border:1px solid var(--accent,#1d63b8);background:var(--accent,#1d63b8);color:#ffffff;font-weight:700;',
+      function () { setModalHidden(wrap, true); runAction('remove'); });
+    make(tt('queue.delete.withFiles'),
+      'border:1px solid var(--danger,#b1283a);background:var(--danger,#b1283a);color:#ffffff;font-weight:700;',
+      function () { setModalHidden(wrap, true); runAction('remove', true); });
+    box.appendChild(heading);
+    box.appendChild(message);
+    box.appendChild(note);
+    box.appendChild(actions);
+    wrap.appendChild(box);
+    setModalHidden(wrap, true);
+    wrap.addEventListener('click', function (event) {
+      if (event && event.target === wrap) setModalHidden(wrap, true);
+    });
+    doc.body.appendChild(wrap);
+    return wrap;
+  }
+
+  function openRemoveDialog() {
+    var modal = doc.getElementById('detail-remove-modal');
+    if (modal === null) modal = buildRemoveDialog();
+    setModalHidden(modal, false);
+  }
+
   paint(current.model);
 
   ACTIONS.forEach(function (action) {
@@ -167,7 +248,11 @@
     if (button === null) return;
     button.addEventListener('click', function () {
       if (!current.enabled[action]) return;
-      if (live) { runAction(action); return; }
+      if (live) {
+        if (action === 'remove') { openRemoveDialog(); return; }
+        runAction(action);
+        return;
+      }
       emit(action, current.model);
     });
   });

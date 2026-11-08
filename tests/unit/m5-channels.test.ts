@@ -15,7 +15,7 @@ import { CommandTemplateStore, ConfigStore, maskUrlSecrets } from '@ytvdlt/core'
 import type { TaskDetailAction, TaskDetailResult } from '@ytvdlt/core';
 import {
   M5_CHANNELS, createM5Handlers, toTaskDetail, toTaskListItem, validateM5Payload,
-  type M5ChannelDeps, type SystemAppearancePort,
+  type M5ChannelDeps, type SingleDownloadInput, type SystemAppearancePort,
 } from '../../apps/desktop/src/main/m5-channels.js';
 import { createInMemoryPorts, type InMemoryPorts } from './helpers/in-memory-ports.js';
 
@@ -58,7 +58,10 @@ const appearance: SystemAppearancePort = {
   accent: () => '#0f6b64',
 };
 
-async function harness(records: readonly TaskRecord[] = [record('t1'), record('t2', { state: 'Completed' })]): Promise<Harness> {
+async function harness(
+  records: readonly TaskRecord[] = [record('t1'), record('t2', { state: 'Completed' })],
+  overrides: Partial<M5ChannelDeps> = {},
+): Promise<Harness> {
   const ports = createInMemoryPorts();
   const config = new ConfigStore({ ports: ports.ports });
   await config.load();
@@ -81,6 +84,7 @@ async function harness(records: readonly TaskRecord[] = [record('t1'), record('t
     templates,
     config,
     systemAppearance: appearance,
+    ...overrides,
   };
   return { ports, deps, handlers: createM5Handlers(deps), calls };
 }
@@ -293,5 +297,128 @@ describe('D-67 · component update channels', () => {
     const handlers = createM5Handlers({ ...deps, componentUpdate: statusPort });
     await expect(handlers.get(IPC_CHANNELS.COMPONENT_STATUS)?.({ url: 'x' })).rejects.toThrow(/not allowed/);
     await expect(handlers.get(IPC_CHANNELS.COMPONENT_UPDATE)?.({ force: true })).rejects.toThrow(/not allowed/);
+  });
+});
+
+describe('m5 ipc · DOWNLOAD_START carries the user choice (D-83)', () => {
+  it('forwards the audio branch as kind + bitrate + container, nothing else', async () => {
+    const seen: SingleDownloadInput[] = [];
+    const { handlers } = await harness(undefined, {
+      enqueueSingle: async (input) => { seen.push(input); return ['single-1']; },
+    });
+    const result = await handlers.get(IPC_CHANNELS.DOWNLOAD_START)?.({
+      url: 'https://example.org/v',
+      kind: 'audio',
+      audioQuality: '192',
+      audioFormat: 'mp3',
+    }) as { accepted: boolean; enqueued: boolean; taskIds: string[] };
+    expect(result).toMatchObject({ accepted: true, enqueued: true, taskIds: ['single-1'] });
+    expect(seen[0]).toEqual({
+      url: 'https://example.org/v', kind: 'audio', audioQuality: '192', audioFormat: 'mp3',
+    });
+  });
+
+  it('forwards the video branch as a resolution preset only', async () => {
+    const seen: SingleDownloadInput[] = [];
+    const { handlers } = await harness(undefined, {
+      enqueueSingle: async (input) => { seen.push(input); return ['single-2']; },
+    });
+    // An audio field sent with kind=video must not leak into the request.
+    await handlers.get(IPC_CHANNELS.DOWNLOAD_START)?.({
+      url: 'https://example.org/v', kind: 'video', quality: '1080p', audioQuality: '192',
+    });
+    expect(seen[0]).toEqual({ url: 'https://example.org/v', kind: 'video', quality: '1080p' });
+  });
+
+  it('rejects values outside the three enums instead of silently defaulting', async () => {
+    const seen: SingleDownloadInput[] = [];
+    const { handlers } = await harness(undefined, {
+      enqueueSingle: async (input) => { seen.push(input); return ['single-3']; },
+    });
+    const channel = handlers.get(IPC_CHANNELS.DOWNLOAD_START);
+    await expect(channel?.({ url: 'https://example.org/v', quality: '4320p' })).rejects.toThrow(/invalid quality/);
+    await expect(channel?.({ url: 'https://example.org/v', kind: 'audio', audioQuality: '999' }))
+      .rejects.toThrow(/invalid audioQuality/);
+    await expect(channel?.({ url: 'https://example.org/v', kind: 'audio', audioFormat: 'flac' }))
+      .rejects.toThrow(/invalid audioFormat/);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('still reports "disabled" when the build has no enqueue port', async () => {
+    const { handlers } = await harness();
+    const result = await handlers.get(IPC_CHANNELS.DOWNLOAD_START)?.({
+      url: 'https://example.org/v', kind: 'audio',
+    }) as { accepted: boolean; enqueued: boolean; reason: string };
+    expect(result).toMatchObject({ accepted: false, enqueued: false });
+    expect(result.reason).toContain('未启用');
+  });
+});
+
+describe('m5 ipc · removing a task together with its local files (D-87)', () => {
+  it('recycles exactly this task artifacts, then removes the record', async () => {
+    const seen: string[][] = [];
+    const records = [
+      record('t1', { state: 'Completed', artifacts: ['C:/V/a.mp4', 'C:/V/a.vtt'] }),
+      record('t2', { state: 'Completed' }),
+    ];
+    const { handlers, calls } = await harness(records, {
+      trashFiles: { trash: async (paths) => { seen.push([...paths]); return [...paths]; } },
+    });
+    const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({
+      taskId: 't1', action: 'remove', withFiles: true,
+    }) as TaskDetailResult;
+    expect(seen).toEqual([['C:/V/a.mp4', 'C:/V/a.vtt']]);
+    expect(calls).toEqual(['remove']);
+    expect(result.ok).toBe(true);
+  });
+
+  it('keeps the record when the recycle bin handled only part of the files', async () => {
+    const records = [record('t1', { state: 'Completed', artifacts: ['a.mp4', 'b.vtt'] })];
+    const { handlers, calls } = await harness(records, {
+      trashFiles: { trash: async (paths) => paths.slice(0, 1) },
+    });
+    const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({
+      taskId: 't1', action: 'remove', withFiles: true,
+    }) as { ok: boolean; code: string };
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('ERROR');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses withFiles for other actions and rejects non-boolean values', async () => {
+    const { handlers } = await harness(undefined, {
+      trashFiles: { trash: async (paths) => paths },
+    });
+    const channel = handlers.get(IPC_CHANNELS.TASK_ACTION);
+    await expect(channel?.({ taskId: 't1', action: 'cancel', withFiles: true }))
+      .rejects.toThrow(/withFiles requires action=remove/);
+    await expect(channel?.({ taskId: 't1', action: 'remove', withFiles: 'yes' }))
+      .rejects.toThrow(/withFiles must be a boolean/);
+  });
+
+  it('deletes nothing when no recycle port is wired into the build', async () => {
+    const { handlers, calls } = await harness();
+    const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({
+      taskId: 't1', action: 'remove', withFiles: true,
+    }) as { ok: boolean; code: string };
+    expect(result).toMatchObject({ ok: false, code: 'SHELL_UNAVAILABLE' });
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('m5 ipc · private mode setting (D-88)', () => {
+  it('persists privateMode and reads it back through SETTINGS_GET', async () => {
+    const { handlers, deps } = await harness();
+    const before = await handlers.get(IPC_CHANNELS.SETTINGS_GET)?.({}) as { privateMode: boolean };
+    expect(before.privateMode).toBe(false);
+    const updated = await handlers.get(IPC_CHANNELS.SETTINGS_SET)?.({ privateMode: true }) as { privateMode: boolean };
+    expect(updated.privateMode).toBe(true);
+    expect(deps.config.get('general', 'privateMode')).toBe(true);
+  });
+
+  it('rejects a non-boolean privateMode', async () => {
+    const { handlers } = await harness();
+    await expect(handlers.get(IPC_CHANNELS.SETTINGS_SET)?.({ privateMode: 'yes' }))
+      .rejects.toThrow(/invalid privateMode/);
   });
 });

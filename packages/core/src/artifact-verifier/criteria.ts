@@ -84,10 +84,10 @@ async function runFfmpegDecode(ctx: CheckContext, file: string): Promise<{ stder
   return { stderr: result.stderr, exitCode: result.exitCode };
 }
 
-async function runFramemd5(ctx: CheckContext, file: string): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+async function runFramemd5(ctx: CheckContext, file: string, streamMap: '0:v' | '0:a'): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
   const result = await ctx.ports.process.spawn(
     ctx.ffmpegPath,
-    ['-v', 'error', '-i', file, '-map', '0:v', '-f', 'framemd5', '-'],
+    ['-v', 'error', '-i', file, '-map', streamMap, '-f', 'framemd5', '-'],
     { shell: false, windowsHide: true, timeoutMs: 60_000 },
   );
   return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
@@ -98,6 +98,23 @@ function streamsOf(json: Record<string, unknown> | null): Array<Record<string, u
   if (!Array.isArray(streams)) return [];
   return streams.filter((item): item is Record<string, unknown> =>
     typeof item === 'object' && item !== null);
+}
+
+/**
+ * D-84: an embedded cover (m4a/M4A transcode embeds one via `--embed-thumbnail`)
+ * shows up in ffprobe as a `video` stream with `disposition.attached_pic = 1`.
+ * It is artwork, not content: C6 must not treat it as "the task produced video".
+ */
+function isAttachedPic(stream: Record<string, unknown>): boolean {
+  const disposition = stream['disposition'];
+  return typeof disposition === 'object' && disposition !== null
+    && Number((disposition as Record<string, unknown>)['attached_pic']) === 1;
+}
+
+/** Real video streams (cover art excluded). */
+function hasRealVideoStream(json: Record<string, unknown> | null): boolean {
+  return streamsOf(json).some((stream) =>
+    String(stream['codec_type']) === 'video' && !isAttachedPic(stream));
 }
 
 function codecTypes(json: Record<string, unknown> | null): string[] {
@@ -221,10 +238,11 @@ export async function checkC6(ctx: CheckContext): Promise<ArtifactVerification> 
   if (primary === null) return fail('C6', 'no primary artifact');
   const probe = await runFfprobe(ctx, primary);
   const types = codecTypes(probe.json);
-  const hasVideo = types.includes('video');
+  // D-84: judge real content streams — an attached cover is not video.
+  const hasVideo = hasRealVideoStream(probe.json);
   const hasAudio = types.includes('audio');
   const audioOnly = ctx.kind === 'audio';
-  const actual = { codecTypes: types, kind: ctx.kind ?? 'video' };
+  const actual = { codecTypes: types, kind: ctx.kind ?? 'video', coverArtOnly: !hasVideo && types.includes('video') };
 
   if (audioOnly) {
     if (hasVideo) return fail('C6', 'audio task produced a video stream', actual);
@@ -273,20 +291,26 @@ export async function checkC8(ctx: CheckContext): Promise<ArtifactVerification> 
   const primary = primaryArtifact(ctx.artifacts);
   if (primary === null) return fail('C8', 'no primary artifact');
   const golden = ctx.expectedManifest?.c8Golden ?? null;
-  const out = await runFramemd5(ctx, primary);
+  // D-84: audio post-processing (`-x`) produces a streamless-of-video artifact.
+  // Hashing `-map 0:v` there made ffmpeg fail on every audio download
+  // ("Stream map '0:v' matches no streams"), so the hash target follows the task.
+  const streamMap: '0:v' | '0:a' = ctx.kind === 'audio' ? '0:a' : '0:v';
+  const out = await runFramemd5(ctx, primary, streamMap);
   if (out.stderr.trim() !== '') {
-    return fail('C8', 'framemd5 run emitted stderr', { stderr: out.stderr.slice(0, 400) });
+    return fail('C8', `framemd5 run emitted stderr (map ${streamMap})`, {
+      map: streamMap, stderr: out.stderr.slice(0, 400),
+    });
   }
   if (golden === null || golden.length === 0) {
     return skip('C8', 'no golden framemd5 recorded yet (first run); see O-M2-02', {
-      framemd5Length: out.stdout.length,
+      map: streamMap, framemd5Length: out.stdout.length,
     });
   }
   const normalize = (text: string): string => text.replace(/\r/g, '').trim();
   const matches = normalize(out.stdout) === normalize(golden);
   return matches
-    ? pass('C8', 'frame hashes match the golden reference', { framemd5Length: out.stdout.length })
-    : fail('C8', 'frame hashes differ from the golden reference', { framemd5Length: out.stdout.length });
+    ? pass('C8', 'frame hashes match the golden reference', { map: streamMap, framemd5Length: out.stdout.length })
+    : fail('C8', 'frame hashes differ from the golden reference', { map: streamMap, framemd5Length: out.stdout.length });
 }
 
 /** C9 — attached artifacts (subtitles / thumbnail / info.json) exist. */

@@ -30,6 +30,7 @@ interface Harness {
     focused: number;
     destroyed: number;
     trayDestroyed: number;
+    appMenu: unknown;
   };
 }
 
@@ -37,6 +38,7 @@ function fakeElectron(options: { lock?: boolean; theme?: 'dark' | 'light' } = {}
   const log: Harness['log'] = {
     quit: 0, handlers: [], windows: [], urls: [], trayToolTip: [], trayMenus: [],
     appEvents: new Map(), windowEvents: new Map(), shown: 0, focused: 0, destroyed: 0, trayDestroyed: 0,
+    appMenu: null,
   };
 
   class FakeWindow implements BrowserWindowLike {
@@ -85,7 +87,10 @@ function fakeElectron(options: { lock?: boolean; theme?: 'dark' | 'light' } = {}
       on: () => { /* no-op */ },
     },
     Tray: FakeTray as unknown as ElectronLike['Tray'],
-    Menu: { buildFromTemplate: (template: readonly MenuItemLike[]) => template },
+    Menu: {
+      buildFromTemplate: (template: readonly MenuItemLike[]) => template,
+      setApplicationMenu: (menu: unknown) => { log.appMenu = menu; },
+    },
     clipboard: { readText: () => '' },
   };
   return { electron, log };
@@ -217,5 +222,17 @@ describe('bootstrap · helpers', () => {
     expect(pageUrlWithPrefill('app://queue', null)).toBe('app://queue');
     expect(pageUrlWithPrefill('app://queue', 'https://a.test/v')).toBe('app://queue?prefill=https%3A%2F%2Fa.test%2Fv');
     expect(pageUrlWithPrefill('app://queue?x=1', 'https://a.test/v')).toBe('app://queue?x=1&prefill=https%3A%2F%2Fa.test%2Fv');
+  });
+});
+
+describe('bootstrap · 中文应用菜单（D-82）', () => {
+  it('installs a Chinese menu instead of Electron\'s English default', async () => {
+    const { electron, log } = fakeElectron();
+    const { host } = fakeHost();
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
+    const template = log.appMenu as readonly { label?: string }[];
+    expect(template.map((item) => item.label))
+      .toEqual(['文件(&F)', '编辑(&E)', '视图(&V)', '窗口(&W)', '设置(&S)']);
+    handle?.dispose();
   });
 });

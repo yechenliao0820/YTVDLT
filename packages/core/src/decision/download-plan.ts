@@ -55,6 +55,24 @@ const AUDIO_CODEC_FIELDS: Readonly<Record<FormatDomain['audioCodecPref'], string
   auto: null,
 };
 
+/**
+ * D-83: audio bitrate -> `--audio-quality` for the TRANSCODE path.
+ *
+ * R1 (M3) removes `-S abr~N` whenever `--audio-format` is set, because ffmpeg
+ * re-encodes anyway. That left the user's bitrate choice with no effect at all:
+ * picking "128 kbps" produced whatever ffmpeg's default VBR gave. yt-dlp has a
+ * dedicated flag for exactly this case (`--audio-quality 0..10` or `<n>K`), so
+ * the choice is carried there instead of being silently dropped.
+ */
+export const AUDIO_TRANSCODE_QUALITY: Readonly<Record<FormatDomain['audioQuality'], string>> = {
+  best: '0',
+  '192': '192K',
+  '128': '128K',
+  '64': '64K',
+  '32': '32K',
+  lowest: '10',
+};
+
 const SUBTITLE_FORMATS: readonly SubtitleDomain['convertTo'][] = ['none', 'ass', 'srt', 'vtt', 'lrc'];
 
 /** Optional probe context. `DownloadRequest` has no chapters field (frozen M1). */
@@ -113,6 +131,9 @@ export function resolveDownloadPlan(
   if (audioTranscode && AUDIO_BITRATE_FIELDS[format.audioQuality] !== null) {
     warn('R1_AUDIO_TRANSCODE_SUPPRESSES_ABR', `audioFormat=${audioFormat} removes -S abr~N; acodec:* is kept`);
   }
+  // D-83: that suppressed bitrate is re-expressed through ffmpeg's own knob so
+  // the bitrate dropdown still means something after `--audio-format` fires.
+  const audioTranscodeQuality = audioTranscode ? AUDIO_TRANSCODE_QUALITY[format.audioQuality] : null;
 
   // ---- P4 / R5: downloadSections > splitChapters > embed/mkv ----
   const hasSections = nonEmpty(advanced.downloadSections);
@@ -243,6 +264,7 @@ export function resolveDownloadPlan(
     effectiveSort,
     extractAudio,
     audioFormat,
+    audioTranscodeQuality,
     audioMultistreams,
     writeSubs,
     subLangs,

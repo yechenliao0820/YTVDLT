@@ -22,7 +22,10 @@ import { startApplication } from './electron-entry.js';
 
 const mainDir = __dirname; // <app>/dist/main
 const distDir = join(mainDir, '..'); // <app>/dist
-const pageUrl = pathToFileURL(join(distDir, 'pages', 'queue', 'index.html')).href;
+// D-91: pin the real packaged version onto the page URL. The renderer is a
+// sandboxed file:// page and cannot call app.getVersion() itself; this keeps
+// the footer / About box honest instead of hard-coding a version that rots.
+const pageUrl = `${pathToFileURL(join(distDir, 'pages', 'queue', 'index.html')).href}?v=${encodeURIComponent(app.getVersion())}`;
 const preloadPath = join(distDir, 'preload', 'bridge.cjs');
 const iconPath = join(distDir, 'icon.ico');
 

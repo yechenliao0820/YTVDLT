@@ -5,30 +5,87 @@
 <link rel="stylesheet" href="../../styles/ytvdlt.css">
 <link rel="stylesheet" href="../../styles/theme.css">
 <style>
-  /* M5 queue surface — fixed 1280x800 like every other screenshot page. */
-  .queue-page { display: flex; flex-direction: column; height: 800px; padding: 16px 20px; gap: 10px; }
-  .queue-head { display: flex; align-items: flex-end; gap: 12px; border-bottom: 2px solid var(--accent); padding-bottom: 8px; }
-  .queue-head h1 { font-size: 20px; margin: 0; font-weight: 700; }
-  .queue-sub { color: var(--muted); font-size: 12px; margin: 2px 0 0; }
+  /* D-86: responsive queue surface. The shared ytvdlt.css pins html/body to a
+     fixed 1280x800 for the frozen M3 screenshot pages; this page overrides it
+     ONLY here, so the other 24 baselines stay byte-identical. */
+  html, body { width: 100%; height: 100%; }
+  .queue-page {
+    display: flex; flex-direction: column; width: 100%; height: 100%;
+    min-height: 100%; padding: 16px 20px 10px; gap: 10px; position: relative;
+  }
+  /* D-86: a quiet brand watermark fills the lower empty area on big screens
+     without intercepting clicks; it stays put while the card grid scrolls. */
+  .queue-ambient {
+    position: absolute; right: 42px; bottom: 48px; z-index: 0;
+    display: flex; flex-direction: column; align-items: center; gap: 0;
+    opacity: .07; pointer-events: none; user-select: none; color: var(--accent);
+  }
+  .queue-ambient span { font-size: 30px; font-weight: 800; letter-spacing: .18em; }
+  .queue-head, .queue-tabs, .queue-tools, .queue-body, .queue-foot, .queue-status { position: relative; z-index: 1; }
+  .queue-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; border-bottom: 2px solid var(--accent); padding-bottom: 10px; }
+  .brand { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; }
+  .brand-mark { width: 40px; height: 40px; display: block; flex: 0 0 auto; }
+  .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
+  .brand-text b { font-size: 17px; letter-spacing: .06em; color: var(--ink); }
+  .brand-text small { font-size: 10px; color: var(--muted); letter-spacing: .02em; white-space: nowrap; }
+  .head-title { display: flex; flex-direction: column; min-width: 0; flex: 0 0 auto; }
+  .queue-head h1 { font-size: 20px; margin: 0; font-weight: 700; white-space: nowrap; }
+  .queue-sub { color: var(--muted); font-size: 12px; margin: 2px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .queue-head .spacer { flex: 1 1 auto; }
-  .queue-search { width: 280px; height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; font-family: inherit; font-size: 13px; background: var(--panel); }
-  .queue-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .queue-tabs { display: flex; gap: 6px; align-items: center; }
-  .queue-tab { height: 30px; padding: 0 14px; border-radius: 15px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); font-size: 13px; cursor: pointer; }
+  .queue-search { width: 240px; height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; font-family: inherit; font-size: 13px; background: var(--panel); color: var(--ink); flex: 0 1 240px; }
+  .queue-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .lang-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; flex: 0 0 auto; }
+  .lang-switch button { height: 30px; min-width: 42px; padding: 0 10px; border: 0; border-right: 1px solid var(--line); background: var(--panel); color: var(--muted); font-size: 12px; cursor: pointer; white-space: nowrap; }
+  .lang-switch button:last-child { border-right: 0; }
+  .lang-switch button[aria-pressed="true"] { background: var(--accent); color: #ffffff; font-weight: 700; }
+  .icon-btn { height: 30px; min-width: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); font-size: 13px; cursor: pointer; white-space: nowrap; flex: 0 0 auto; }
+  html[data-theme="dark"] .lang-switch button,
+  html[data-theme="dark"] .icon-btn { background: var(--panel); color: var(--ink); border-color: var(--line); }
+  .queue-tabs { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .queue-tab { height: 30px; padding: 0 14px; border-radius: 15px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); font-size: 13px; cursor: pointer; white-space: nowrap; }
   .queue-tab[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 700; }
   .queue-tab .n { margin-left: 6px; font-variant-numeric: tabular-nums; opacity: .85; }
   .queue-tabs .spacer { flex: 1 1 auto; }
-  .queue-actions { display: flex; gap: 8px; align-items: center; }
+  .queue-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .queue-paste { display: flex; gap: 6px; align-items: center; }
-  .queue-url { width: 300px; height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; font-family: inherit; font-size: 13px; background: var(--panel); color: var(--ink); }
-  .queue-actions button { height: 30px; padding: 0 12px; font-size: 13px; }
+  .queue-url { width: 250px; height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; font-family: inherit; font-size: 13px; background: var(--panel); color: var(--ink); }
+  .queue-actions button { height: 30px; padding: 0 12px; font-size: 13px; white-space: nowrap; }
   .queue-actions .primary { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 700; }
-  .queue-body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
-  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-content: start; }
-  .card { display: flex; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  /* 类型切换（D-83）：视频 / 音频 —— 分段按钮，选中态与标签页一致。 */
+  .queue-kind { display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .queue-actions .queue-kind-btn { height: 28px; padding: 0 10px; font-size: 12px; border: 0; border-radius: 0; background: var(--panel); color: var(--muted); }
+  .queue-actions .queue-kind-btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 700; }
+  .queue-select { height: 30px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; font-family: inherit; font-size: 12px; background: var(--panel); color: var(--ink); }
+  /* hidden="false" 只是换了属性值，UA 的 [hidden]{display:none} 仍然生效 ——
+     .queue-select 没有自己的 display 声明，必须显式翻回来（视频模式不受影响）。 */
+  .queue-actions .queue-select[hidden="false"] { display: inline-block; }
+
+  /* D-87: task-management toolbar. */
+  .queue-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  .queue-tools label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink); white-space: nowrap; cursor: pointer; }
+  .queue-tools input[type="checkbox"] { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
+  .queue-tools select { height: 28px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; font-family: inherit; font-size: 12px; background: var(--panel); color: var(--ink); }
+  .queue-tools button { height: 28px; padding: 0 11px; font-size: 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--ink); cursor: pointer; white-space: nowrap; }
+  .queue-tools button:disabled { opacity: .45; cursor: not-allowed; }
+  .queue-tools button.danger { color: var(--danger); border-color: var(--danger); }
+  .queue-tools .tools-hint { font-size: 11px; color: var(--muted); max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-tools .tools-spacer { flex: 1 1 auto; }
+  .queue-selected { font-size: 12px; color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* D-86: auto-fill grid — 2 columns at 1280, 3–4 on a full-screen display. */
+  .queue-body {
+    flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px;
+    border-radius: 10px;
+    background: radial-gradient(ellipse at 86% 88%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 58%);
+  }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: 10px; align-content: start; }
+  .card { display: flex; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; position: relative; transition: border-color .15s, box-shadow .15s; }
+  .card:hover { border-color: var(--accent); }
+  .card[data-selected="true"] { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+  .card-check { position: absolute; top: 8px; right: 8px; width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
   .thumb { width: 118px; height: 66px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px; flex: 0 0 auto; }
   .card-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-  .card-title { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card-title { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 20px; }
   .card-meta { color: var(--muted); font-size: 12px; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 11px; font-weight: 700; background: var(--accent-soft); color: var(--accent); }
   .badge[data-state="Completed"] { background: #e3f7ec; color: var(--ok); }
@@ -39,29 +96,70 @@
   html[data-theme="dark"] .badge[data-state="Error"] { background: #3a1a20; }
   .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
   .bar > i { display: block; height: 6px; background: var(--accent); }
-  .card-foot { display: flex; gap: 6px; align-items: center; }
+  .card-foot { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .card-foot .spacer { flex: 1 1 auto; }
   .card-foot button { height: 26px; padding: 0 10px; font-size: 12px; }
-  .empty { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); text-align: center; }
+  .card-foot button.remove-btn { color: var(--danger); border-color: var(--danger); }
+  .empty { height: 100%; min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); text-align: center; }
   .empty .glyph { width: 54px; height: 54px; border-radius: 27px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700; }
+  .empty .brand-watermark { width: 96px; height: 96px; opacity: .22; margin-bottom: 6px; }
   .empty h2 { margin: 4px 0 0; font-size: 16px; color: var(--ink); }
   .empty p { margin: 0; font-size: 13px; }
   .empty .hint { font-size: 12px; }
   .empty button { height: 30px; padding: 0 14px; background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 700; }
   .empty[data-variant="error"] .glyph { background: #fdeaee; color: var(--danger); }
+  .queue-foot { display: flex; align-items: center; gap: 10px; padding-top: 6px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); flex: 0 0 auto; }
+  .queue-foot .spacer { flex: 1 1 auto; }
+  .queue-version { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; font-size: 12px; }
+  .queue-status { color: var(--accent); font-size: 12px; min-height: 16px; }
+
+  /* Right-click menu + confirmation dialog (D-87). */
+  .context-menu { position: fixed; z-index: 60; min-width: 176px; padding: 5px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 12px 32px rgba(15, 30, 50, .22); }
+  .context-menu .ctx-title { padding: 4px 9px 6px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  .context-menu button { display: block; width: 100%; height: 30px; text-align: left; padding: 0 9px; border: 0; border-radius: 5px; background: transparent; color: var(--ink); font-family: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+  .context-menu button:hover { background: var(--accent-soft); }
+  .context-menu button.ctx-danger { color: var(--danger); }
+  .modal-backdrop { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; background: rgba(12, 22, 34, .48); padding: 20px; }
+  .modal { width: min(440px, 100%); padding: 20px 22px; border-radius: 12px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); box-shadow: 0 20px 60px rgba(10, 20, 32, .32); }
+  .modal h2 { margin: 0 0 8px; font-size: 17px; }
+  .modal p { margin: 0 0 6px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+  .modal .modal-count { font-size: 12px; color: var(--accent); font-weight: 700; }
+  .modal .modal-note { font-size: 11px; padding: 8px 10px; margin: 10px 0 16px; border-radius: 6px; background: var(--accent-soft); color: var(--ink); }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+  .modal-actions button { height: 32px; padding: 0 14px; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); cursor: pointer; white-space: nowrap; }
+  .modal-actions button.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 700; }
+  .modal-actions button.danger { color: #ffffff; background: var(--danger); border-color: var(--danger); font-weight: 700; }
   [hidden="true"] { display: none !important; }
 </style>
 </head>
 <body>
-<main class="queue-page" id="queue-root" data-state="ready" data-tab="all" data-visible-count="6" data-total-count="6" data-concurrency="2/3">
+<main class="queue-page" id="queue-root" data-state="ready" data-tab="all" data-visible-count="6" data-total-count="6" data-concurrency="2/3" data-kind="video">
   <header class="queue-head">
-    <div>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 40 40" width="40" height="40" focusable="false">
+          <defs><linearGradient id="ytvGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#3b8cf0"></stop><stop offset="1" stop-color="#174ea6"></stop>
+          </linearGradient></defs>
+          <rect x="0" y="0" width="40" height="40" rx="11" fill="url(#ytvGrad)"></rect>
+          <path d="M15.5 11.5 L27.5 19 L15.5 26.5 Z" fill="#ffffff"></path>
+          <path d="M20 28.5 L20 34 M16.5 31.2 L20 34.7 L23.5 31.2" stroke="#ffffff" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
+        </svg>
+      </span>
+      <span class="brand-text"><b>YTVDLT</b><small data-i18n="app.brand.tagline">轻量 · 快速 · 干净</small></span>
+    </div>
+    <div class="head-title">
       <h1 id="queue-title" data-i18n="queue.title" data-fit="">下载队列</h1>
-      <p class="queue-sub" id="queue-subtitle" data-i18n="queue.subtitle">粘贴链接开始下载，支持播放列表与自定义命令。</p>
+      <p class="queue-sub" id="queue-subtitle" data-i18n="queue.subtitle">粘贴链接，选好类型与清晰度后开始下载。</p>
     </div>
     <span class="spacer"></span>
     <span class="queue-count" id="queue-concurrency" data-i18n="queue.concurrency">并发 2/3</span>
     <input class="queue-search" id="queue-search" type="search" data-i18n-placeholder="queue.search.placeholder" data-i18n-aria-label="queue.search.label" placeholder="搜索标题 / 上传者 / 任务 ID" aria-label="搜索任务">
+    <div class="lang-switch" id="queue-lang" role="group" data-i18n-aria-label="queue.lang.label" aria-label="语言 / Language">
+      <button type="button" data-locale="zh-CN" aria-pressed="true" data-i18n="queue.lang.zh" data-fit="">中文</button>
+      <button type="button" data-locale="en" aria-pressed="false" data-i18n="queue.lang.en" data-fit="">EN</button>
+    </div>
+    <button type="button" class="icon-btn" id="queue-fullscreen" data-fit="" aria-pressed="false" data-fullscreen="false">⛶ 全屏</button>
   </header>
 
   <nav class="queue-tabs" role="tablist" aria-label="队列筛选">
@@ -71,17 +169,50 @@
     <button class="queue-tab" type="button" role="tab" data-tab="canceled" aria-selected="false" data-i18n="queue.tab.canceled" data-fit="" data-count="2">已取消<span class="n">2</span></button>
     <span class="spacer"></span>
     <div class="queue-actions">
+      <div class="queue-kind" id="queue-kind" role="group" data-i18n-aria-label="queue.kind.label" aria-label="下载类型">
+        <button type="button" class="queue-kind-btn" data-kind="video" aria-pressed="true" data-i18n="queue.kind.video" data-fit="">视频</button>
+        <button type="button" class="queue-kind-btn" data-kind="audio" aria-pressed="false" data-i18n="queue.kind.audio" data-fit="">音频</button>
+      </div>
       <form id="queue-paste-form" class="queue-paste" autocomplete="off">
         <input id="queue-url" class="queue-url" type="text" data-i18n-placeholder="queue.url.placeholder" data-i18n-aria-label="queue.url.label" placeholder="粘贴视频或播放列表链接" aria-label="下载链接">
-        <button type="submit" id="queue-paste" class="primary" data-i18n="queue.paste" data-fit="">粘贴并解析</button>
+        <select id="queue-quality" class="queue-select" data-i18n-aria-label="queue.quality.label" aria-label="清晰度" data-kind="video"><option value="best">最佳画质</option><option value="2160p">2160p · 4K</option><option value="1440p">1440p · 2K</option><option value="1080p">1080p · 全高清</option><option value="720p">720p · 高清</option><option value="480p">480p</option><option value="360p">360p</option><option value="lowest">最低画质</option></select>
+        <select id="queue-audio-format" class="queue-select" hidden="true" data-i18n-aria-label="queue.audioformat.label" aria-label="音频格式">
+          <option value="auto" data-i18n="queue.audioformat.auto">原始音频</option>
+          <option value="mp3" data-i18n="queue.audioformat.mp3">MP3</option>
+          <option value="m4a" data-i18n="queue.audioformat.m4a">M4A</option>
+        </select>
+        <button type="submit" id="queue-paste" class="primary" data-i18n="queue.paste" data-fit="">开始下载</button>
       </form>
       <button type="button" id="queue-new" data-i18n="queue.new" data-fit="">新建下载</button>
     </div>
   </nav>
 
+  <div class="queue-tools" id="queue-tools">
+    <label><input type="checkbox" id="queue-select-all"><span data-i18n="queue.tools.selectAll">全选</span></label>
+    <span class="queue-selected" id="queue-selected-count">已选 0 项</span>
+    <select id="queue-sort" data-i18n-aria-label="queue.sort.label" aria-label="排序方式">
+      <option value="newest" data-i18n="queue.sort.newest">最新添加</option>
+      <option value="oldest" data-i18n="queue.sort.oldest">最早添加</option>
+      <option value="name" data-i18n="queue.sort.name">按名称</option>
+      <option value="state" data-i18n="queue.sort.state">按状态</option>
+    </select>
+    <button type="button" id="queue-delete-selected" class="danger" disabled="">删除选中</button>
+    <button type="button" id="queue-clear-history">清空历史</button>
+    <span class="tools-spacer"></span>
+    <label><input type="checkbox" id="queue-private-mode"><span data-i18n="queue.tools.privateMode">无痕下载</span></label>
+    <span class="tools-hint" data-i18n="queue.tools.privateHint">关闭窗口时自动清空历史记录，本地文件保留</span>
+  </div>
+
+  <p class="queue-status" id="queue-status" role="status" aria-live="polite" hidden="true"></p>
+
   <section class="queue-body" id="queue-body" aria-live="polite">
-    <div class="cards" id="queue-cards" hidden="false"><article class="card" data-task-id="t-run-1" data-state="Running" data-tab="downloading"><div class="thumb">S</div><div class="card-main"><div class="card-title" title="Sprite Fright — Blender Open Movie">Sprite Fright — Blender Open Movie</div><div class="card-meta"><span class="badge" data-state="Running">下载中</span> Blender Studio · 10:24</div><div class="bar" data-percent="42"><i style="width: 42%;"></i></div><div class="card-meta" data-progress="42">42% · 4.0 MB/s · 剩余 1:36</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">取消</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article><article class="card" data-task-id="t-fetch-2" data-state="FetchingInfo" data-tab="downloading"><div class="thumb">B</div><div class="card-main"><div class="card-title" title="Big Buck Bunny — 4K remaster">Big Buck Bunny — 4K remaster</div><div class="card-meta"><span class="badge" data-state="FetchingInfo">解析中</span> Peach Open Movie · 9:56</div><div class="card-meta">排队中</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">取消</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article><article class="card" data-task-id="t-ready-3" data-state="ReadyWithInfo" data-tab="downloading"><div class="thumb">S</div><div class="card-main"><div class="card-title" title="Sintel — 1080p">Sintel — 1080p</div><div class="card-meta"><span class="badge" data-state="ReadyWithInfo">待下载</span> Durian Open Movie · 14:48</div><div class="card-meta">已解析，待开始</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">取消</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article><article class="card" data-task-id="t-done-4" data-state="Completed" data-tab="finished"><div class="thumb">T</div><div class="card-main"><div class="card-title" title="Tears of Steel — 720p">Tears of Steel — 720p</div><div class="card-meta"><span class="badge" data-state="Completed">已完成</span> Mango Open Movie · 12:14</div><div class="card-meta">100%</div><div class="card-foot"><button type="button" data-action="folder" aria-disabled="false">打开文件夹</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article><article class="card" data-task-id="t-cancel-5" data-state="Canceled" data-tab="canceled"><div class="thumb">C</div><div class="card-main"><div class="card-title" title="Cosmos Laundromat — pilot">Cosmos Laundromat — pilot</div><div class="card-meta"><span class="badge" data-state="Canceled">已取消</span> Gooseberry · 12:11</div><div class="bar" data-percent="37"><i style="width: 37%;"></i></div><div class="card-meta" data-progress="37">37%</div><div class="card-foot"><button type="button" data-action="retry" aria-disabled="false">重试</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article><article class="card" data-task-id="t-error-6" data-state="Error" data-tab="canceled"><div class="thumb">L</div><div class="card-main"><div class="card-title" title="Live concert — private stream">Live concert — private stream</div><div class="card-meta"><span class="badge" data-state="Error">失败</span> unknown · — · HTTP_403</div><div class="bar" data-percent="12"><i style="width: 12%;"></i></div><div class="card-meta" data-progress="12">12%</div><div class="card-foot"><button type="button" data-action="retry" aria-disabled="false">重试</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article></div>
+    <div class="cards" id="queue-cards" hidden="false"><article class="card" data-task-id="t-error-6" data-state="Error" data-tab="canceled" data-selected="false"><input type="checkbox" class="card-check" aria-label="Live concert — private stream"><div class="thumb">L</div><div class="card-main"><div class="card-title" title="Live concert — private stream">Live concert — private stream</div><div class="card-meta"><span class="badge" data-state="Error">失败</span> unknown · — · HTTP_403</div><div class="bar" data-percent="12"><i style="width: 12%;"></i></div><div class="card-meta" data-progress="12">12%</div><div class="card-foot"><button type="button" data-action="retry" aria-disabled="false">重试</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">删除</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article><article class="card" data-task-id="t-cancel-5" data-state="Canceled" data-tab="canceled" data-selected="false"><input type="checkbox" class="card-check" aria-label="Cosmos Laundromat — pilot"><div class="thumb">C</div><div class="card-main"><div class="card-title" title="Cosmos Laundromat — pilot">Cosmos Laundromat — pilot</div><div class="card-meta"><span class="badge" data-state="Canceled">已取消</span> Gooseberry · 12:11</div><div class="bar" data-percent="37"><i style="width: 37%;"></i></div><div class="card-meta" data-progress="37">37%</div><div class="card-foot"><button type="button" data-action="retry" aria-disabled="false">重试</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">删除</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article><article class="card" data-task-id="t-done-4" data-state="Completed" data-tab="finished" data-selected="false"><input type="checkbox" class="card-check" aria-label="Tears of Steel — 720p"><div class="thumb">T</div><div class="card-main"><div class="card-title" title="Tears of Steel — 720p">Tears of Steel — 720p</div><div class="card-meta"><span class="badge" data-state="Completed">已完成</span> Mango Open Movie · 12:14</div><div class="card-meta">100%</div><div class="card-foot"><button type="button" data-action="folder" aria-disabled="false">打开文件夹</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">删除</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article><article class="card" data-task-id="t-ready-3" data-state="ReadyWithInfo" data-tab="downloading" data-selected="false"><input type="checkbox" class="card-check" aria-label="Sintel — 1080p"><div class="thumb">S</div><div class="card-main"><div class="card-title" title="Sintel — 1080p">Sintel — 1080p</div><div class="card-meta"><span class="badge" data-state="ReadyWithInfo">待下载</span> Durian Open Movie · 14:48</div><div class="card-meta">已解析，待开始</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">取消</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">删除</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article><article class="card" data-task-id="t-fetch-2" data-state="FetchingInfo" data-tab="downloading" data-selected="false"><input type="checkbox" class="card-check" aria-label="Big Buck Bunny — 4K remaster"><div class="thumb">B</div><div class="card-main"><div class="card-title" title="Big Buck Bunny — 4K remaster">Big Buck Bunny — 4K remaster</div><div class="card-meta"><span class="badge" data-state="FetchingInfo">解析中</span> Peach Open Movie · 9:56</div><div class="card-meta">排队中</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">取消</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article><article class="card" data-task-id="t-run-1" data-state="Running" data-tab="downloading" data-selected="false"><input type="checkbox" class="card-check" aria-label="Sprite Fright — Blender Open Movie"><div class="thumb">S</div><div class="card-main"><div class="card-title" title="Sprite Fright — Blender Open Movie">Sprite Fright — Blender Open Movie</div><div class="card-meta"><span class="badge" data-state="Running">下载中</span> Blender Studio · 10:24</div><div class="bar" data-percent="42"><i style="width: 42%;"></i></div><div class="card-meta" data-progress="42">42% · 4.0 MB/s · 剩余 1:36</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">取消</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">详情</button></div></div></article></div>
     <div class="empty" id="queue-empty" data-variant="empty" hidden="true">
+      <svg class="brand-watermark" viewBox="0 0 40 40" aria-hidden="true">
+        <rect x="0" y="0" width="40" height="40" rx="11" fill="var(--accent)"></rect>
+        <path d="M15.5 11.5 L27.5 19 L15.5 26.5 Z" fill="#ffffff"></path>
+        <path d="M20 28.5 L20 34 M16.5 31.2 L20 34.7 L23.5 31.2" stroke="#ffffff" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
       <span class="glyph" aria-hidden="true">＋</span>
       <h2 data-i18n="queue.empty.title">还没有任务</h2>
       <p data-i18n="queue.empty.hint">粘贴一个视频或播放列表链接开始，或按 Ctrl+V 直接粘贴。</p>
@@ -96,14 +227,53 @@
     </div>
   </section>
 
+  <footer class="queue-foot">
+    <span data-i18n="queue.foot.hint">YTVDLT · 粘贴链接即可开始下载 · F11 也可切换全屏</span>
+    <span class="spacer"></span>
+    <span class="queue-version" id="queue-version">v0.1.10</span>
+    <span id="queue-foot-count">6 / 6</span>
+  </footer>
+
+  <div class="queue-ambient" aria-hidden="true">
+    <svg viewBox="0 0 40 40" width="168" height="168" focusable="false">
+      <rect x="0" y="0" width="40" height="40" rx="11" fill="currentColor"></rect>
+      <path d="M15.5 11.5 L27.5 19 L15.5 26.5 Z" fill="#ffffff"></path>
+      <path d="M20 28.5 L20 34 M16.5 31.2 L20 34.7 L23.5 31.2" stroke="#ffffff" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+    <span>YTVDLT</span>
+  </div>
+
   <pre id="ytvdlt-output" aria-live="polite" hidden="true">{}</pre>
 </main>
+
+<div class="context-menu" id="queue-context-menu" hidden="true" role="menu">
+  <div class="ctx-title" data-i18n="queue.context.title">任务操作</div>
+  <button type="button" data-ctx="detail" role="menuitem" data-i18n="queue.context.detail">查看详情</button>
+  <button type="button" data-ctx="folder" role="menuitem" data-i18n="queue.context.openFolder">打开文件夹</button>
+  <button type="button" data-ctx="delete" role="menuitem" class="ctx-danger" data-i18n="queue.context.delete">删除任务…</button>
+</div>
+
+<div class="modal-backdrop" id="queue-modal" hidden="true" role="dialog" aria-modal="true">
+  <div class="modal">
+    <h2 id="queue-modal-title" data-i18n="queue.delete.title">删除任务</h2>
+    <p id="queue-modal-message" data-i18n="queue.delete.message">请选择删除方式。此操作只影响 YTVDLT 中的记录和已下载的产物文件。</p>
+    <p class="modal-count" id="queue-modal-count">共 0 个任务</p>
+    <p class="modal-note" id="queue-modal-note" data-i18n="queue.delete.filesHint">本地文件会移入 Windows 回收站，可随时还原；不会永久删除。</p>
+    <div class="modal-actions">
+      <button type="button" id="queue-modal-cancel" data-i18n="queue.delete.cancel">取消</button>
+      <button type="button" id="queue-modal-history" class="primary" data-i18n="queue.delete.onlyHistory">仅删除历史记录</button>
+      <button type="button" id="queue-modal-files" class="danger" data-i18n="queue.delete.withFiles">同时删除本地文件</button>
+    </div>
+  </div>
+</div>
+
 <script src="../../i18n/messages.js"></script>
 <script src="../../i18n/i18n.js"></script>
 <script src="../../theme/theme.js"></script>
 <script src="../../shortcuts/shortcuts.js"></script>
 <script src="../../app-shell.js"></script>
 <script src="./queue.js"></script>
+<script src="../../about/about.js"></script>
 
 
 </body></html>

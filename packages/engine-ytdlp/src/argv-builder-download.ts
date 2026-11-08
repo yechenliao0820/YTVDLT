@@ -53,6 +53,7 @@ export interface M3Segment {
 export const DOWNLOAD_ARGV_M3_SEGMENTS: readonly M3Segment[] = [
   { id: 'B0′', anchor: '-S value', options: ['-S'], trigger: 'composite sort (res/vcodec/abr/acodec)', firesForDefaultRequest: false },
   { id: 'B1′', anchor: 'after --audio-multistreams', options: ['--embed-metadata', '--embed-thumbnail'], trigger: 'extractAudio / audioFormat', firesForDefaultRequest: false },
+  { id: 'B1″', anchor: 'after --audio-format value', options: ['--audio-quality'], trigger: 'plan.audioTranscodeQuality!==null (D-83)', firesForDefaultRequest: false },
   { id: 'B2′', anchor: 'after B1′', options: ['--ppa'], trigger: 'plan.ppa!==null (downgraded: never)', firesForDefaultRequest: false },
   { id: 'C1′', anchor: 'after --write-auto-subs, before --embed-subs', options: ['--extractor-args'], trigger: 'autoCaptions && skipTranslated', firesForDefaultRequest: false },
   { id: 'C2′', anchor: 'after --convert-subs', options: ['--remux-video', '--merge-output-format'], trigger: 'mergeToMkv (R2)', firesForDefaultRequest: false },
@@ -102,6 +103,9 @@ export function buildDownload(req: DownloadRequest, ctx: DownloadContext): strin
   if (plan.effectiveSort !== null) argv.push('-S', plan.effectiveSort);
   if (plan.extractAudio) argv.push('-x');
   if (plan.audioFormat !== null) argv.push('--audio-format', plan.audioFormat);
+  // B1″ · D-83: transcode bitrate. R1 removed `-S abr~N`, so this is the only
+  // place the user's audio-quality choice survives when mp3/m4a was picked.
+  if (plan.audioTranscodeQuality !== null) argv.push('--audio-quality', plan.audioTranscodeQuality);
   if (plan.audioMultistreams) argv.push('--audio-multistreams');
   // B1′ · M3 conditional (audio mode only)
   if (plan.embedMetadata) argv.push('--embed-metadata');

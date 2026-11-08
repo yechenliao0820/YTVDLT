@@ -95,3 +95,45 @@ describe('L1 download contract · FakeEngine and YtDlpEngine agree', () => {
     expect(YTVDLT_PROGRESS_TEMPLATE.split('|')).toHaveLength(7);
   });
 });
+
+describe('D-89 · NSIS install into a read-only Program Files', () => {
+  it('pins the child cwd and the whole TEMP family to the writable output dir', async () => {
+    const { ports, state } = createInMemoryPorts();
+    // Simulate the VM: the inherited TEMP/CWD point at the install directory.
+    state.env.vars['TEMP'] = 'C:\\Program Files\\YTVDLT';
+    state.env.vars['TMP'] = 'C:\\Program Files\\YTVDLT';
+    const base = request('d89-1');
+    const outputDir = 'C:/Users/leo/Downloads/YTVDLT';
+    const req: DownloadRequest = {
+      ...base,
+      paths: { ...base.paths, videoDir: outputDir, audioDir: `${outputDir}/Audio` },
+    };
+    const artifact = `${outputDir}/video.mp4`;
+    state.files.set(artifact, 'bytes');
+    state.streamScripts.set('yt-dlp.exe', {
+      chunks: [{ stream: 'stdout', text: 'YTVDLT|100|100|NA|10|0|1\n' }],
+      exitCode: 0,
+      writeFiles: { 'C:/temp/ytvdlt-artifacts-d89-1.txt': `"${artifact}"\n` },
+    });
+    const logger = new Logger({ ports, appVersion: '0.1.0' });
+    const mapper = new ErrorMapper({ clock: ports.clock });
+    const engine = new YtDlpEngine({
+      ports, logger, mapper, enginePath: 'C:/runtime/yt-dlp.exe',
+      jsRuntimePath: 'C:/runtime/node.exe', appVersion: '0.1.0',
+    });
+    await new Promise<void>((resolve, reject) => {
+      engine.download(req, (event) => {
+        if (event.type === 'completed') resolve();
+        if (event.type === 'failed') reject(new Error(event.error.code));
+      });
+      setTimeout(() => reject(new Error('download did not settle')), 10_000);
+    });
+    const call = state.streamCalls.at(-1);
+    expect(call).toBeDefined();
+    expect(call?.opts.cwd).toBe(outputDir);
+    expect(call?.opts.env?.['TEMP']).toBe(outputDir);
+    expect(call?.opts.env?.['TMP']).toBe(outputDir);
+    expect(call?.opts.env?.['TMPDIR']).toBe(outputDir);
+    expect(call?.opts.env?.['TEMP']).not.toContain('Program Files');
+  });
+});

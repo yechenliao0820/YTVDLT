@@ -78,8 +78,15 @@
   function listTasks(payload) { return invoke('TASK_LIST', payload || {}); }
   function taskDetail(taskId) { return invoke('TASK_DETAIL', { taskId: taskId }); }
   function taskAction(taskId, action) { return invoke('TASK_ACTION', { taskId: taskId, action: action }); }
-  function startDownload(url, kind) {
-    return invoke('DOWNLOAD_START', { url: url, kind: kind === 'audio' ? 'audio' : 'video' });
+  /** D-83: `options` may carry kind / quality / audioQuality / audioFormat. */
+  function startDownload(url, options) {
+    var request = { url: url, kind: 'video' };
+    var extra = options && typeof options === 'object' ? options : {};
+    if (extra.kind === 'audio') request.kind = 'audio';
+    if (typeof extra.quality === 'string') request.quality = extra.quality;
+    if (typeof extra.audioQuality === 'string') request.audioQuality = extra.audioQuality;
+    if (typeof extra.audioFormat === 'string') request.audioFormat = extra.audioFormat;
+    return invoke('DOWNLOAD_START', request);
   }
 
   YTVDLT.bridge = {

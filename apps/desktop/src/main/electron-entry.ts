@@ -80,6 +80,39 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
   );
   const appVersion = app.getVersion();
 
+  // D-88: shared by the private-mode cleanup hooks and the queue intake gate.
+  // It is assigned inside createHost(), which bootstrap() awaits before the
+  // first window close can happen.
+  let hostRef: M5Host | null = null;
+
+  /** Clear history only when `general.privateMode` is on; never touches files. */
+  const clearPrivateHistory = async (): Promise<void> => {
+    const host = hostRef;
+    if (host === null) return;
+    try {
+      if (host.m4.task.config.get('general', 'privateMode') !== true) return;
+      for (const record of host.m4.task.queue.list()) {
+        if (record.state === 'Running' || record.state === 'FetchingInfo') continue;
+        await host.m4.task.queue.remove(record.id);
+      }
+    } catch {
+      // Best effort: a failed snapshot write must never block shutdown.
+    }
+  };
+
+  // Give the async snapshot write a chance to finish before the process exits.
+  // `preventDefault` is used exactly once; the second quit passes through.
+  let cleanupStarted = false;
+  app.on('before-quit', (event) => {
+    if (cleanupStarted) return;
+    cleanupStarted = true;
+    event.preventDefault();
+    void Promise.race([
+      clearPrivateHistory(),
+      new Promise<void>((resolve) => { setTimeout(resolve, 3000); }),
+    ]).finally(() => { app.quit(); });
+  });
+
   const createHost = async () => {
     const ports = createNodePorts({
       packaged,
@@ -99,7 +132,6 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
 
     // The engine exists before the host, the queue exists inside the host:
     // a lazy gate is what breaks that cycle (§3.4).
-    let hostRef: M5Host | null = null;
     const intakeGate = createQueueIntakeGate(() => hostRef?.m4.task.queue);
     const updateSource = resolveEngineUpdateSource(ports, runtimeDir);
 
@@ -148,6 +180,19 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
         prefersReducedMotion: () => false,
         accent: () => null,
       },
+      // D-87: `shell.trashItem` is the ONLY deletion primitive. Files go to the
+      // Windows Recycle Bin (never removed permanently) and a partial failure
+      // keeps the task record so the user can retry.
+      trashFiles: {
+        trash: async (paths) => {
+          const done: string[] = [];
+          for (const path of paths) {
+            try { await shell.trashItem(path); done.push(path); }
+            catch { /* keep the record on partial failure */ }
+          }
+          return done;
+        },
+      },
     });
     hostRef = host;
 
@@ -178,6 +223,7 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     argv: options.argv ?? process.argv,
     createHost,
     onSystemAppearanceChanged: () => { /* renderer re-reads SETTINGS_GET on focus */ },
+    onWindowClose: clearPrivateHistory,
     platform: process.platform,
   });
 }

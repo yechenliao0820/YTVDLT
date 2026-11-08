@@ -1,3 +1,123 @@
+# YTVDLT 交付报告（0.1.10 · 最新）
+
+> 交付日期：2026-11-08 ｜ 交付人：Buddy（AI） ｜ 接收人：LeoLee
+> 本轮先在 VM 复测中暴露 `PERMISSION_DENIED`，按「先修 BUG」处理，再补图标与关于/版本号。
+
+---
+
+## 一、先回答 VM 里那个问题
+
+**是软件的问题，不是你的操作问题；下载软件不应该要求管理员权限，本版也不需要。**
+
+`C:\Program Files` 对普通用户只读，`data-dir.ts` 早就把配置回落到了 `%APPDATA%`，但 **yt-dlp 子进程的启动环境没做同样处理**：`yt-dlp-engine.ts` 只给了 `PATH`，没有 `cwd`、也没有 `TEMP/TMP/TMPDIR`。Electron 从快捷方式启动时继承安装目录作为工作目录，yt-dlp 的 `tempfile.mkstemp()` 就在那里创建 `tmpXXXX.tmp`，于是报 `[Errno 13] Permission denied`。下载目录本身完全可写——错误与它无关。
+
+修复（D-89）：把子进程的 `cwd` 与 `TEMP/TMP/TMPDIR` 全部钉到本次请求的输出目录（引擎在 spawn 前已 `mkdir`、且已展开为绝对路径）；probe / version 回落到 `%TEMP%`。**未改任何 yt-dlp 参数、argv 冻结位置或下载计划**。
+
+## 二、交付物
+
+| 交付物 | 位置 | 大小 |
+|---|---|---|
+| 安装版（NSIS） | `dist-0.1.10\YTVDLT Setup 0.1.10.exe` | 226,356,479 B（215.8 MiB） |
+| 差分清单 | `dist-0.1.10\YTVDLT Setup 0.1.10.exe.blockmap` | 237,827 B |
+| 更新清单 | `dist-0.1.10\latest.yml` | 344 B |
+| 免安装目录 | `dist-0.1.10\win-unpacked\` | 真机 CDP 验证用 |
+| 图标预览 | `reports\icon-preview-0110.png` | 16/32/48/256 四档 |
+
+> 便携版按业主 2026-11-07 新规未产（点名才做）。两个 `package.json` 已还原 `0.1.0` 发版基准。
+
+## 三、三项诉求逐条落地
+
+| # | 诉求 | 落地 |
+|---|---|---|
+| 1 | 修 BUG（最先） | 见上；新增契约测试把继承 `TEMP` 模拟成 `C:\Program Files\YTVDLT`，断言子进程 `cwd` / `TEMP` / `TMP` / `TMPDIR` 全部指向可写输出目录 |
+| 2 | 改图标，一眼看出视频下载 | 重写 `scripts/make-icon.mjs`：**蓝渐变圆角方砖 + 白色播放三角 + 白色下载箭头**，全部由几何函数逐像素绘制（4×4 抗锯齿），原创、无外部素材；与页面内 SVG 徽标同一套视觉语言。`electron-builder.yml` 显式绑定 `win.icon` / `nsis.installerIcon` / `uninstallerIcon`，桌面快捷方式、任务栏、安装包三处都换成新图标 |
+| 3 | 版本号 + 设置 + 关于 + 开源声明 | 队列页右下角与设置页常驻 `v0.1.10`（真实值由 `main.ts` 经 `?v=<app.getVersion()>` 注入，不写死）；菜单新增「设置(&S)」：偏好设置… / 返回下载队列 / 关于 YTVDLT；关于弹窗含版本号、作者 **Yechen Liao**、运行时与开源许可声明（yt-dlp / FFmpeg LGPL-3.0 / Electron MIT / Node.js MIT），**中英双语**，两页都能打开 |
+
+## 四、验收结果
+
+| 门禁 | 结果 |
+|---|---|
+| `pnpm typecheck` | 5/5 successful |
+| `npm test` | 792 passed / 0 failed（789 → 792：+1 权限契约、+2 菜单） |
+| `node scripts/run-e2e.mjs --negative-checks` | 31/31 PASS + 反例 5/5 PASS（只重建 9 张基线，其余 22 张 0 像素差） |
+| `node scripts/handoff-check.mjs` | 对账通过 |
+| 图标入包核验 | 新图标 256px 像素段在 app exe 与 NSIS 安装包中均命中，原生 electron.exe 对照组无 |
+| 打包产物 CDP | `?v=0.1.10`、右下角 `v0.1.10`、关于弹窗可开可关、设置页版本与作者 Yechen Liao；切 `?lang=en` 后关于弹窗全英文 |
+
+## 五、已知边界
+
+1. **未在真实 `C:\Program Files` 安装上跑在线下载**——本机无该安装环境，需业主在 VM 重装 0.1.10 后复测一次；修复由离线契约测试保证启动环境正确。
+2. 托盘右键菜单仍未加「设置 / 关于」入口；关于弹窗没有「检查更新」按钮。
+3. 已安装的旧版快捷方式需重新安装才会刷新图标。
+4. 错误报告里 `Engine: unknown` 仍是展示缺陷（D-79 已登记），与本轮权限问题无关。
+5. M3 冻结弹窗的 JS 拼接文案仍可能中英混排（M5-2 既有缺口）。
+
+---
+
+## 以下为 0.1.9 历史交付报告（原文存档，未改动）
+
+# YTVDLT 交付报告（0.1.9 · 最新）
+
+> 交付日期：2026-11-07 ｜ 交付人：Buddy（AI） ｜ 接收人：LeoLee
+> 本版**只改界面层与任务管理编排**：未改 yt-dlp 下载、argv 构造、产物校验、请求构造等任何下载功能。
+> 给后续 AI 的第一份文件看 [`AI-MAINTENANCE.md`](AI-MAINTENANCE.md)。
+
+---
+
+## 一、交付物
+
+| 交付物 | 位置 | 大小 |
+|---|---|---|
+| 安装版（NSIS） | `dist-0.1.9\YTVDLT Setup 0.1.9.exe` | 226,338,769 B（215.8 MiB） |
+| 差分清单 | `dist-0.1.9\YTVDLT Setup 0.1.9.exe.blockmap` | 237,728 B |
+| 更新清单 | `dist-0.1.9\latest.yml` | 341 B |
+| 免安装目录 | `dist-0.1.9\win-unpacked\` | 真机 CDP 验证用 |
+| 源码 | `Project\`（apps / packages / scripts / tests / docs） | — |
+
+> 按业主 2026-11-07 新规：**默认只打安装版**，便携版未产出（点名才做）。
+> 仓库 `package.json` 与 `apps/desktop/package.json` 已还原为 `0.1.0` 发版基准。
+
+## 二、三项诉求逐条落地
+
+| # | 业主诉求 | 落地 |
+|---|---|---|
+| 1 | 界面支持中英文切换 | 队列页头部「中文 / EN」；写 `SETTINGS_SET` 持久化并重载；重启自动保持；应用菜单 / 详情页删除弹窗 / 状态提示同步双语；新增 41 个双语键 |
+| 2 | 加图标、美观、解决大面积留白 | 内联 SVG 品牌徽标 + 字标；`html/body` 100% + 卡片 `auto-fill` 自适应列数（1280 → 2 列、1920 → 4 列）；空状态插画、内容区淡光晕、右下品牌水印、底部状态栏；「⛶ 全屏 / 退出全屏」按钮 + F11 提示 |
+| 3 | 任务管理 | 卡片复选框 / 右键菜单 / 可见「删除」；删除弹窗三选一（取消 / 仅删历史记录 / 同时删本地文件 → 移入 Windows 回收站）；全选、排序（最新/最早/名称/状态）、删除选中、一键清空历史、无痕下载（关闭窗口清历史） |
+
+## 三、验收结果（可复现）
+
+| 门禁 | 结果 |
+|---|---|
+| `pnpm typecheck` | 5/5 successful |
+| `npm test` | 789 passed / 0 failed；覆盖率四维最低 86.7%（门限 70%） |
+| `node scripts/run-e2e.mjs --negative-checks` | 31/31 PASS + 反例 5/5 PASS |
+| `node scripts/handoff-check.mjs` | 对账通过 |
+| asar 内容核对 | `queue-lang` / `switchLocale` / `brand-mark` / `trashItem` 均在包内 |
+
+**打包产物真机 CDP 验证**（`reports/l3-probe/ui-check-019.mjs`，`--remote-debugging-port=9222`）：
+
+| 检查 | 实测 |
+|---|---|
+| 新控件 | brand / lang-switch / tools / fullscreen 全部存在；`ytvdltBridge.invoke` 可用 |
+| 点「EN」 | URL 变 `?lang=en`，标题 `Download queue`，`data-i18n-missing=0`、`data-text-overflow=0` |
+| 持久化 | `SETTINGS_GET` 回读 `language: "en"` |
+| 重启 | 启动 URL 自动带 `?lang=en`，页面英文、EN 按钮高亮 |
+| 深色主题 | `queue-dark` 基线复核，工具栏 / 卡片 / 水印对比度正常 |
+
+## 四、已知边界（不是 bug）
+
+1. 托盘菜单仍为中文；安装程序（NSIS）没有多语言选择页——本轮按「软件内部切换」实现（D-85）。
+2. 设置页 / 详情页 / 日志页仍是固定 800px 画幅，本轮只改主窗口队列页，避免动另外 6 张基线。
+3. 任务很少时纵向留白靠水印与淡光晕柔化，未强制拉伸卡片（1080 高下拉满反而更空）。
+4. 无痕下载只清任务记录与快照，不清日志、不清下载目录；强杀进程不触发清理（D-88）。
+5. 「删除本地文件」依赖 `shell.trashItem`，真机逐项点测留待 VM 轮次（与 C13–C16 同批）；主进程单测已覆盖成功 / 部分失败 / 无端口三条路径。
+6. M3 三个冻结弹窗仍靠短语表运行时翻译，JS 拼接片段可能中英混排（M5-2 已登记的既有缺口）。
+
+---
+
+## 以下为 0.1.6 历史交付报告（原文存档，未改动）
+
 # YTVDLT 交付报告（0.1.6）
 
 > 交付日期：2026-11-07 ｜ 交付人：Buddy（AI） ｜ 接收人：LeoLee

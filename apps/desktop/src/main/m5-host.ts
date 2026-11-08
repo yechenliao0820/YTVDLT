@@ -16,7 +16,7 @@ import { createM4Host, type M4Host, type M4HostOptions } from './m4-host.js';
 import {
   createM5Handlers, M5_CHANNELS,
   type AppearanceDto, type ComponentUpdatePortLike,
-  type SystemAppearancePort, type TaskDetailPort, type TaskListPort,
+  type SystemAppearancePort, type TaskDetailPort, type TaskListPort, type TrashFilesPort,
 } from './m5-channels.js';
 import type { IpcGateway, IpcHandler } from './ipc-gateway.js';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
@@ -32,6 +32,8 @@ export interface M5HostOptions extends M4HostOptions {
   readonly dataDirReason?: string;
   /** D-67: component (yt-dlp / aria2c) updater; absent = button disabled. */
   readonly componentUpdate?: ComponentUpdatePortLike;
+  /** D-87: recycle-bin adapter for "also delete local files". */
+  readonly trashFiles?: TrashFilesPort;
 }
 
 /**
@@ -108,6 +110,7 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     systemAppearance: options.systemAppearance,
     ...(options.onAppearanceChanged === undefined ? {} : { onAppearanceChanged: options.onAppearanceChanged }),
     ...(options.componentUpdate === undefined ? {} : { componentUpdate: options.componentUpdate }),
+    ...(options.trashFiles === undefined ? {} : { trashFiles: options.trashFiles }),
     enqueueSingle: (input) => m4.enqueueSingle(input),
   });
 

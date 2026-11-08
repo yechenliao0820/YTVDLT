@@ -19,6 +19,7 @@
  */
 import type { M5Host } from './m5-host.js';
 import { buildTrayMenu, trayTooltip, shouldHideToTray, canQuit, type TrayStats } from './tray.js';
+import { buildAppMenu } from './app-menu.js';
 
 export interface BrowserWindowOptionsLike {
   readonly width: number;
@@ -39,6 +40,8 @@ export interface BrowserWindowOptionsLike {
 export interface WebContentsLike {
   loadURL(url: string): Promise<void>;
   on(event: string, listener: () => void): void;
+  /** D-91: optional so the unit-test fake needs no change; real Electron has it. */
+  executeJavaScript?(code: string): Promise<unknown>;
 }
 
 export interface BrowserWindowLike {
@@ -62,8 +65,11 @@ export interface TrayLike {
 export interface MenuItemLike {
   readonly id?: string;
   readonly label?: string;
-  readonly type?: 'normal' | 'separator';
+  readonly role?: string;
+  readonly accelerator?: string;
+  readonly type?: 'normal' | 'separator' | 'submenu';
   readonly enabled?: boolean;
+  readonly submenu?: readonly MenuItemLike[];
   readonly click?: () => void;
 }
 
@@ -88,6 +94,8 @@ export interface ElectronLike {
   readonly Tray: new (iconPath: string) => TrayLike;
   readonly Menu: {
     buildFromTemplate(template: readonly MenuItemLike[]): unknown;
+    /** Optional so the unit-test fake (buildFromTemplate only) stays valid. */
+    setApplicationMenu?(menu: unknown): void;
   };
   readonly clipboard: {
     readText(): string;
@@ -107,6 +115,12 @@ export interface BootstrapOptions {
   readonly trayStats?: () => TrayStats;
   /** Called when the OS theme / accent changes (A-4.4-20 "跟随系统"). */
   readonly onSystemAppearanceChanged?: () => void;
+  /**
+   * D-88: private-mode cleanup hook. Fired on window close (which also covers
+   * quitting) so the host can drop the task snapshot. Fire-and-forget here; the
+   * desktop entry additionally guards `before-quit` to let it finish.
+   */
+  readonly onWindowClose?: () => Promise<void> | void;
   readonly platform?: string;
 }
 
@@ -126,6 +140,18 @@ export function pageUrlWithPrefill(pageUrl: string, url: string | null): string 
   if (url === null) return pageUrl;
   const separator = pageUrl.includes('?') ? '&' : '?';
   return `${pageUrl}${separator}prefill=${encodeURIComponent(url)}`;
+}
+
+/**
+ * D-85: the persisted language must survive a restart. The renderer reads
+ * `?lang=en` (i18n.js), so the main process pins it onto the page URL at load
+ * time. Chinese is the shipped default and needs no query parameter — this also
+ * keeps every existing URL assertion byte-identical.
+ */
+export function withLocale(pageUrl: string, locale: 'zh-CN' | 'en'): string {
+  if (locale !== 'en' || /[?&]lang=/.test(pageUrl)) return pageUrl;
+  const separator = pageUrl.includes('?') ? '&' : '?';
+  return `${pageUrl}${separator}lang=en`;
 }
 
 export function deepLinkFromArgv(argv: readonly string[]): string | null {
@@ -158,6 +184,12 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
   await app.whenReady();
 
   const host = await options.createHost();
+
+  // D-85: read the persisted language before the first page load. The unit-test
+  // fake returns `{}`, which deliberately falls back to Chinese.
+  const appearance = typeof host.appearance === 'function' ? await host.appearance() : null;
+  let menuLocale: 'zh-CN' | 'en' = appearance?.language === 'en' ? 'en' : 'zh-CN';
+  const launchUrl = withLocale(options.pageUrl, menuLocale);
 
   // 2. Register every channel of the merged gateway (M3 + M5).
   const registeredChannels: string[] = [];
@@ -194,7 +226,42 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
   window.on('close', () => {
     const intent = { action: 'close' as const, minimizeToTray: trayReady, active: stats().active };
     if (shouldHideToTray(intent) && !quitting) window.hide();
+    // D-88: private mode clears the history on every window close (hiding to
+    // the tray included). The desktop entry also guards before-quit for the
+    // case where the process really exits.
+    void Promise.resolve(options.onWindowClose?.()).catch(() => { /* best effort */ });
   });
+
+  // 4.5 应用菜单（D-82 中文化 / D-85 跟随语言）。没有这一步 Electron 会自带
+  //     英文默认菜单（File / Edit / View / Window）。语言切换会让渲染层重载
+  //     页面，`did-finish-load` 时再刷一次菜单即可，无需新增 IPC 通道。
+  // D-91: the Settings menu owns navigation to the settings page and the About
+  // dialog. No new IPC channel — navigation uses loadURL, and About is opened
+  // by calling a renderer-side function through executeJavaScript.
+  const settingsPageUrl = options.pageUrl.replace(/pages[\\/]queue[\\/]index\.html/, 'pages/settings/index.html');
+  function refreshAppMenu(locale: 'zh-CN' | 'en'): void {
+    const appMenu: readonly MenuItemLike[] = buildAppMenu({
+      showWindow: () => { showWindow(); },
+      quit: () => {
+        void Promise.resolve(options.onWindowClose?.()).catch(() => { /* best effort */ });
+        quitting = true;
+        app.quit();
+      },
+      platform,
+      locale,
+      openSettings: () => {
+        void window.webContents.loadURL(withLocale(settingsPageUrl, menuLocale));
+      },
+      openQueue: () => {
+        void window.webContents.loadURL(withLocale(options.pageUrl, menuLocale));
+      },
+      openAbout: () => {
+        void window.webContents.executeJavaScript?.('window.YTVDLTAbout && window.YTVDLTAbout.open()');
+      },
+    });
+    Menu.setApplicationMenu?.(Menu.buildFromTemplate(appMenu));
+  }
+  refreshAppMenu(menuLocale);
 
   // 5. Tray: same menu model as M4, rebuilt from live counters.
   let tray: TrayLike | null = null;
@@ -227,14 +294,23 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
 
   // 7. Launch the queue page; `--url` arrives as a query parameter.
   const deepLink = deepLinkFromArgv(options.argv);
-  await window.webContents.loadURL(pageUrlWithPrefill(options.pageUrl, deepLink));
-  window.webContents.on('did-finish-load', () => { window.show(); });
+  await window.webContents.loadURL(pageUrlWithPrefill(launchUrl, deepLink));
+  window.webContents.on('did-finish-load', () => {
+    window.show();
+    // D-85: switching the language reloads the renderer. Re-read the setting
+    // and repaint the native menu so File/Edit/View/Window follow the page.
+    void (async () => {
+      const next = typeof host.appearance === 'function' ? await host.appearance() : null;
+      menuLocale = next?.language === 'en' ? 'en' : 'zh-CN';
+      refreshAppMenu(menuLocale);
+    })();
+  });
 
   app.on('second-instance', ((...args: never[]) => {
     const argv = Array.isArray(args[2]) ? (args[2] as unknown as readonly string[]) : [];
     showWindow();
     const url = deepLinkFromArgv(argv);
-    if (url !== null) void window.webContents.loadURL(pageUrlWithPrefill(options.pageUrl, url));
+    if (url !== null) void window.webContents.loadURL(pageUrlWithPrefill(withLocale(options.pageUrl, menuLocale), url));
   }) as (...args: never[]) => void);
 
   app.on('window-all-closed', (() => {

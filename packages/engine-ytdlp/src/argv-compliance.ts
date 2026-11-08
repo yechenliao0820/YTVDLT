@@ -19,7 +19,7 @@ export const ALLOWED_DOWNLOAD_OPTIONS: readonly string[] = [
   '--yes-playlist', '--playlist-items',
   '--no-js-runtimes', '--js-runtimes', '--ffmpeg-location',
   // B · format / audio
-  '-f', '-S', '-x', '--audio-format', '--audio-multistreams',
+  '-f', '-S', '-x', '--audio-format', '--audio-quality', '--audio-multistreams',
   '--embed-metadata', '--embed-thumbnail', '--ppa',
   // C · subtitles
   '--write-subs', '--sub-langs', '--write-auto-subs', '--extractor-args',

@@ -218,3 +218,23 @@ describe('M3 buildDownload · conditional segments do not disturb the frozen min
   });
 
 });
+
+describe('D-83 · --audio-quality (transcode bitrate)', () => {
+  it('emits --audio-quality right after --audio-format when transcode is on', () => {
+    const argv = buildDownload(req({
+      format: format({ extractAudio: true, audioFormat: 'mp3', audioQuality: '192' }),
+    }), CTX);
+    const index = argv.indexOf('--audio-quality');
+    expect(index).toBeGreaterThan(0);
+    expect(argv[index + 1]).toBe('192K');
+    expect(argv.indexOf('--audio-format')).toBeLessThan(index);
+    // R1 still removes the source-selection knob.
+    expect(argv.join(' ')).not.toContain('abr~');
+  });
+
+  it('never emits --audio-quality without --audio-format', () => {
+    const argv = buildDownload(req({ format: format({ extractAudio: true, audioQuality: '192' }) }), CTX);
+    expect(argv).not.toContain('--audio-quality');
+    expect(argv[argv.indexOf('-S') + 1]).toContain('abr~192');
+  });
+});

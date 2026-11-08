@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Generate `apps/desktop/build/icon.ico` (M5-4).
+ * Generate `apps/desktop/build/icon.ico` — the YTVDLT brand mark (0.1.10).
  *
- * The repository shipped no icon at all: electron-builder would fall back to the
- * stock Electron icon and the tray constructor would throw (bootstrap degrades
- * silently, so nobody would notice). This script draws the icon from scratch —
- * no binary asset is checked in, no design tool is needed, and the output is
- * reproducible.
+ * Drawn entirely from geometry, no external artwork and no image dependency:
+ * a rounded blue-gradient tile, a white PLAY triangle (video) and a white
+ * DOWNLOAD arrow underneath. The same two glyphs form the in-app SVG badge in
+ * `pages/queue/index.html`, so the window, taskbar, desktop shortcut and
+ * installer all match the product. Original design — nothing is copied.
  *
  * Format: multi-size 32-bit BMP-in-ICO (16/32/48/256). BMP entries are chosen
  * over PNG entries because NSIS — which builds the installer — is happiest with
@@ -21,8 +21,10 @@ import { fileURLToPath } from 'node:url';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const OUT_DIR = join(ROOT, 'apps', 'desktop', 'build');
 
-const TEAL = [15, 107, 100];
-const WHITE = [246, 250, 252];
+/** Matches the in-app badge gradient (`#3b8cf0` -> `#174ea6`). */
+const TOP = [59, 140, 240];
+const BOTTOM = [23, 78, 166];
+const WHITE = [255, 255, 255];
 const SIZES = [16, 32, 48, 256];
 
 /** Signed distance to a rounded rectangle centred in a `size` box. */
@@ -34,20 +36,28 @@ function insideRoundedRect(x, y, size, inset, radius) {
   return (x - cx) ** 2 + (y - cy) ** 2 <= radius ** 2;
 }
 
-/** Normalised glyph test in a 256-unit square. */
+/**
+ * Normalised glyph test in a 256-unit square.
+ *
+ * PLAY:  A(88,54) B(190,110) C(88,166) — solid right-pointing triangle.
+ * ARROW: shaft x[114,142] y[176,208], head apex (128,234) base y=204.
+ * At 16px the triangle is ~6px and the arrow ~2px, both still legible.
+ */
 function insideGlyph(x, y) {
-  const shaft = x >= 112 && x < 144 && y >= 52 && y < 148;
-  if (shaft) return true;
-  // Arrow head: apex (128, 198), base y = 148, half width 46.
-  if (y >= 148 && y < 198) {
-    const halfWidth = 46 * (1 - (y - 148) / 50);
-    if (Math.abs(x - 128) <= halfWidth) return true;
+  // Play triangle.
+  if (y >= 54 && y <= 166 && x >= 88) {
+    const span = 190 - 88;
+    const right = y <= 110
+      ? 88 + span * ((y - 54) / (110 - 54))
+      : 88 + span * ((166 - y) / (166 - 110));
+    if (x <= right) return true;
   }
-  // Tray: a bar with rounded caps.
-  if (y >= 214 && y < 228) {
-    const dx = Math.max(0, Math.abs(x - 128) - 52);
-    if (dx === 0) return true;
-    return dx ** 2 + (y - 221) ** 2 <= 49;
+  // Download arrow: vertical shaft.
+  if (x >= 114 && x <= 142 && y >= 176 && y <= 208) return true;
+  // Download arrow: triangular head (apex down).
+  if (y >= 202 && y < 234) {
+    const halfWidth = 34 * (1 - (y - 202) / (234 - 202));
+    if (Math.abs(x - 128) <= halfWidth) return true;
   }
   return false;
 }
@@ -58,6 +68,9 @@ function render(size) {
   const samples = 4;
   const pixels = Buffer.alloc(size * size * 4);
   for (let py = 0; py < size; py += 1) {
+    // Vertical gradient, sampled at the pixel centre.
+    const grad = (py + 0.5) / size;
+    const bg = TOP.map((channel, index) => channel + (BOTTOM[index] - channel) * grad);
     for (let px = 0; px < size; px += 1) {
       let bgHits = 0;
       let fgHits = 0;
@@ -65,7 +78,7 @@ function render(size) {
         for (let sx = 0; sx < samples; sx += 1) {
           const u = (px + (sx + 0.5) / samples) * scale;
           const v = (py + (sy + 0.5) / samples) * scale;
-          if (!insideRoundedRect(u, v, 256, 6, 44)) continue;
+          if (!insideRoundedRect(u, v, 256, 6, 46)) continue;
           bgHits += 1;
           if (insideGlyph(u, v)) fgHits += 1;
         }
@@ -74,10 +87,10 @@ function render(size) {
       if (bgHits === 0) continue;
       const fg = fgHits / bgHits;
       const offset = (py * size + px) * 4;
-      const color = TEAL.map((channel, index) => Math.round(channel + (WHITE[index] - channel) * fg));
-      pixels[offset] = color[2];
-      pixels[offset + 1] = color[1];
-      pixels[offset + 2] = color[0];
+      const color = bg.map((channel, index) => Math.round(channel + (WHITE[index] - channel) * fg));
+      pixels[offset] = color[2];     // B
+      pixels[offset + 1] = color[1]; // G
+      pixels[offset + 2] = color[0]; // R
       pixels[offset + 3] = Math.round((bgHits / total) * 255);
     }
   }

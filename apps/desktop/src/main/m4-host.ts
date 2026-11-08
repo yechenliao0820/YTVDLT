@@ -64,11 +64,26 @@ export interface M4Host {
   /** Real batch enqueue used by the `PLAYLIST_ENQUEUE` IPC channel. */
   enqueuePlaylistBatch(input: PlaylistEnqueueInput): Promise<readonly string[]>;
   /** D-69: real single-video enqueue backing the `DOWNLOAD_START` IPC channel. */
-  enqueueSingle(input: { readonly url: string; readonly kind: DownloadKind }): Promise<readonly string[]>;
+  enqueueSingle(input: SingleEnqueueInput): Promise<readonly string[]>;
   /** Restore result from the boot path. */
   readonly restore: TaskHost['restore'];
   /** Detach the queue listener (tests / hot reload). */
   dispose(): void;
+}
+
+/**
+ * D-83: a single download now carries the user's choice.
+ *
+ * Until 0.1.6 `kind` was written into the `TaskRecord` and then ignored by
+ * `buildDownloadRequest()`, so "音频" produced a video file, and no field
+ * existed for a resolution preset at all — every task used the config default.
+ */
+export interface SingleEnqueueInput {
+  readonly url: string;
+  readonly kind: DownloadKind;
+  readonly quality?: FormatDomain['quality'];
+  readonly audioQuality?: FormatDomain['audioQuality'];
+  readonly audioFormat?: 'auto' | 'mp3' | 'm4a';
 }
 
 function readDefaults(config: TaskHost['config'], bundledAria2cPath?: string): {
@@ -90,6 +105,43 @@ function readDefaults(config: TaskHost['config'], bundledAria2cPath?: string): {
     network: { ...network, aria2cPath: resolveAria2cPath(network.aria2cPath, bundledAria2cPath) },
     advanced: cast<Partial<AdvancedDomain>>('advanced'),
   };
+}
+
+/**
+ * D-83: fold the renderer's choice into the format domain.
+ *
+ * Two rules that are easy to get wrong:
+ *  - `kind: 'audio'` MUST set `extractAudio`: `buildDownloadRequest()` never
+ *    derives it from `kind`, which is exactly why 0.1.6's "音频" produced a
+ *    video file — the flag stayed `false` and `-x` was never emitted.
+ *  - an explicit preset must clear `formatId` / `sortingFields`, otherwise the
+ *    P3 priority chain (explicit id > preset) silently ignores the dropdown.
+ */
+export function applyFormatChoice(
+  base: Partial<FormatDomain> | undefined,
+  input: SingleEnqueueInput,
+): Partial<FormatDomain> {
+  const format: Partial<FormatDomain> = { ...base };
+  if (input.kind === 'audio') {
+    format.extractAudio = true;
+    format.audioFormat = input.audioFormat === 'mp3' || input.audioFormat === 'm4a'
+      ? input.audioFormat
+      : null;
+    if (input.audioQuality !== undefined) format.audioQuality = input.audioQuality;
+    // A video resolution preset means nothing for an audio task.
+    format.quality = 'best';
+    format.formatId = null;
+    format.sortingFields = null;
+    return format;
+  }
+  format.extractAudio = false;
+  format.audioFormat = null;
+  if (input.quality !== undefined) {
+    format.quality = input.quality;
+    format.formatId = null;
+    format.sortingFields = null;
+  }
+  return format;
 }
 
 /**
@@ -191,13 +243,14 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
   /** D-69: real single-video download entry (registered on DOWNLOAD_START). */
   let singleSeq = 0;
   const enqueueSingle = async (
-    input: { readonly url: string; readonly kind: DownloadKind },
+    input: SingleEnqueueInput,
   ): Promise<readonly string[]> => {
+    const defaults = readDefaults(task.config, options.bundledAria2cPath);
     const base = buildDownloadRequest({
       taskId: 'single-template',
       url: input.url,
       kind: input.kind,
-      defaults: readDefaults(task.config, options.bundledAria2cPath),
+      defaults: { ...defaults, format: applyFormatChoice(defaults.format, input) },
     });
     const now = ports.clock.nowIso();
     const taskId = `single-${now.replace(/[^0-9]/g, '')}-${++singleSeq}`;

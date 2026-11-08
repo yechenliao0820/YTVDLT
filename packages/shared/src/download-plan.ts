@@ -35,6 +35,13 @@ export interface DownloadPlan {
   readonly effectiveSort: string | null;
   readonly extractAudio: boolean;
   readonly audioFormat: 'mp3' | 'm4a' | null;
+  /**
+   * D-83 (append-only): ffmpeg quality for the transcode, emitted as
+   * `--audio-quality`. Non-null only when `audioFormat !== null`; in that mode
+   * R1 removes every `-S abr~N`, so this is the ONLY place an explicit audio
+   * bitrate can still take effect.
+   */
+  readonly audioTranscodeQuality: string | null;
   readonly audioMultistreams: boolean;
 
   // ---- subtitles (M2 positions 21-27 + M3 conditional segments) ----

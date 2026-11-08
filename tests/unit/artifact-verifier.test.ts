@@ -358,3 +358,59 @@ describe('C12 / A-M2-19 no false completion', () => {
     expect(report.durationMs).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe('C6/C8 · D-84 audio post-processing regressions', () => {
+  const AUDIO_PROBE = JSON.stringify({
+    format: { duration: '10.000000' },
+    streams: [{ codec_type: 'audio', codec_name: 'opus' }],
+  });
+
+  it('C8 hashes the AUDIO stream for an audio task (map 0:a, never 0:v)', async () => {
+    const s = seed({ ffprobe: AUDIO_PROBE });
+    const report = await s.verifier.verify({ ...baseInput, kind: 'audio', postprocessed: true });
+    // No golden for real downloads -> SKIP, but the map must already be right.
+    expect(byId(report, 'C8')?.status).toBe('SKIPPED');
+    const call = s.state.spawnCalls.find((c) => c.argv.includes('framemd5'));
+    expect(call).toBeDefined();
+    expect(call!.argv[call!.argv.indexOf('-map') + 1]).toBe('0:a');
+  });
+
+  it('C8 keeps hashing the VIDEO stream for a video task (map 0:v)', async () => {
+    const s = seed();
+    await s.verifier.verify({ ...baseInput, postprocessed: true });
+    const call = s.state.spawnCalls.find((c) => c.argv.includes('framemd5'));
+    expect(call!.argv[call!.argv.indexOf('-map') + 1]).toBe('0:v');
+  });
+
+  it('C8 still FAILs when the framemd5 run writes stderr (audio task)', async () => {
+    const s = seed({ ffprobe: AUDIO_PROBE, framemd5Stderr: 'matches no streams' });
+    const report = await s.verifier.verify({ ...baseInput, kind: 'audio', postprocessed: true });
+    expect(byId(report, 'C8')?.status).toBe('FAIL');
+  });
+
+  it('C6 does not treat an embedded cover (attached_pic) as a video stream', async () => {
+    const cover = JSON.stringify({
+      format: { duration: '10.000000' },
+      streams: [
+        { codec_type: 'audio', codec_name: 'aac' },
+        { codec_type: 'video', codec_name: 'mjpeg', disposition: { attached_pic: 1 } },
+      ],
+    });
+    const s = seed({ ffprobe: cover });
+    const report = await s.verifier.verify({ ...baseInput, kind: 'audio', postprocessed: true });
+    expect(byId(report, 'C6')?.status).toBe('PASS');
+  });
+
+  it('C6 still FAILs when an audio task really contains a content video stream', async () => {
+    const withVideo = JSON.stringify({
+      format: { duration: '10.000000' },
+      streams: [
+        { codec_type: 'audio', codec_name: 'aac' },
+        { codec_type: 'video', codec_name: 'h264', disposition: { attached_pic: 0 } },
+      ],
+    });
+    const s = seed({ ffprobe: withVideo });
+    const report = await s.verifier.verify({ ...baseInput, kind: 'audio' });
+    expect(byId(report, 'C6')?.status).toBe('FAIL');
+  });
+});

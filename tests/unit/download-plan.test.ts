@@ -383,3 +383,25 @@ describe('B1 · network / advanced / path derivation', () => {
     expect(plan.convertTo).toBe('srt');
   });
 });
+
+describe('D-83 · audio transcode quality survives R1', () => {
+  it('no transcode -> no --audio-quality value, abr~N kept', () => {
+    const plan = resolveDownloadPlan(req({ format: format({ extractAudio: true, audioQuality: '128' }) }));
+    expect(plan.audioTranscodeQuality).toBeNull();
+    expect(plan.effectiveSort).toContain('abr~128');
+  });
+
+  it('mp3 transcode -> --audio-quality value derived from the bitrate preset', () => {
+    const cases: readonly [FormatDomain['audioQuality'], string][] = [
+      ['best', '0'], ['192', '192K'], ['128', '128K'], ['64', '64K'], ['32', '32K'], ['lowest', '10'],
+    ];
+    for (const [audioQuality, expected] of cases) {
+      const plan = resolveDownloadPlan(req({
+        format: format({ extractAudio: true, audioFormat: 'm4a', audioQuality }),
+      }));
+      expect(plan.audioTranscodeQuality).toBe(expected);
+      // R1 still wins for the source selection: no abr~N in the sort string.
+      expect(plan.effectiveSort ?? '').not.toContain('abr~');
+    }
+  });
+});

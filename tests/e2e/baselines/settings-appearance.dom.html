@@ -44,7 +44,7 @@
 <main class="settings-page" id="settings-root" data-state="ready" data-theme-value="system" data-accent-value="system" data-locale-value="zh-CN" data-motion-value="system">
   <header class="settings-head">
     <h1 id="settings-title" data-i18n="settings.title" data-fit="">设置</h1>
-    <span class="meta" id="settings-meta">v0.1.0 · M5</span>
+    <span class="meta" id="settings-meta">v0.1.10</span>
   </header>
 
   <div class="settings-body">
@@ -131,8 +131,11 @@
 
   <section class="section" id="section-about">
     <h2 data-i18n="about.title" data-fit="">关于 YTVDLT</h2>
-    <div class="about-line"><b data-i18n="about.version" data-fit="">版本</b><span id="about-version">0.1.0</span></div>
+    <div class="about-line"><b data-i18n="about.version" data-fit="">版本</b><span id="about-version">v0.1.10</span></div>
+    <div class="about-line"><b data-i18n="about.author" data-fit="">作者</b><span data-i18n="about.author.name">Yechen Liao</span></div>
     <div class="about-line" data-i18n="about.runtime">运行时：yt-dlp / node / ffmpeg（随包，不入 asar）</div>
+    <div class="about-line"><b data-i18n="about.license.title" data-fit="">开源许可声明</b></div>
+    <p class="note" data-i18n="about.license.body">本软件随附 yt-dlp（Unlicense）、FFmpeg（LGPL-3.0）、Electron（MIT）与 Node.js（MIT）。完整许可全文见 THIRD_PARTY_NOTICES，相关源码可依各自许可获取。</p>
     <div class="about-line" data-i18n="about.license">FFmpeg 采用 LGPL-3.0，源码与许可全文见 THIRD_PARTY_NOTICES。</div>
     <div class="about-line" data-i18n="about.haptics">触觉反馈：桌面端无等价硬件，明确省略。</div>
     <div class="about-line" data-i18n="about.transitions">转场动效仅用于状态切换与弹窗，遵循「减少动态效果」。</div>
@@ -146,6 +149,7 @@
 <script src="../../shortcuts/shortcuts.js"></script>
 <script src="../../app-shell.js"></script>
 <script src="./settings.js"></script>
+<script src="../../about/about.js"></script>
 
 
 </body></html>

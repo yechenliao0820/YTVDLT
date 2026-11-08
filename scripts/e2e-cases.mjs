@@ -338,6 +338,21 @@ export const E2E_CASES = [
       { name: 'cards-rendered', pattern: 'data-task-id="t-run-1"' },
     ],
   },
+  // D-83: 「音频」分支必须真的把界面切过去（格式下拉可见、清晰度变成码率）。
+  {
+    id: 'queue-audio',
+    page: 'pages/queue/index.html',
+    query: 'case=queue-audio&kind=audio',
+    state: 'ready',
+    assertionIds: ['A-4.4-16'],
+    checks: [
+      { name: 'root-kind-audio', pattern: 'id="queue-root"[^>]*data-kind="audio"' },
+      { name: 'audio-button-pressed', pattern: 'data-kind="audio" aria-pressed="true"' },
+      { name: 'audio-format-visible', pattern: 'id="queue-audio-format"[^>]*hidden="false"' },
+      { name: 'quality-is-bitrate', pattern: '192 kbps' },
+      { name: 'video-option-gone', pattern: '2160p', absent: true },
+    ],
+  },
   {
     id: 'queue-prefill',
     page: 'pages/queue/index.html',

@@ -948,3 +948,122 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 验证 | 驱动脚本 `reports/l3-probe/ui-drive.mjs` 新增「详情 → 返回」两段：点卡片 `detail` 按钮 → 断言 `location.href` 进入 `task-detail`、`#detail-back` 存在 → 真实点击返回 → 断言回到队列且卡片仍在。 |
 | 未覆盖 | 详情页的「打开文件 / 复制 URL」等按钮在 live 模式下走 `TASK_ACTION`，已在 D-76 实现，但本轮只复验了返回；其余待联网轮次补。 |
 | 教训 | 凡是「点了没反应」都先问：这条交互是否依赖浏览器的隐式行为（表单提交、label 转发、默认按钮）？显式绑定点击永远比隐式链可靠。 |
+
+## D-81 · 2026-11-07 · 项目目录迁移事故与「只删到回收站」铁律（补录）
+
+| 项 | 内容 |
+|---|---|
+| 说明 | 本条是**补录**：0.1.6 交付当天的迁移事故把 `.git` 与根目录配置一起删掉了，决策原文随历史丢失；以下按 `docs/AI-MAINTENANCE.md` §0.1 与 `docs/GIT-HISTORY-RECOVERED.md` 的存档描述恢复，供编号连续可检索。 |
+| 现象 | 迁移项目目录时先 `Move-Item` 部分文件、未校验就 `Remove-Item -Force` 清理「残留」，把 `.git` 内容与根目录配置（`package.json` / `pnpm-lock.yaml` / `tsconfig.base.json` / `turbo.json` / `vitest.config.ts` / `README.md` / `LICENSE` / `.gitignore` / `.npmrc`）**永久删除**；`Remove-Item -Force` 不进回收站，`LICENSE` 与 git 历史未能找回。 |
+| 决策 | ① 一切删除只允许进回收站（`Microsoft.VisualBasic.FileIO.FileSystem::DeleteFile/DeleteDirectory` + `RecycleOption.SendToRecycleBin`）；禁止 `Remove-Item -Force`、`rm -f/-rf`、`rd /s /q`、`shutil.rmtree`。② 先备份再删；移动/复制后必须核对文件数与关键文件（`package.json`、`.git/HEAD`、`LICENSE`）才允许删源。③ 单次删除 ≤ 50 个文件（safe-delete 守卫阈值）。④ 删前列出完整路径给业主确认。⑤ 构建产物（`dist-*/`、`coverage/`、`node_modules/`）虽可再生，同样走回收站。 |
+| 落点 | 规则固化在 `docs/AI-MAINTENANCE.md` §0（铁律 7）与 §0.1；本条仅补编号，不改变任何规则。 |
+
+## D-82 · 2026-11-07 · 应用菜单中文化（0.1.7）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主截图） | 窗口菜单栏是 Electron 默认的英文菜单 File / Edit / View / Window；页面、托盘菜单早已中文化，唯独这一条没动——因为代码从未调用 `Menu.setApplicationMenu()`。 |
+| 根因 | `bootstrap.ts` 只建了窗口、托盘和 IPC，应用菜单交给 Electron 默认值，默认文案全是英文。 |
+| 决策 | ① 新增 `apps/desktop/src/main/app-menu.ts`：纯数据菜单模型（文件(&F)/编辑(&E)/视图(&V)/窗口(&W)），行为全部沿用 Electron 原生 `role`（撤销/复制/粘贴/缩放/全屏/关闭…），label 只覆盖显示文字，不自己实现快捷键行为。② `bootstrap.ts` 在窗口创建后 `Menu.setApplicationMenu?.(buildFromTemplate(...))`；`setApplicationMenu` 在 `ElectronLike` 上是**可选方法**，单测的假 Menu（只有 `buildFromTemplate`）不受影响。③ macOS 分支裁掉「文件」首项（应用名菜单占据第一槽位）。④ 「新建下载」= `showWindow()`，「退出」与托盘退出同一条路径（`quitting = true; app.quit()`）。 |
+| 验证 | 新增 `tests/unit/app-menu.test.ts`（顶层中文、无英文残留、role 保留、回调接线、macOS 分支）与 `bootstrap.test.ts` 断言菜单确实被安装；`npm test` 全绿。真机效果以打包后的 0.1.7 截图为准。 |
+| 未覆盖 | 未加「帮助/关于」菜单——应用内没有现成的 About 对话框通道，硬塞一个 `dialog.showMessageBox` 要扩大 `ElectronLike` 注入面，留待设置页 About 卡片复用时再补。 |
+
+## D-83 · 2026-11-07 · 粘贴区可选「视频/音频 + 清晰度」；音频模式真的下载音频（0.1.7）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 0.1.6 粘贴链接后只能按默认设置下载**视频**：既不能选音频，也不能选清晰度——与最初需求不符。 |
+| 根因 | ① `buildDownloadRequest()` 从不读 `kind`：`extractAudio` 永远 `false`，`-x` 从未出现，所以「音频」任务实际下载视频（kind 只写进了 `TaskRecord`）。② `DOWNLOAD_START` 只收 `url` + `kind`，没有任何清晰度字段，全部走配置默认值。③ 格式选择对话框依赖的 `PROBE` 仍是 fixture，短期内不可用。 |
+| 决策 | ① 队列页粘贴区新增「视频 / 音频」分段切换 + 清晰度下拉（视频：最佳/2160p/1440p/1080p/720p/480p/360p/最低；音频：最佳/192/128/64/32/最低）+ 音频格式下拉（原始音频/MP3/M4A，仅音频模式显示）；`?kind=audio` 可直达音频态（e2e 用例 `queue-audio`）。② `DOWNLOAD_START` 白名单键扩为 `url/kind/quality/audioQuality/audioFormat`，三组枚举在 `m5-channels.ts` 逐一校验，越界直接抛错（不静默降级）；video 分支忽略音频字段、audio 分支忽略分辨率字段。③ `m4-host.ts::enqueueSingle` 新增 `applyFormatChoice()`：音频模式强制 `extractAudio = true`；显式选择清晰度时清掉配置里的 `formatId`/`sortingFields`——P3 优先级里显式 formatId 压过预设，不清掉下拉就永远无效。④ 音频转码（MP3/M4A）下 R1 规则会移除 `-S abr~N`，码率选择原本完全失效：`DownloadPlan` 新增 `audioTranscodeQuality`（append-only），把所选码率改走 yt-dlp 的 `--audio-quality`（best→0、192→192K、…、lowest→10），argv 由 B1″ 条件段在 `--audio-format` 之后插入；`ALLOWED_DOWNLOAD_OPTIONS` 同步放行。原始音频（auto）不转码，码率仍走 `-S abr~N` 选源。 |
+| 验证 | 计划层 / argv / m5 通道 / m4 装配四层各加测试（`audioTranscodeQuality` 映射、`--audio-quality` 仅在转码时出现、非法枚举被拒、audio/video 分支互不串字段、auto 不转码），`npm test` 778 全过、`typecheck` 5/5；e2e 重建基线后 31/31 + 反例 5/5 全绿（`queue-audio` 断言音频格式下拉可见、清晰度列码率、视频分辨率选项消失）。真机下载验证待打包后联网轮次补做（与 C13–C16 同批）。 |
+| 未覆盖 | ① 「按真实链接探测可选清晰度」（真 PROBE + 逐格式对话框）仍是 M3 fixture，本条给的是**预设置选择器**而非逐格式列表；② 音频「原始格式」落盘扩展名跟随源（m4a/opus/webm），未做容器归一；③ 播放列表批量入队（`PLAYLIST_ENQUEUE`）仍未接 UI，本条只覆盖单链接入口。 |
+
+## D-84 · 2026-11-07 · 音频下载被产物校验误杀：C8 用视频流做 framemd5（0.1.8）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主 VM 实测 0.1.7） | 音频任务 `single-20261107135941207-1` 下载完成、manifest 有 1 个产物，却判 `ARTIFACT_INCOMPLETE`；校验详情 `C8: framemd5 run emitted stderr` → `C12: cannot mark Completed: C8 failed`。 |
+| 根因 | C8 只在 `postprocessed=true` 时运行，而 0.1.6 的音频模式实际下的是视频，**这条路径从未被真实音频触发过**。D-83 让音频真的走 `-x` 后，产物是纯音频文件（webm/m4a/mp3），C8 却写死 `ffmpeg -map 0:v`——纯音频没有视频流，ffmpeg 报 `Stream map '0:v' matches no streams` 输出 stderr，C8 按「framemd5 有 stderr 即失败」判 FAIL。文件本身是好的，校验器自己失败。 |
+| 决策 | ① C8 的哈希目标跟随任务类型：`kind=audio` → `-map 0:a`（音频帧哈希），否则维持 `-map 0:v`；`ctx.kind` 缺省按 video 处理，既有 L2 fixture 流程不变。失败详情与 SKIP 详情都带上所用 map，便于排障。② 顺带修 C6 的同类隐患：M4A/MP3 转码会 `--embed-thumbnail`，封面在 ffprobe 里是 `video` 流（`disposition.attached_pic=1`），按旧逻辑会被判「音频任务产出了视频流」。C6 改为只统计**内容视频流**（排除 attached_pic 封面），测量输出里新增 `coverArtOnly` 标记。 |
+| 验证 | 新增 5 例单测（audio 任务用 0:a、video 任务仍 0:v、stderr 仍判 FAIL、attached_pic 封面不触发 C6 FAIL、真视频流仍触发 FAIL），783 全过、typecheck 5/5、e2e 31/31 + 反例 5/5、check-layering 0 违规；打包 0.1.8 后由业主在 VM 复测音频下载。 |
+| 未覆盖 | ① 错误报告 `Engine: unknown` 与 argv 段为空的展示缺陷仍在（D-79 已登记）；② C8 对真实下载无 golden，修后预期 SKIP 而非 PASS，属设计内（O-M2-02）；③ M4A 封面在 ffprobe 的具体呈现（attached_pic=1）按通用行为处理，VM 复测时如仍有 C6 误判需按实测调整。 |
+
+## D-85 · 2026-11-07 · 界面可切换中英文：补入口、补持久化、菜单跟随（0.1.9）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 「目前界面只有中文，我之前的要求是支持中英文切换」。设置页其实早有「简体中文 / English」分段按钮，字典 `messages.js` 也一直是 zh-CN / en 双份，但主窗口只加载队列页、菜单里没有设置入口，业主根本到不了那个按钮；且切换只走 M3 fixture 的 `CONFIG_SET`，重启即丢失。 |
+| 根因 | ① 双语能力在 M5-2 就做完了，**缺的是入口**：队列页没有语言控件，应用菜单只有「文件/编辑/视图/窗口」。② 设置页 `switchLocale()` 只 `emit('language', ...)` → `ytvdlt:config:set`（fixture 通道），不写 `ConfigStore`。③ 启动 URL 是 `main.ts` 里固定的 `file://…/queue/index.html`，没有任何地方把持久化的语言回灌给渲染层；`i18n.js` 只认 `?lang=` 或 `__YTVDLT_SETTINGS__`。④ `app-menu.ts` 菜单文案写死中文。 |
+| 决策 | ① 队列页头部加「中文 / EN」分段控件，点击后 `SETTINGS_SET { language }` 持久化 + `location.replace()` 带 `?lang=en` 重载（沿用 M5-2 明确记录的「反向翻译需重载」约束）；切回中文去掉参数。设置页的切换同步补发 `SETTINGS_SET`，两处入口行为一致。② `bootstrap.ts` 新增 `withLocale(pageUrl, locale)`：启动时经 `host.appearance()`（SETTINGS_GET）读回语言，英文版自动在页面 URL 钉上 `?lang=en`；中文是出厂默认，不加参数，既有 URL 断言逐字节不变。③ `did-finish-load` 时重读语言并重建应用菜单，`app-menu.ts` 增加 `locale` 参数与中/英标签表（role/accelerator 全部不动）。④ 队列页跳详情页时继承 `lang`，详情页删除确认弹窗文案随语言取字典。⑤ 新增 41 个双语键（品牌、工具栏、右键菜单、删除弹窗、状态提示），`i18n.test.ts` 的「两语言键集合一致 / 占位符同名 / 页面引用键齐全」继续把门。 |
+| 验证 | `pnpm typecheck` 5/5；`npm test` 789 全过；e2e 31/31 + 反例 5/5（`queue-en` 断言 `data-i18n-missing="0"`、`data-text-overflow="0"`）；英文整页截图人工复核无中文残留、无溢出；`settings-en-dark` / `format-en` 未受影响（0 像素差）。 |
+| 未覆盖 | ① 托盘菜单仍是中文（`tray.ts` 的 model 未接语言）；② 安装程序（NSIS）本身没有多语言选择页，业主说「安装时加语言选项也可以」，本轮按「软件内部切换」实现；③ M3 三个冻结弹窗仍靠短语表运行时翻译，JS 拼接的片段会有中英混排（M5-2 已登记的已知缺口）。 |
+
+## D-86 · 2026-11-07 · 品牌徽标、自适应布局与全屏退出（0.1.9）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主截图） | 窗口最大化后内容只占左上角一小块，下方与右侧大面积浅灰留白；「界面太单一，能不能加个图标？应用名叫 YTVDLT，弄个形式上去」；另外「全屏之后…根本没有退出按钮，只能按 Alt+F4」。 |
+| 根因 | 共享样式 `styles/ytvdlt.css` 把 `html, body` 钉成 `width:1280px; height:800px; overflow:hidden`（M3 截图基线要求固定画幅），队列页直接引用了它；`.queue-page` 又是 `height:800px`，`.cards` 写死 `1fr 1fr` 两列。窗口变大时页面尺寸不变，剩余区域全是 body 背景色，看起来像「没做完」。全屏其实是 F11（视图菜单里已有），但界面上没有任何可见控件或提示。 |
+| 决策 | ① **只改队列页**：在 `pages/queue/index.html` 的内联 `<style>` 里覆盖 `html,body` 为 `100%`，`.queue-page` 改 `height:100%`、flex 纵向；**不动共享 CSS**，所以另外 24 张 M3/M4 基线保持 0 像素差（实测通过）。② 卡片网格改 `repeat(auto-fill, minmax(min(100%,420px),1fr))`：1280 宽 2 列，1920 宽 4 列，随分辨率自动增减；`.queue-body` 改 `overflow:auto` 承接滚动。③ 头部加内联 SVG 品牌徽标（播放三角 + 下载箭头 + YTVDLT 字标 + tagline），空状态加大号水印，内容区加 `color-mix` 极淡光晕，右下角加淡色品牌水印填充空白，底部加状态栏——纯装饰，不拦点击、不进 IPC。④ 加「⛶ 全屏 / 退出全屏」按钮，用 HTML Fullscreen API（`requestFullscreen` / `exitFullscreen` + `fullscreenchange` 重绘按钮），**零新增 IPC 通道**；菜单「视图」保留 F11 原生 role 并在页脚提示。 |
+| 验证 | e2e 31/31 + 反例 5/5；`queue-en` 的 `data-text-overflow="0"` 通过；额外用同一 headless Chrome 以 `--window-size=1920,1080` 截图复核：卡片变 4 列、横向铺满、无错位；1280×800 中英两版截图人工复核无重叠/截断。 |
+| 未覆盖 | ① 设置页 / 详情页 / 日志页仍是固定 800px 画幅（本轮只改主窗口队列页，避免动 6 张基线）；② 任务很少时纵向留白靠水印与光晕柔化，未做「卡片拉伸填满」——实测 1080 高下把 6 张卡拉到 400px 反而更空；③ Fullscreen API 是渲染层全屏，Electron 原生 `setFullScreen` 未接（不新增通道的取舍）。 |
+
+## D-87 · 2026-11-07 · 任务管理：多选 / 排序 / 右键删除 / 删除时区分历史与本地文件（0.1.9）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 卡片上只有「打开文件夹」「详情」；详情页的「删除」不说明删的是本地文件还是历史记录；任务多了不知道哪个是哪个，希望「可以删除历史记录或者改变顺序」「右键弹菜单」「删除时弹窗询问：是否删除本地原文件，还是只删除历史记录」。 |
+| 根因 | ① `queue.js::actionsFor()` 只放行 cancel / retry / folder / detail，字典里的 `queue.action.remove` 从未用上；② `TaskDetailService.remove()` 本来只做 `queue.remove(id)`——**从来不动文件**，但 UI 没告诉用户；③ 批量与排序纯前端缺失；④ 渲染层沙箱无 `fs`，删文件必须主进程做。 |
+| 决策 | ① 卡片加复选框、可见「删除」按钮与右键菜单（详情 / 打开文件夹 / 删除…）；工具栏加全选、排序（最新/最早/名称/状态）、删除选中、清空历史；排序是**视图层**的，不动队列顺序，存 `localStorage`。② 删除统一走确认弹窗，三选一：取消 / **仅删除历史记录** / **同时删除本地文件**——文案明确写「本地文件会移入 Windows 回收站，可随时还原；不会永久删除」；详情页的「删除」按钮在 live 模式下也拦到同一个弹窗（弹窗 DOM 仅 live 注入，沿用 D-80 手法，静态基线不变）。③ 清空历史只挑 `Completed / Canceled / Error`，运行中任务跳过。④ **不新增 IPC 通道**：`TASK_ACTION` 白名单加可选 `withFiles: boolean`，仅允许与 `action:'remove'` 同用、非 boolean 直接抛错；主进程只取 `queue.get(taskId).artifacts`（引擎自己登记的路径，渲染层无法指定任意路径），经注入的 `TrashFilesPort` 调 `shell.trashItem` 移入回收站；**部分失败则保留记录**让用户重试，绝不永久删除（铁律 7）。⑤ 批量删除/清空在渲染层循环调用现有 `remove`，不改 core 的 `TaskDetailAction` 枚举。 |
+| 验证 | 新增 4 例单测覆盖「只回收本任务产物→再删记录」「部分失败保留记录」「withFiles 只允许 remove 且必须是 boolean」「无回收端口时拒绝且零删除」；`npm test` 789 全过、typecheck 5/5；e2e 31/31 + 反例 5/5；`detail-*` / `settings-*` 基线 0 像素差。 |
+| 未覆盖 | ① 拖拽改变顺序未做（给的是排序下拉）；② 多选目前只作用于当前可见筛选结果，切 tab 后选中项保留但不可见；③ `shell.trashItem` 对网络盘/不可回收位置的失败按「部分失败」上报，未做逐文件错误明细；④ 真机删除本地文件未在打包产物上点一遍（需 VM 轮次，与 C13–C16 同批）。 |
+
+## D-88 · 2026-11-07 · 无痕下载、快照清理与 0.1.9 基线重建（0.1.9）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主补充） | 「还可以加一个一键删除历史记录的功能，或者无痕浏览／无痕下载…当我关闭这个软件的时候，它就会清空历史记录」。 |
+| 根因 | `DEFAULT_DOMAINS.general.privateMode` 自 M1 就存在但**从未被任何代码读取**；`SETTINGS_SET` 白名单也不收这个键。关闭窗口只做 close-to-tray（`window.hide()`），没有清理钩子；真退出时 `app.quit()` 会立刻结束进程，异步快照写入可能丢。 |
+| 决策 | ① 队列页工具栏加「无痕下载」开关，经 `SETTINGS_SET { privateMode }` 写入 `general.privateMode`（白名单新增该键、只收 boolean），`SETTINGS_GET` 回读并在启动时同步勾选状态；**开启时不清空现有记录**，只按业主语义在关闭窗口时清。② `bootstrap.ts` 加可选 `onWindowClose` 钩子，在窗口 `close`（含隐藏到托盘）时触发清理；`electron-entry.ts` 用 `hostRef` 实现 `clearPrivateHistory()`：仅当开关为真时遍历 `queue.list()`、跳过 Running/FetchingInfo、逐个 `queue.remove()`，**不碰任何本地文件**。③ 真退出路径用 `app.on('before-quit')` 一次性 `preventDefault()` + `Promise.race(清理, 3s 超时).finally(app.quit())`，保证异步快照写入有机会落盘；第二次 quit 直接放行，不改变既有退出语义。④ 本轮 UI 改动使 7 张 `queue-*` 截图的 DOM 与像素必然变化：按 `run-e2e.mjs --case=<id> --update-baselines` **只重建这 7 张**，再跑全量 31/31 + 反例 5/5 验证；其余 24 张 0 像素差，未动一根手指。所有 DOM 断言（含 `queue-en` 的无溢出/无缺键）在重建前后均为 true。 |
+| 验证 | 新增 2 例单测（privateMode 持久化 + 回读、非 boolean 被拒）；`npm test` 789 全过（覆盖率四维最低 86.7% > 70% 门限）、typecheck 5/5、e2e 31/31 + 反例 5/5、`handoff-check` 对账通过。 |
+| 未覆盖 | ① 「无痕」只清任务记录与 `tasks.json` 快照，**不清**日志 `logs/app-*.jsonl`、不清下载目录、不清配置；② 崩溃 / 强制结束进程（任务管理器 kill）不触发 `before-quit`，无法保证清理；③ 托盘菜单未跟随语言（同 D-85 未覆盖项）。 |
+
+## D-89 · 2026-11-08 · 装到 `C:\Program Files` 后下载报 PERMISSION_DENIED（0.1.10）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主 VM 实测 0.1.9） | Windows 10 x64（10.0.19044），NSIS 装到 `C:\Program Files\YTVDLT`，任务 `single-20261107232250728-1` 直接失败：`Code: PERMISSION_DENIED` / `Message: 无写入权限`，stderr 为 `ERROR: [Errno 13] Permission denied: 'C:\Program Files\YTVDLT\tmphl98j2yw.tmp'`。同一台机器上另有成功完成的任务。 |
+| 根因 | **这是软件缺陷，不是业主的操作问题，也不需要管理员权限。** `data-dir.ts` 早就正确处理了「配置写不进安装目录 → 回落 `%APPDATA%`」，但**引擎子进程没做同样的处理**：`yt-dlp-engine.ts` 构造 `spawnOptions` 时只给了 `PATH`，既没有 `cwd`，也没有 `TEMP/TMP/TMPDIR`。Electron 安装版从快捷方式启动时 `process.cwd()` 就是安装目录并被子进程继承，yt-dlp 的 `tempfile.mkstemp()`（以及任何相对 `--print-to-file` 路径）随之落到只读的 `C:\Program Files\YTVDLT`。下载目录本身完全可写，失败与它无关——所以「下载软件要以管理员身份运行」是错误结论。 |
+| 决策 | ① 在 `YtDlpEngine` 加 `writableWorkDir()` / `spawnBase()`：下载时把子进程的 `cwd` 与 `TEMP/TMP/TMPDIR` 全部钉到**本次请求的输出目录**（`videoDir` / `audioDir`，引擎在 spawn 前已 `mkdir`，且已由 `withExpandedPaths` 展开为绝对路径）；探测 / 版本探测回落到继承的 `%TEMP%`。② 三处 spawn（probe / probePlaylist / runDownload）与 `version()` 统一走 `spawnBase()`，不再各自拼 `env`。③ **不改任何 yt-dlp 参数**：argv 冻结位置、下载计划、`resolveArtifactManifestDir` 一律不动，把修复限制在进程启动环境这一层。④ 路径不是绝对路径时不设 `cwd`，避免把相对路径伪装成有效工作目录。 |
+| 验证 | 新增契约测试 `tests/contract/download-engine.download.contract.test.ts` 的 D-89 用例：把继承 `TEMP/TMP` 模拟成 `C:\Program Files\YTVDLT`，断言 `spawnStreaming` 收到的 `opts.cwd` 与 `opts.env.TEMP/TMP/TMPDIR` 全是 `C:/Users/leo/Downloads/YTVDLT`，且不含 `Program Files`。`pnpm typecheck` 5/5、`npm test` 792 全过、e2e 31/31 + 反例 5/5。 |
+| 未覆盖 | ① 未在真实 `C:\Program Files` 安装上重跑在线下载（本机无该安装环境；VM 轮次由业主复测）；② 若用户手动把下载目录也设到只读位置，仍会失败——届时应由配置校验在入队前拒绝，本条未做；③ `Engine: unknown` 错误报告字段仍为空（D-79 已登记的展示缺陷）。 |
+
+## D-90 · 2026-11-08 · 原创品牌图标并显式绑定到窗口 / 安装包 / 快捷方式（0.1.10）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主截图） | 「桌面图标现在还是个原子核」「图标还是太初级了」「一眼就能看得出这是视频下载软件」。Electron 默认图标是蓝色原子；旧 `make-icon.mjs` 画的是青绿底 + 单个下箭头 + 托盘，语义弱且小尺寸易糊。 |
+| 根因 | ① 图形语言与产品不匹配（只有「下载」没有「视频」）；② 只依赖 `buildResources/icon.ico` 的隐式查找，业主在 VM 看到的仍是默认原子图标，说明绑定不够明确。 |
+| 决策 | ① 重写 `scripts/make-icon.mjs`：**圆角蓝色渐变方砖（`#3b8cf0 → #174ea6`）+ 白色播放三角（视频）+ 白色向下箭头（下载）**，与 0.1.9 页面内联 SVG 徽标同一套视觉语言。全部由几何函数逐像素绘制（4×4 盒式抗锯齿），无任何外部素材、无图像依赖、无抄袭；输出 16/32/48/256 四档 32-bit BMP-in-ICO。② `electron-builder.yml` 显式写 `win.icon` / `nsis.installerIcon` / `nsis.uninstallerIcon` 指向 `apps/desktop/build/icon.ico`；`build-desktop.mjs` 仍把它拷进 `dist/icon.ico` 供托盘使用。③ 不改 `files` glob（铁律 3）。 |
+| 验证 | `node scripts/make-icon.mjs` 输出 4 档；用 Pillow 解出四档生成 `reports/icon-preview-0110.png` 人工复核：16px 下播放三角与箭头仍可辨，渐变与圆角干净、无锯齿团块；打包日志核对图标被应用。 |
+| 未覆盖 | ① 未做 `.icns`（macOS 不在交付范围）；② 未做高对比度 / 单色无障碍变体；③ 已安装的旧版本快捷方式需重新安装才会刷新图标。 |
+
+## D-91 · 2026-11-08 · 版本号常驻前端、设置菜单与关于弹窗（0.1.10）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 「你应用的这个…找个地方给它显示一下版本号」「最上面那个东西不是还有一个关于吗…设置里面有个关于，关于里面有版本号、开源声明、作者 Yechen Liao」「中英文别忘了」。截图参照 WorkBuddy 的「关于」页。 |
+| 根因 | ① 菜单只有「文件/编辑/视图/窗口」，没有「设置」；② 设置页 `#settings-meta` 写死 `v0.1.0 · M5`，早已过期；③ 渲染层是 sandbox `file://` 页，拿不到 `app.getVersion()`，过去只能硬编码。 |
+| 决策 | ① `main.ts` 在 pageUrl 上钉 `?v=<app.getVersion()>`（真实版本由打包产物提供，硬编码值只作 file:// 预览 fallback）。② 新增共享脚本 `packages/ui/src/about/about.js`：读 `?v=`，把版本号写进队列页右下角 `#queue-version`、设置页 `#settings-meta` 与 `#about-version`；注入一个中英双语的关于弹窗（YTVDLT 徽标、tagline、版本、作者 **Yechen Liao**、运行时、开源许可声明 yt-dlp / FFmpeg LGPL-3.0 / Electron MIT / Node.js MIT、THIRD_PARTY_NOTICES 指引），暴露 `window.YTVDLTAbout.open()`。③ `app-menu.ts` 新增「设置(&S)」子菜单：偏好设置…（打开设置页）、返回下载队列、关于 YTVDLT；中英标签表同步。④ `bootstrap.ts` 用 `webContents.executeJavaScript?.()` 触发关于弹窗、用 `loadURL` 导航两页——**零新增 IPC 通道**，`WebContentsLike.executeJavaScript` 设为可选，单测 fake 无需改动。⑤ 设置页 About 卡片补作者 / 开源声明 / 动态版本号；菜单在设置页也能打开关于（两页都引入 `about.js`）。 |
+| 验证 | `app-menu.test.ts` 更新顶层菜单断言为 5 项并新增 2 例（设置子菜单 3 项全部接线、英文变体）；`bootstrap.test.ts` 同步；`i18n.test.ts` 继续强制两语言键集合一致与页面引用键齐全；`npm test` 792 全过；e2e 31/31 + 反例 5/5；队列页截图复核右下角 `v0.1.10` 清晰无重叠。 |
+| 未覆盖 | ① 托盘右键菜单仍未加「关于 / 设置」入口；② 关于弹窗没有「检查更新」按钮（更新通道仍是占位 `.invalid`）；③ 未把 THIRD_PARTY_NOTICES 做成可点击打开的文件链接。 |
+
+## D-92 · 2026-11-08 · 0.1.10 基线重建与发版口径（0.1.10）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 本轮改了队列页底部、设置页 About 卡片，并给两页各加一个 `<script src="../../about/about.js">`；截图基线的 DOM 必然变化。 |
+| 根因 | 基线是冻结快照；按铁律 8 不得全量 `--update-baselines`，也不得改松断言。 |
+| 决策 | 只重建受影响的 **9 张**：`queue-ready / queue-empty / queue-error / queue-en / queue-dark / queue-audio / queue-prefill` 与 `settings-appearance / settings-en-dark`。重建前确认所有 case `dom=true`（结构断言未破）且其余 22 张 PASS、反例 5/5 PASS；重建后全量 31/31 + 反例 5/5 复验。测试数 789 → **792**（+1 权限契约、+2 菜单）。版本号按手册升到 0.1.10，打包后两个 `package.json` 还原 `0.1.0`。 |
+| 验证 | `pnpm typecheck` 5/5；`npm test` 792/792；`run-e2e.mjs --negative-checks` 31/31 + 5/5；`handoff-check.mjs` 对账通过。 |
+| 未覆盖 | ① 未在 VM 的 `C:\Program Files` 安装上做在线下载复测（D-89 同批）；② 关于弹窗的菜单触发只在打包产物 CDP 层验证，未做真实鼠标点菜单（Electron 原生菜单不在 CDP 可点范围）。 |

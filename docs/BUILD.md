@@ -145,6 +145,11 @@ for m in M1 M2 M3 M4 M5; do node scripts/acceptance.mjs --milestone $m; done
 |---|---|---|
 | `configuration.win should be one of these: null` | electron-builder 26 把 `signingHashAlgorithms` 移到 `win.signtoolOptions` 下 | 按当前 `electron-builder.yml` 的写法即可（已修正） |
 | 打包报 `SAFE_DELETE_BULK_CONFIRM_REQUIRED` | 本机 safe-delete 守卫拦截 electron-builder 清空 `dist/win-unpacked` | 先把旧目录 `mv dist/win-unpacked dist/win-unpacked-prev` 再重跑；**不要**用 `rm -rf` |
+| 打包中途报 `SAFE_DELETE_BULK_GUARD_ERROR spawnSync node ETIMEDOUT`（0.1.8 实测） | 守卫对 `win-unpacked` 这类上千文件目录的 10 秒检查偶发超时；Setup 可能已产出而便携版 / `latest.yml` 缺失 | **原样重跑同一条 electron-builder 命令**补齐剩余 target，不要 rm -rf、不要删已产出的 Setup |
 | 启动后白屏 | `extraMetadata.main` 漏了，或 `main.cjs` 没被 `files` 收进 asar | 用 `@electron/asar listPackage` 检查 `app.asar` 内是否有 `apps/desktop/dist/main/main.cjs` |
 | 托盘无图标 / 用 Electron 默认图标 | `buildResources` 指错 | 加 `--config.directories.buildResources=apps/desktop/build` |
 | SmartScreen 拦截 | 安装包未签名 | 点「更多信息 → 仍要运行」；正式分发需买证书（U5） |
+| `YTVDLT.exe: bad option: --remote-debugging-port=9222`（0.1.9 实测） | 当前 shell 继承了 WorkBuddy 的 `ELECTRON_RUN_AS_NODE=1`，Electron 被当成 Node 启动，把调试参数当 Node 参数解析 | 启动时清掉继承变量：`env -u ELECTRON_RUN_AS_NODE -u NODE_OPTIONS -u NODE_EXTRA_CA_CERTS ./YTVDLT.exe --remote-debugging-port=9222` |
+| 改了 `packages/ui/**` 后 e2e 全红 | 队列页 DOM/像素基线是冻结快照，改 UI 必然不匹配 | **不要改结论也不要全量覆盖基线**：先 `node scripts/run-e2e.mjs --negative-checks` 确认只有预期 case 失败且 `dom=true`（结构断言没破），再对每个受影响 case 跑 `node scripts/run-e2e.mjs --case=<id> --update-baselines`，最后全量 31/31 + 反例 5/5 复验（0.1.9 重建 7 张，0.1.10 重建 9 张含 `settings-*`） |
+| 装到 `C:\Program Files` 后下载报 `PERMISSION_DENIED`，stderr 有 `C:\Program Files\YTVDLT\tmpXXXX.tmp`（0.1.10 实测） | yt-dlp 子进程继承了安装目录作 CWD，且没有显式 `TEMP`；`Program Files` 对普通用户只读。**不是**用户没用管理员运行 | 所有子进程 spawn 走 `yt-dlp-engine.ts::spawnBase()`，把 `cwd` 与 `TEMP/TMP/TMPDIR` 钉到可写输出目录；不要建议「以管理员身份运行」绕过（D-89） |
+| 桌面快捷方式 / 任务栏还是 Electron 默认「原子」图标 | 只依赖 `buildResources/icon.ico` 的隐式查找不够稳 | 先 `node scripts/make-icon.mjs`，再确认 `electron-builder.yml` 里 `win.icon` / `nsis.installerIcon` / `nsis.uninstallerIcon` 都指向 `apps/desktop/build/icon.ico`；**重新打包**后旧快捷方式才会刷新（D-90） |

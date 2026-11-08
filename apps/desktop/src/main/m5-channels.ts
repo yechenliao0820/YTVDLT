@@ -14,7 +14,7 @@
  *   - no `electron` / `node:*` import — the services arrive injected.
  */
 import { IPC_CHANNELS } from '@ytvdlt/shared';
-import type { DownloadKind, TaskRecord } from '@ytvdlt/shared';
+import type { DownloadKind, FormatDomain, TaskRecord } from '@ytvdlt/shared';
 import {
   ACCENT_PRESETS, buildTaskListSnapshot, maskUrlSecrets,
   normalizeHexColor, normalizeThemeMode, normalizeMotionMode, parseAccent,
@@ -46,6 +46,32 @@ export interface ComponentUpdatePortLike {
   run(): Promise<unknown>;
 }
 
+/**
+ * D-87: moving a task's artifacts to the OS recycle bin is a main-process job.
+ * Injected (never imported from `electron`) so the channel layer stays L0-testable.
+ * Returns the paths that were actually trashed; a short list means a partial
+ * failure and the record is deliberately kept so the user can retry.
+ */
+export interface TrashFilesPort {
+  trash(paths: readonly string[]): Promise<readonly string[]>;
+}
+
+/** D-83: what the renderer may ask for in a single download. */
+export type VideoQualityChoice = FormatDomain['quality'];
+export type AudioQualityChoice = FormatDomain['audioQuality'];
+export type AudioFormatChoice = 'auto' | 'mp3' | 'm4a';
+
+export interface SingleDownloadInput {
+  readonly url: string;
+  readonly kind: DownloadKind;
+  /** Video only: `-S res:<N>` preset. */
+  readonly quality?: VideoQualityChoice;
+  /** Audio only: `-S abr~N` preset (or the transcode bitrate). */
+  readonly audioQuality?: AudioQualityChoice;
+  /** Audio only: `auto` keeps the source codec, mp3/m4a transcode. */
+  readonly audioFormat?: AudioFormatChoice;
+}
+
 export interface M5ChannelDeps {
   readonly queue: TaskListPort;
   readonly taskDetail: TaskDetailPort;
@@ -57,7 +83,9 @@ export interface M5ChannelDeps {
   /** D-67: absent means the build ships no updater (button stays disabled). */
   readonly componentUpdate?: ComponentUpdatePortLike;
   /** D-69: real single-video enqueue; absent = DOWNLOAD_START reports disabled. */
-  readonly enqueueSingle?: (input: { readonly url: string; readonly kind: DownloadKind }) => Promise<readonly string[]>;
+  readonly enqueueSingle?: (input: SingleDownloadInput) => Promise<readonly string[]>;
+  /** D-87: absent = "also delete local files" is refused instead of deleting anything. */
+  readonly trashFiles?: TrashFilesPort;
 }
 
 export interface TaskListItemDto {
@@ -90,6 +118,8 @@ export interface AppearanceDto {
   readonly accent: AccentChoice;
   readonly motion: MotionMode;
   readonly language: 'zh-CN' | 'en';
+  /** D-88: when true the host clears the task history as the window closes. */
+  readonly privateMode: boolean;
   readonly systemAccent: string | null;
   readonly prefersDark: boolean;
   readonly prefersReducedMotion: boolean;
@@ -105,16 +135,23 @@ const MAX_ARG_LENGTH = 400;
 const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   [IPC_CHANNELS.TASK_LIST]: ['tab', 'query'],
   [IPC_CHANNELS.TASK_DETAIL]: ['taskId'],
-  [IPC_CHANNELS.TASK_ACTION]: ['taskId', 'action'],
+  // D-87: `withFiles: true` asks the host to recycle the task's artifacts
+  // before removing the record. Only valid together with `action: 'remove'`.
+  [IPC_CHANNELS.TASK_ACTION]: ['taskId', 'action', 'withFiles'],
   [IPC_CHANNELS.TEMPLATE_LIST]: [],
   [IPC_CHANNELS.TEMPLATE_SAVE]: ['id', 'name', 'args'],
   [IPC_CHANNELS.TEMPLATE_DELETE]: ['id'],
   [IPC_CHANNELS.SETTINGS_GET]: [],
-  [IPC_CHANNELS.SETTINGS_SET]: ['theme', 'accent', 'motion', 'language'],
+  [IPC_CHANNELS.SETTINGS_SET]: ['theme', 'accent', 'motion', 'language', 'privateMode'],
   [IPC_CHANNELS.COMPONENT_STATUS]: [],
   [IPC_CHANNELS.COMPONENT_UPDATE]: [],
-  [IPC_CHANNELS.DOWNLOAD_START]: ['url', 'kind'],
+  [IPC_CHANNELS.DOWNLOAD_START]: ['url', 'kind', 'quality', 'audioQuality', 'audioFormat'],
 };
+
+/** D-83: the renderer may only pick values the plan layer already understands. */
+const VIDEO_QUALITY_VALUES: readonly string[] = ['best', '2160p', '1440p', '1080p', '720p', '480p', '360p', 'lowest'];
+const AUDIO_QUALITY_VALUES: readonly string[] = ['best', '192', '128', '64', '32', 'lowest'];
+const AUDIO_FORMAT_VALUES: readonly string[] = ['auto', 'mp3', 'm4a'];
 
 export function validateM5Payload(channel: string, payload: unknown): Record<string, unknown> {
   const allowed = PAYLOAD_KEYS[channel];
@@ -165,6 +202,7 @@ function readAppearance(deps: M5ChannelDeps): AppearanceDto {
     accent: parseAccent(deps.config.get('general', 'accent')),
     motion: normalizeMotionMode(deps.config.get('general', 'motion')),
     language: String(deps.config.get('general', 'language')).toLowerCase().startsWith('en') ? 'en' : 'zh-CN',
+    privateMode: deps.config.get('general', 'privateMode') === true,
     systemAccent: deps.systemAppearance.accent(),
     prefersDark: deps.systemAppearance.prefersDark(),
     prefersReducedMotion: deps.systemAppearance.prefersReducedMotion(),
@@ -233,6 +271,26 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     if (typeof action !== 'string' || !TASK_ACTIONS.includes(action as TaskDetailAction)) {
       throw new Error('[m5-ipc] unknown task action');
     }
+    const rawWithFiles = record['withFiles'];
+    if (rawWithFiles !== undefined && typeof rawWithFiles !== 'boolean') {
+      throw new Error('[m5-ipc] withFiles must be a boolean');
+    }
+    if (rawWithFiles === true) {
+      if (action !== 'remove') throw new Error('[m5-ipc] withFiles requires action=remove');
+      if (deps.trashFiles === undefined) {
+        return { action: 'remove', ok: false, code: 'SHELL_UNAVAILABLE', message: '当前构建未启用回收站端口' };
+      }
+      // Only the paths the engine itself recorded for THIS task are eligible.
+      // The renderer never sends a path, so it cannot aim this at arbitrary files.
+      const artifacts = deps.queue.get(taskId)?.artifacts ?? [];
+      const trashed = await deps.trashFiles.trash(artifacts);
+      if (trashed.length !== artifacts.length) {
+        return {
+          action: 'remove', ok: false, code: 'ERROR',
+          message: `本地文件未全部移入回收站（${trashed.length}/${artifacts.length}），记录已保留`,
+        };
+      }
+    }
     return deps.taskDetail.perform(taskId, action as TaskDetailAction);
   });
 
@@ -278,6 +336,9 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
 
   // D-69: the real single-video download entry. The renderer (or a smoke test)
   // supplies a plain http(s) URL; no playlist, no fixture channel.
+  // D-83: it may also say what to fetch — video resolution preset, audio
+  // bitrate, audio container — but only from the three enums above; anything
+  // else is rejected instead of silently falling back.
   handlers.set(IPC_CHANNELS.DOWNLOAD_START, async (payload) => {
     const record = validateM5Payload(IPC_CHANNELS.DOWNLOAD_START, payload);
     const url = record['url'];
@@ -285,10 +346,33 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       throw new Error('[m5-ipc] DOWNLOAD_START requires an http(s) url');
     }
     const kind: DownloadKind = record['kind'] === 'audio' ? 'audio' : 'video';
+    const rawQuality = record['quality'];
+    const rawAudioQuality = record['audioQuality'];
+    const rawAudioFormat = record['audioFormat'];
+    if (rawQuality !== undefined && !VIDEO_QUALITY_VALUES.includes(String(rawQuality))) {
+      throw new Error('[m5-ipc] invalid quality');
+    }
+    if (rawAudioQuality !== undefined && !AUDIO_QUALITY_VALUES.includes(String(rawAudioQuality))) {
+      throw new Error('[m5-ipc] invalid audioQuality');
+    }
+    if (rawAudioFormat !== undefined && !AUDIO_FORMAT_VALUES.includes(String(rawAudioFormat))) {
+      throw new Error('[m5-ipc] invalid audioFormat');
+    }
     if (deps.enqueueSingle === undefined) {
       return { accepted: false, enqueued: false, taskIds: [], reason: '当前构建未启用单视频下载' };
     }
-    const taskIds = await deps.enqueueSingle({ url, kind });
+    const taskIds = await deps.enqueueSingle({
+      url,
+      kind,
+      // A video resolution says nothing about an audio task (and vice versa),
+      // so each field is only forwarded to the mode that consumes it.
+      ...(kind === 'video' && rawQuality !== undefined
+        ? { quality: rawQuality as VideoQualityChoice } : {}),
+      ...(kind === 'audio' && rawAudioQuality !== undefined
+        ? { audioQuality: rawAudioQuality as AudioQualityChoice } : {}),
+      ...(kind === 'audio' && rawAudioFormat !== undefined
+        ? { audioFormat: rawAudioFormat as AudioFormatChoice } : {}),
+    });
     return { accepted: true, enqueued: taskIds.length > 0, taskIds };
   });
 
@@ -324,6 +408,12 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       const language = String(record['language']);
       if (language !== 'zh-CN' && language !== 'en') throw new Error('[m5-ipc] invalid language');
       patch['language'] = language;
+    }
+    // D-88: private mode lives in `general.privateMode` (already a declared
+    // default since M1). The host reads it on window close / before-quit.
+    if (record['privateMode'] !== undefined) {
+      if (typeof record['privateMode'] !== 'boolean') throw new Error('[m5-ipc] invalid privateMode');
+      patch['privateMode'] = record['privateMode'];
     }
     if (Object.keys(patch).length > 0) await deps.config.setDomain('general', patch);
     const snapshot = readAppearance(deps);

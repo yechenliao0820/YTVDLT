@@ -113,6 +113,14 @@
     var separator = url.indexOf('?') === -1 ? '?' : '&';
     var next = locale === 'zh-CN' ? url : url + separator + 'lang=' + encodeURIComponent(locale);
     emit('language', locale);
+    // D-85: `CONFIG_SET` is the M3 fixture channel and does not persist the
+    // locale. Write the real setting as well, so a restart keeps the language
+    // (bootstrap.ts reads it back through SETTINGS_GET).
+    var bridge = global.ytvdltBridge;
+    if (bridge && typeof bridge.invoke === 'function') {
+      try { bridge.invoke('ytvdlt:settings:set', { language: locale }); } catch (error) { /* offline */ }
+    }
+    try { if (global.localStorage) global.localStorage.setItem('ytvdlt.locale', locale); } catch (error) { /* offline */ }
     if (global.location && typeof global.location.replace === 'function') global.location.replace(next);
   }
 

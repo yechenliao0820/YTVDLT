@@ -22,6 +22,10 @@ extraResources:
     filter:
       - "**/*"
 win:
+  # D-90: pin the brand mark explicitly. Relying on the implicit
+  # `${buildResources}/icon.ico` lookup left the desktop shortcut / taskbar on
+  # the stock Electron "atom" icon on some installs.
+  icon: apps/desktop/build/icon.ico
   # electron-builder 26 moved `signingHashAlgorithms` under `signtoolOptions`;
   # the old top-level key makes the whole `win` block fail schema validation.
   signtoolOptions:
@@ -33,6 +37,8 @@ win:
     - target: portable
       arch: [x64]
 nsis:
+  installerIcon: apps/desktop/build/icon.ico
+  uninstallerIcon: apps/desktop/build/icon.ico
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true

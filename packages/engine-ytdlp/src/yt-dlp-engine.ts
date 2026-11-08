@@ -24,7 +24,7 @@ import {
   artifactManifestPath, resolveArtifactManifestDir, parseArtifactManifestDetailed,
 } from './artifact-manifest.js';
 import { probeSucceeded, type RawProbeResult } from './probe-result.js';
-import { assertAbsoluteRuntimePaths, assertSafeSpawnOptions } from './runtime-check.js';
+import { assertAbsoluteRuntimePaths, assertSafeSpawnOptions, isAbsolutePath } from './runtime-check.js';
 import { SelfUpdater } from './self-updater.js';
 
 export interface YtDlpEngineDeps {
@@ -72,10 +72,54 @@ export class YtDlpEngine implements DownloadEngine {
     return this.deps.ffmpegDir ?? `${runtimeDir}/ffmpeg`;
   }
 
+  /**
+   * D-89: an NSIS install into `C:\Program Files\YTVDLT` is READ-ONLY for a
+   * standard user, and Electron inherits that directory as `process.cwd()`.
+   * yt-dlp's `tempfile.mkstemp()` (and any relative --print-to-file path) then
+   * resolves against it and fails with `[Errno 13] Permission denied:
+   * C:\Program Files\YTVDLT\tmpXXXX.tmp` — even though the download folder is
+   * perfectly writable. No administrator rights are required or desired.
+   *
+   * Pin BOTH the child's CWD and the whole TEMP family to an absolute,
+   * user-writable directory. Downloads use their own output dir (already
+   * mkdir'ed by runDownload); probes fall back to the inherited %TEMP%.
+   */
+  private writableWorkDir(preferred?: string): string {
+    const candidate = typeof preferred === 'string' ? preferred.trim() : '';
+    if (candidate !== '' && isAbsolutePath(candidate)) return candidate.replace(/[\\/]+$/, '');
+    const inherited = this.deps.ports.env.get('TEMP') ?? this.deps.ports.env.get('TMP') ?? '';
+    return typeof inherited === 'string' && isAbsolutePath(inherited)
+      ? inherited.replace(/[\\/]+$/, '')
+      : '';
+  }
+
+  /** Shared spawn base: PATH for the bundled tools + a writable CWD/TEMP. */
+  private spawnBase(pathDirs: readonly string[], preferredDir?: string): {
+    shell: false;
+    windowsHide: true;
+    cwd?: string;
+    env: Record<string, string>;
+  } {
+    const dir = this.writableWorkDir(preferredDir);
+    const env: Record<string, string> = {
+      PATH: `${pathDirs.join(';')};${this.deps.ports.env.get('PATH') ?? ''}`,
+    };
+    if (dir !== '') {
+      env['TEMP'] = dir;
+      env['TMP'] = dir;
+      env['TMPDIR'] = dir;
+    }
+    return {
+      shell: false as const,
+      windowsHide: true as const,
+      ...(dir !== '' ? { cwd: dir } : {}),
+      env,
+    };
+  }
+
   async version(): Promise<string> {
     const result = await this.deps.ports.process.spawn(this.deps.enginePath, ['--version'], {
-      shell: false,
-      windowsHide: true,
+      ...this.spawnBase([this.ffmpegDir()]),
       timeoutMs: 30_000,
     });
     if (!probeSucceeded(result)) return '';
@@ -96,10 +140,8 @@ export class YtDlpEngine implements DownloadEngine {
     await this.deps.logger.logArgv('engine.probe', argv);
 
     const spawnOptions = {
-      shell: false as const,
-      windowsHide: true as const,
+      ...this.spawnBase([this.ffmpegDir()]),
       timeoutMs: 30_000,
-      env: { PATH: `${this.ffmpegDir()};${this.deps.ports.env.get('PATH') ?? ''}` },
     };
     assertSafeSpawnOptions(spawnOptions);
 
@@ -198,11 +240,11 @@ export class YtDlpEngine implements DownloadEngine {
     const pathDirs = [this.ffmpegDir()];
     const aria2cDir = aria2cDirOf(req.network.aria2cPath);
     if (aria2cDir !== null) pathDirs.unshift(aria2cDir);
-    const spawnOptions = {
-      shell: false as const,
-      windowsHide: true as const,
-      env: { PATH: `${pathDirs.join(';')};${this.deps.ports.env.get('PATH') ?? ''}` },
-    };
+    // D-89: the output directory is absolute and was mkdir'ed above. Using it
+    // as the child's CWD/TEMP keeps every yt-dlp temp file out of the read-only
+    // install directory, without changing a single download argument.
+    const outputRoot = req.format.extractAudio ? req.paths.audioDir : req.paths.videoDir;
+    const spawnOptions = this.spawnBase(pathDirs, typeof outputRoot === 'string' ? outputRoot : '');
     assertSafeSpawnOptions(spawnOptions);
 
     let stderrAll = '';
@@ -304,10 +346,8 @@ export class YtDlpEngine implements DownloadEngine {
     await this.deps.logger.logArgv('engine.probePlaylist', argv);
 
     const spawnOptions = {
-      shell: false as const,
-      windowsHide: true as const,
+      ...this.spawnBase([this.ffmpegDir()]),
       timeoutMs: 60_000,
-      env: { PATH: `${this.ffmpegDir()};${this.deps.ports.env.get('PATH') ?? ''}` },
     };
     assertSafeSpawnOptions(spawnOptions);
 
