@@ -120,7 +120,7 @@ ui（零依赖） ← preload ← apps/desktop
 |---|---|
 | 队列页：渲染、轮询、按钮、语言切换、任务管理、全屏 | `packages/ui/src/pages/queue/queue.js` + 同目录 `index.html`（版式与内联 CSS） |
 | 所有界面文案（中/英） | `packages/ui/src/i18n/messages.js`（双语键集合必须一致）、`i18n/i18n.js` |
-| 版本号 / 关于弹窗 / 开源声明 | `apps/desktop/src/main/main.ts`（注入 `?v=`）、`packages/ui/src/about/about.js` |
+| 版本号 / 关于弹窗 / 开源声明 | `apps/desktop/src/main/main.ts`（首帧 `?v=` 提示）、`packages/ui/src/shell/app-version.js`（**唯一真相链**：`?v=` 提示 → `APP_INFO` 覆盖 → 无值显示 `v—`）、`packages/ui/src/about/about.js` |
 | 主题、强调色、动效 | `packages/ui/src/theme/theme.js`、`styles/theme.css`；共享基线样式 `styles/ytvdlt.css` |
 | 应用菜单（文件/编辑/视图/窗口/设置） | `apps/desktop/src/main/app-menu.ts`（纯数据）→ `bootstrap.ts` 安装与重建 |
 | 窗口、托盘、单实例、菜单跳转、关闭清理 | `apps/desktop/src/main/bootstrap.ts` |
@@ -128,7 +128,10 @@ ui（零依赖） ← preload ← apps/desktop
 | IPC 通道白名单、payload 校验、设置读写 | `apps/desktop/src/main/m5-channels.ts`；装配在 `m5-host.ts` / `m4-host.ts` |
 | 粘贴入队、格式选择落到下载请求 | `m5-channels.ts` → `m4-host.ts::applyFormatChoice` / `enqueueSingle` |
 | 下载计划、清晰度、音频码率、私有模式 | `packages/core/src/decision/download-plan.ts`、`config-store/defaults.ts` |
+| **下载中间文件（`.part` / `.part-FragN.part` / `.ytdl`）落在哪** | `core/src/path-resolver/volume.ts::resolveDownloadTempDir`（同卷才用私有 work 目录，否则 `<outputDir>/.ytvdlt-incomplete/<taskId>`）→ `main/m4-host.ts::resolveTempDirFor`（写进 `request.paths.tempDir`）→ `engine-ytdlp/src/argv-builder-download.ts`（`-P temp:`）+ `yt-dlp-engine.ts`（cwd、manifest、成功后 `rmdir` 空目录） |
+| **子进程 TEMP / `_MEI*`** | `engine-ytdlp/src/yt-dlp-engine.ts::spawnBase` —— cwd 钉在可写目录，**TEMP 一律不再覆盖**（`_MEI` 必须留在系统临时目录，见 §9 坑 20） |
 | yt-dlp 参数、进度、产物清单 | `packages/engine-ytdlp/src/argv-builder-download.ts`、`progress-parser.ts`、`artifact-manifest.ts` |
+| **下载后处理阶段（合并 / 整理 / 校验）** | `packages/engine-ytdlp/src/postprocess-parser.ts`（stderr 方括号标记 → `merging` / `postprocess`）→ `core/src/task-queue/task-queue.ts`（`lastStage`，单调推进，校验前置 `verifying`）→ `main/m5-channels.ts::toTaskListItem`（`stage`）→ `ui/src/pages/queue/queue.js::progressMode`（`working`）/ `stageText`；顺序规则在 `shared/src/events.ts::isForwardStage` |
 | **子进程启动环境（cwd / TEMP / PATH）** | `packages/engine-ytdlp/src/yt-dlp-engine.ts::spawnBase` —— 任何新 spawn 都从这里取 |
 | 产物校验、错误码与中文提示、错误报告 | `core/src/artifact-verifier/`、`shared/src/errors.ts`、`core/src/error-mapper/`、`error-report/`；列表页一句话失败简报（D-109）：`core/src/failure-summary/`（稳定码→分类）→ `main/m5-channels.ts::toTaskListItem`（`failureKind`）→ `ui/src/pages/queue/queue.js::failureKeyOf`（`queue.failure.<kind>`），详情 DTO 不动 |
 | 队列调度、并发、暂停、历史快照 | `core/src/task-queue/`、`task-store/`；数据目录判定在 `data-dir.ts` |
@@ -195,6 +198,7 @@ ui（零依赖） ← preload ← apps/desktop
 7. **`TASK_LIST` 只回本地封面路径 `thumbPath`**：远端缩略图 URL 由主进程缓存成文件，URL 本身永不出主进程（与 URL 脱敏同一条规则）。
 8. **`PATH_ACTION` 不接受路径字符串**（D-98）：渲染层只能发 `{action: pick|reset|open, kind: video|audio}`，能写进 `paths.*` 的只有主进程对话框选出来的目录。改这条等于给渲染层开一个"任意写配置路径"的口子。
 9. **`THUMBNAIL_CACHE` 不接受路径**（D-103）：渲染层只能发 `{action: status|prune|set-auto|set-max-bytes, enabled?, maxBytes?}`。删除只在主进程发生，且必须经 `isSafeCacheName()` + 目录前缀校验后走 `shell.trashItem`；把路径或删除原语带进这个通道等于给渲染层开一个"任意删文件"的口子。
+10. **`APP_INFO` 只读、零参数**（D-114）：主进程回 `app.getVersion()`。**页面上的版本号只能来自它**（`?v=` 仅作首帧提示，不得作为唯一来源，更不得在渲染层写死版本字符串——那正是 0.2.2 存活四个版本的机制）。
 
 ---
 
@@ -204,8 +208,10 @@ ui（零依赖） ← preload ← apps/desktop
 |---|---|
 | exe 目录可写（便携 / 默认安装） | `<exe目录>\config\config.json`、`<exe目录>\logs\app-YYYYMMDD.jsonl` |
 | 装到 `C:\Program Files`（不可写） | `%APPDATA%\YTVDLT\config\…`（`data-dir.ts` 写探针实测可写性） |
-| 默认下载目录 | 视频 `%USERPROFILE%\Downloads\YTVDLT`、音频 `…\YTVDLT\Audio`（**运行时展开**，spawn 不经过 shell） |
-| 用户改过下载目录 | `paths.videoDir` / `paths.audioDir` 存**绝对路径**；未改过则存 token（`%USERPROFILE%/…`），换机器仍跟用户目录走（D-98） |
+| 默认下载目录 | 视频 / 音频都在**系统「视频」库**下的 `YTVDLT`（`app.getPath('videos')` → `%USERVIDEOS%/YTVDLT`，音频在其 `Audio` 子目录；**运行时展开**，spawn 不经过 shell。`%USERVIDEOS%` 不是 Windows 环境变量，由主进程注入展开表） |
+| 用户改过下载目录 | `paths.videoDir` / `paths.audioDir` 存**绝对路径**；未改过则存 token（`%USERVIDEOS%/…`），换机器仍跟用户目录走（D-98 / D-117） |
+| **应用内部工作目录** | `<dataDir>/work/<taskId>/`：yt-dlp 产物清单、子进程 `cwd`、以及 `-P temp:` 指向的中间文件（`.part` / `.part-FragN.part` / `.ytdl`）。**按任务隔离**；清单读取并交接后才删除，成功后若目录为空则非递归 `rmdir`。**这就是续传的凭据，不要当成垃圾清理**（D-118） |
+| **跨卷时的中间文件** | `<outputDir>/.ytvdlt-incomplete/<taskId>/`：当 `<dataDir>` 与输出目录不在同一卷（或卷无法判定）时使用。放在输出目录内部是为了保证收尾的 `shutil.move` 退化成 rename，而不是整份复制 |
 | 封面缓存 / 更新包 | `<dataDir>\thumbs\<sha1(url)>.<ext>`、同目录 `index.json`（D-103 持久索引：taskIds / bytes / lastUsedAt）、`<dataDir>\updates\YTVDLT-Setup-*.exe`（D-93 / D-96） |
 
 `config/config.json` 按域组织：`general / format / subtitle / paths / network / advanced`；
@@ -317,6 +323,10 @@ ui（零依赖） ← preload ← apps/desktop
 
 19. **小文件资产的 `/releases/download/` 直链可能 504，而同一版的大资产正常**：0.2.5 的 `latest.yml` 直链连续 504（重传一次仍 504），同一版的 `.exe` / `.blockmap` 都是 302，0.2.4 的同名文件也正常。判断方法：改用 API 资产端点 `GET /releases/assets/<id>`（带 `Accept: application/octet-stream`）能正常取到内容，说明文件本身没问题、是 GitHub 侧的网关/CDN 问题。本产品不消费 `latest.yml`，故不阻塞交付；**若将来真的启用 `electron-updater`，发布后必须实测这条直链**。
 
+20. **`_MEI<pid>` 跟随 `TEMP`，不跟随 `-P`**：yt-dlp 是 PyInstaller onefile，每次启动把约 29 MB / 142 个文件解包到 `%TEMP%\_MEI<pid>`，**正常退出会自己删**，被 `taskkill` 打断则残留。它曾经出现在用户的视频目录里（D-89 把子进程 TEMP 钉在输出目录），这就是"下载目录里为什么有一堆 `_MEI`"的答案。结论：**cwd 可以钉，TEMP 不要钉**；`-P temp:` 只影响 `.part` / `.ytdl`。别按名字去删 `_MEI*`——判断不了哪个属于正在跑的进程。
+
+21. **`child.kill()` 杀不掉 yt-dlp**：onefile 的 bootloader 会再起一个子进程，`child.kill()` 只终结父进程，下载继续跑（实测：kill 后仍完整下载完，`.part` 都没出现）。取消必须走 `taskkill /PID <pid> /T /F`（`adapters/process-streaming.ts` 已实现）。写任何"中断"测试时同理，否则测的是假中断。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 ---
@@ -336,6 +346,8 @@ ui（零依赖） ← preload ← apps/desktop
 | 后处理（合并/转码）阶段没有速度与剩余时间（引擎不报 `speed`） | `ui/src/pages/queue/queue.js::progressText` |
 | 应用更新没有差量下载，每次整包（约 216 MiB） | `apps/desktop/src/main/adapters/http-download.ts` |
 | 删本地文件、只读目录安装的在线下载，仍待目标环境真机复测 | §4 分诊表对应行 |
+| **删除任务不回收其 `work/<taskId>` 目录**：目录里的 `.part` / `.ytdl` 是续传凭据，递归删除要先有租约判断，现阶段只保留不动 | `engine-ytdlp/src/yt-dlp-engine.ts`（成功后只删空目录） |
+| **跨卷的中间文件落点未实测**：本机只有 C:，`resolveDownloadTempDir` 的跨卷分支只经过单元测试 | `core/src/path-resolver/volume.ts` |
 
 > 这张表会随开发推进变短。**完成一项就删一行**，不要留着写「已做」——那是本手册最容易腐烂的地方。
 

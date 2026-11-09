@@ -88,6 +88,12 @@ function fileSystemPort(): FileSystemPort {
     async mkdir(dir: string): Promise<void> {
       await fs.mkdir(dir, { recursive: true });
     },
+    // D-118: NON-recursive on purpose. `fs.rm(..., {recursive:true})` would
+    // delete resumable `.part` bytes if a caller ever got the path wrong; an
+    // empty-dir-only primitive fails loudly instead.
+    async rmdir(path: string): Promise<void> {
+      await fs.rmdir(path);
+    },
     async rename(from: string, to: string): Promise<void> {
       await fs.rm(to, { force: true });
       await fs.rename(from, to);

@@ -91,8 +91,8 @@ async function harness(
 
 describe('m5 ipc · channel inventory', () => {
   // 11 (M5) + the four 0.2.1 channels + THUMBNAIL_CACHE (D-103).
-  it('exposes exactly the sixteen M5 channels, all present in IPC_CHANNELS', () => {
-    expect(M5_CHANNELS).toHaveLength(16);
+  it('exposes exactly the seventeen M5 channels, all present in IPC_CHANNELS', () => {
+    expect(M5_CHANNELS).toHaveLength(17);
     const values = Object.values(IPC_CHANNELS);
     for (const channel of M5_CHANNELS) expect(values).toContain(channel);
     expect(new Set(M5_CHANNELS).size).toBe(M5_CHANNELS.length);
@@ -425,7 +425,10 @@ describe('m5 ipc · private mode setting (D-88)', () => {
 });
 
 describe('m5 ipc · download location (D-98)', () => {
-  const expand = (raw: string): string => raw.split('%USERPROFILE%').join('C:/Users/leo');
+  // D-117: the shipped default now lives in the real Windows Videos folder.
+  const expand = (raw: string): string => raw
+    .split('%USERVIDEOS%').join('C:/Users/leo/Videos')
+    .split('%USERPROFILE%').join('C:/Users/leo');
 
   function withPicker(result: { path: string | null; error: string | null }) {
     const picked: Array<{ kind: string; startAt: string }> = [];
@@ -446,8 +449,8 @@ describe('m5 ipc · download location (D-98)', () => {
   it('returns the expanded defaults through SETTINGS_GET, never an empty string', async () => {
     const { handlers } = await harness(undefined, { expandPath: expand });
     const settings = await handlers.get(IPC_CHANNELS.SETTINGS_GET)?.({}) as { videoDir: string; audioDir: string };
-    expect(settings.videoDir).toBe('C:/Users/leo/Downloads/YTVDLT');
-    expect(settings.audioDir).toBe('C:/Users/leo/Downloads/YTVDLT/Audio');
+    expect(settings.videoDir).toBe('C:/Users/leo/Videos/YTVDLT');
+    expect(settings.audioDir).toBe('C:/Users/leo/Videos/YTVDLT/Audio');
   });
 
   it('persists a picked folder and echoes the new resolved path', async () => {
@@ -460,7 +463,7 @@ describe('m5 ipc · download location (D-98)', () => {
     expect(result.path).toBe('D:/Video');
     expect(result.paths.videoDir).toBe('D:/Video');
     expect(deps.config.get('paths', 'videoDir')).toBe('D:/Video');
-    expect(picker.picked[0]?.startAt).toBe('C:/Users/leo/Downloads/YTVDLT');
+    expect(picker.picked[0]?.startAt).toBe('C:/Users/leo/Videos/YTVDLT');
   });
 
   it('keeps audio and video independent', async () => {
@@ -468,7 +471,7 @@ describe('m5 ipc · download location (D-98)', () => {
     const { handlers, deps } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });
     await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'audio' });
     expect(deps.config.get('paths', 'audioDir')).toBe('D:/Music');
-    expect(deps.config.get('paths', 'videoDir')).toBe('%USERPROFILE%/Downloads/YTVDLT');
+    expect(deps.config.get('paths', 'videoDir')).toBe('%USERVIDEOS%/YTVDLT');
   });
 
   it('treats a cancelled dialog as "no change", not as an error', async () => {
@@ -480,7 +483,7 @@ describe('m5 ipc · download location (D-98)', () => {
     expect(result.ok).toBe(false);
     expect(result.canceled).toBe(true);
     expect(result.error).toBeNull();
-    expect(deps.config.get('paths', 'videoDir')).toBe('%USERPROFILE%/Downloads/YTVDLT');
+    expect(deps.config.get('paths', 'videoDir')).toBe('%USERVIDEOS%/YTVDLT');
   });
 
   it('refuses to save a folder that is not writable', async () => {
@@ -492,7 +495,7 @@ describe('m5 ipc · download location (D-98)', () => {
     expect(result.ok).toBe(false);
     expect(result.canceled).toBe(false);
     expect(result.error).toContain('不可写');
-    expect(deps.config.get('paths', 'videoDir')).toBe('%USERPROFILE%/Downloads/YTVDLT');
+    expect(deps.config.get('paths', 'videoDir')).toBe('%USERVIDEOS%/YTVDLT');
   });
 
   it('resets to the shipped default token', async () => {
@@ -503,15 +506,15 @@ describe('m5 ipc · download location (D-98)', () => {
       ok: boolean; path: string;
     };
     expect(result.ok).toBe(true);
-    expect(deps.config.get('paths', 'videoDir')).toBe('%USERPROFILE%/Downloads/YTVDLT');
-    expect(result.path).toBe('C:/Users/leo/Downloads/YTVDLT');
+    expect(deps.config.get('paths', 'videoDir')).toBe('%USERVIDEOS%/YTVDLT');
+    expect(result.path).toBe('C:/Users/leo/Videos/YTVDLT');
   });
 
   it('opens the resolved folder through the picker port', async () => {
     const picker = withPicker({ path: null, error: null });
     const { handlers } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });
     await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'open', kind: 'audio' });
-    expect(picker.opened).toEqual(['C:/Users/leo/Downloads/YTVDLT/Audio']);
+    expect(picker.opened).toEqual(['C:/Users/leo/Videos/YTVDLT/Audio']);
   });
 
   it('rejects an unknown action or kind', async () => {
@@ -582,5 +585,52 @@ describe('D-109 · the list DTO carries a stable bucket, the detail DTO keeps th
     expect(detail.url).not.toContain('SUPERSECRET');
     // The brief is a list-only projection: the detail shape is unchanged.
     expect(Object.keys(detail)).not.toContain('failureKind');
+  });
+});
+
+/**
+ * D-114: the renderer asks the MAIN process which build it is, instead of
+ * trusting a `?v=` query parameter that any navigation can drop (and that a
+ * hard-coded literal used to fake). These tests pin the wire shape and the
+ * "no reliable version" answer, which the UI renders as `v—`.
+ */
+describe('m5 ipc · APP_INFO (D-114)', () => {
+  it('answers with the injected build identity', async () => {
+    const { handlers } = await harness(undefined, {
+      appInfo: { version: '0.2.6', name: 'YTVDLT', packaged: true },
+    });
+    const info = await handlers.get(IPC_CHANNELS.APP_INFO)?.({}) as {
+      version: string; name: string; packaged: boolean;
+    };
+    expect(info).toEqual({ version: '0.2.6', name: 'YTVDLT', packaged: true });
+  });
+
+  it('admits it does not know instead of inventing a version', async () => {
+    const { handlers } = await harness(undefined, {});
+    const info = await handlers.get(IPC_CHANNELS.APP_INFO)?.({}) as { version: string };
+    expect(info.version).toBe('');
+  });
+
+  it('accepts no payload keys at all', async () => {
+    const { handlers } = await harness(undefined, {
+      appInfo: { version: '0.2.6', name: 'YTVDLT', packaged: false },
+    });
+    await expect(handlers.get(IPC_CHANNELS.APP_INFO)?.({ version: '9.9.9' }))
+      .rejects.toThrow(/payload key not allowed/);
+  });
+});
+
+describe('m5 ipc · TASK_LIST stage passthrough (D-115)', () => {
+  it('forwards the recorded stage and keeps null when there is none', async () => {
+    const merged = record('t-stage', { state: 'Running' });
+    merged.lastStage = 'merging';
+    const plain = record('t-none', { state: 'Running' });
+    const { handlers } = await harness([merged, plain]);
+    const result = await handlers.get(IPC_CHANNELS.TASK_LIST)?.({ tab: 'all' }) as {
+      items: Array<{ id: string; stage?: string | null }>;
+    };
+    const byId = new Map(result.items.map((item) => [item.id, item.stage]));
+    expect(byId.get('t-stage')).toBe('merging');
+    expect(byId.get('t-none')).toBeNull();
   });
 });

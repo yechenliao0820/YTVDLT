@@ -135,9 +135,16 @@
         ? '已执行：' + action + (result && result.clipboardText ? '（已复制到剪贴板）' : '')
         : '「' + action + '」未执行：' + ((result && (result.message || result.code)) || '未知原因');
       if (!ok) return;
-      if (action === 'remove') { global.location.href = '../queue/index.html'; return; }
+      if (action === 'remove') { global.location.href = queueUrl(); return; }
       load(current.model.id);
     });
+  }
+
+  /** D-114: leave through the nav helper so `lang` / `v` survive the hop. */
+  function queueUrl() {
+    var nav = global.YTVDLTNav;
+    if (nav && typeof nav.pageUrl === 'function') return nav.pageUrl('queue');
+    return '../queue/index.html';
   }
 
   /**
@@ -159,7 +166,7 @@
     ].join(';');
     back.addEventListener('click', function () {
       if (global.history && global.history.length > 1) { global.history.back(); return; }
-      global.location.href = '../queue/index.html';
+      global.location.href = queueUrl();
     });
     host.insertBefore(back, host.firstChild);
   }

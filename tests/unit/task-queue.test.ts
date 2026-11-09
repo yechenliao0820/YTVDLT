@@ -136,7 +136,11 @@ function setup(behaviour: Behaviour, verifyOk = true) {
   });
   const events: string[] = [];
   queue.onEvent((event) => events.push(
-    event.type === 'state-changed' ? `state:${event.from}->${event.to}` : event.type,
+    event.type === 'state-changed'
+      ? `state:${event.from}->${event.to}`
+      // D-115: the stage VALUE matters (a bare 'stage' would pass even if the
+      // queue announced the wrong phase), so it is part of the recorded label.
+      : event.type === 'stage' ? `stage:${event.stage}` : event.type,
   ));
   return { mem, queue, history, events, engineState };
 }
@@ -190,6 +194,10 @@ describe('A-M2-01 TaskQueue · happy path', () => {
       'state:ReadyWithInfo->Running',
       'progress',
       'completed',
+      // D-115: verification runs AFTER the engine exited and BEFORE the record
+      // becomes `Completed`; the queue announces that window so the card can
+      // show "finalizing" instead of a frozen 100%.
+      'stage:verifying',
       'state:Running->Completed',
     ]);
     const entries = await history.query({});

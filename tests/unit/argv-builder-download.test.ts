@@ -25,7 +25,10 @@ const subtitle = (overrides: Partial<SubtitleDomain> = {}): SubtitleDomain => ({
 const paths = (overrides: Partial<PathsDomain> = {}): PathsDomain => ({
   videoDir: 'C:/V', audioDir: 'C:/A', commandDir: 'C:/C', privateMode: false,
   subdirByExtractor: false, subdirByPlaylist: false,
-  outputTemplate: '%(title)s.%(ext)s', tempDir: 'C:/temp', ...overrides,
+  // D-118: '' is the shipped default. `-P temp:` is now emitted whenever a
+  // temp dir IS resolved, so the "minimal request" fixture must not carry one
+  // unless the case is specifically about temp dirs.
+  outputTemplate: '%(title)s.%(ext)s', tempDir: '', ...overrides,
 });
 const network = (overrides: Partial<NetworkDomain> = {}): NetworkDomain => ({
   rateLimit: null, proxy: null, cookiesFile: null, userAgent: null,

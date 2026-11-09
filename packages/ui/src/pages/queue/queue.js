@@ -255,6 +255,9 @@
       totalBytes: typeof item.totalBytes === 'number' ? item.totalBytes : null,
       // 0.2.1 (D-96): a local, already-cached cover path — never a remote URL.
       thumbPath: typeof item.thumbPath === 'string' && item.thumbPath !== '' ? item.thumbPath : null,
+      // D-115: the real phase of a running task. `null` = no reliable info;
+      // the card then behaves exactly as before (no invented "merging").
+      stage: isStage(item.stage) ? item.stage : null,
       artifacts: typeof item.artifactCount === 'number' ? item.artifactCount : 0,
       errorCode: item.errorCode || null,
       // D-109: the main process sends a STABLE bucket, never a sentence. `null`
@@ -267,6 +270,17 @@
   /** D-109: mirror of core's `FailureKind` — guards the i18n key lookup so an
    *  unknown bucket can never print a raw `queue.failure.x` key on a card. */
   var FAILURE_KINDS = ['network', 'service', 'forbidden', 'save', 'unknown'];
+
+  /**
+   * D-115: mirror of shared `EngineStage`. An unknown value is treated as "no
+   * information" — never as a phase, so a future backend value cannot make the
+   * card claim something it does not know.
+   */
+  var STAGES = ['fetching', 'downloading', 'merging', 'postprocess', 'verifying'];
+
+  function isStage(value) {
+    return typeof value === 'string' && STAGES.indexOf(value) !== -1;
+  }
 
   function isFailureKind(value) {
     return typeof value === 'string' && FAILURE_KINDS.indexOf(value) !== -1;
@@ -301,7 +315,7 @@
     var rows = list.map(function (task) {
       return [
         task.id, task.state, task.thumbPath, task.errorCode,
-        task.failureKind, progressMode(task.state, hasPercent(task))
+        task.failureKind, progressMode(task.state, hasPercent(task), task.stage)
       ].join(',');
     }).join('~');
     return [model.tab, model.query, model.sort, list.length, rows].join('#');
@@ -309,7 +323,12 @@
 
   function progressKey(list) {
     return list.map(function (task) {
-      return [task.id, task.percent, task.downloadedBytes, task.totalBytes, task.speed, task.eta].join(',');
+      return [
+        task.id, task.percent, task.downloadedBytes, task.totalBytes, task.speed, task.eta,
+        // D-115: merging → finalizing keeps the same mode but changes the copy,
+        // so the stage has to take part in the in-place patch key too.
+        task.stage
+      ].join(',');
     }).join('~');
   }
 
@@ -350,7 +369,17 @@
     visible.forEach(function (task) {
       var node = cardOf(host, task.id);
       if (node === null) return;
-      var mode = progressMode(task.state, hasPercent(task));
+      var mode = progressMode(task.state, hasPercent(task), task.stage);
+      // D-115: `working` has no numbers to patch, but merging → finalizing
+      // changes the copy, so it is patched here instead of forcing a re-render.
+      if (mode === 'working') {
+        var stageLine = findByClass(node, 'card-progress');
+        if (stageLine !== null) {
+          stageLine.textContent = stageText(task.stage);
+          stageLine.setAttribute('data-progress', 'working');
+        }
+        return;
+      }
       if (mode !== 'value' && mode !== 'unknown') return;
       var line = findByClass(node, 'card-progress');
       if (line !== null) {
@@ -398,7 +427,13 @@
   function act(action, task) {
     if (!live.active) { emit(action, task); return; }
     if (action === 'detail') {
+      // D-114: carry the version across the hop. Losing it here was the exact
+      // path that made the footer claim 0.2.2 — the detail page rebuilt its URL
+      // from scratch and the return trip inherited the empty value.
       var suffix = locale() === 'en' ? '&lang=en' : '';
+      var registry = global.YTVDLTAppVersion;
+      var known = registry && typeof registry.query === 'function' ? registry.query() : '';
+      if (known !== '') suffix += '&v=' + known;
       global.location.href = '../task-detail/index.html?taskId=' + encodeURIComponent(task.id) + suffix;
       return;
     }
@@ -615,22 +650,40 @@
   }
 
   /**
-   * D-107: which of the four progress presentations a card needs.
+   * D-107: which of the five progress presentations a card needs.
    *
    *   value   — a real percent from THIS run → numeric bar.
    *   unknown — Running, no usable percent yet → keep the D-102 wait animation.
    *             The backend state already IS `Running` (cancel/scheduling depend
    *             on it); only the visual is undecided, so this never waits for a
    *             timer or delays the download.
+   *   working — D-115: Running, past the transfer (merge / post-process /
+   *             verify). The bytes are done but the task is NOT; a numeric bar
+   *             would sit frozen at 100% and read as "stuck". Yellow sweep.
    *   none    — Canceled / Error that never produced a number: an inert track,
    *             no animation, no fake 0% (the terminal text must win).
    *   waiting — Idle / FetchingInfo / ReadyWithInfo: nothing started yet.
    */
-  function progressMode(state, hasValue) {
+  function progressMode(state, hasValue, stage) {
     if (state === 'Completed') return 'complete';
-    if (state === 'Running') return hasValue ? 'value' : 'unknown';
+    if (state === 'Running') {
+      if (stage === 'merging' || stage === 'postprocess' || stage === 'verifying') return 'working';
+      return hasValue ? 'value' : 'unknown';
+    }
     if (state === 'Canceled' || state === 'Error') return hasValue ? 'value' : 'none';
     return 'waiting';
+  }
+
+  /**
+   * D-115: the honest label for a task past the transfer.
+   *
+   * "merging" is only reachable from yt-dlp's own `[Merger]` line, so this is
+   * the single place allowed to say it. Everything else falls back to the
+   * generic "finalizing" — including verification, whose outcome is still open.
+   */
+  function stageText(stage) {
+    if (stage === 'merging') return t('queue.stage.merging');
+    return t('queue.stage.finalizing');
   }
 
   /** Size / speed / ETA — only what the engine actually reported. */
@@ -716,12 +769,17 @@
   }
 
   /** 轨道与进行中卡片共用 `.bar`，只把填充条换成 CSS 动画短条。
-   *  故意不写 `aria-valuenow` / 百分比：这些状态还没有可报的数值进度。 */
-  function waitBar(task) {
+   *  故意不写 `aria-valuenow` / 百分比：这些状态还没有可报的数值进度。
+   *  D-115: `tone` tints the sweep. The preparing/waiting states keep the
+   *  accent colour; `work` (merging / post-processing / verifying) is yellow —
+   *  the bytes are done but the task is not, and yellow says "still working"
+   *  without pretending a number exists. */
+  function waitBar(task, tone) {
     var bar = el('div', 'bar');
     bar.setAttribute('data-mode', 'indeterminate');
     bar.setAttribute('role', 'progressbar');
-    bar.setAttribute('aria-label', t('queue.card.waiting'));
+    bar.setAttribute('aria-label', t(tone === 'work' ? 'queue.stage.working' : 'queue.card.waiting'));
+    if (tone) bar.setAttribute('data-tone', tone);
     var segment = el('i');
     segment.style.animationDelay = '-' + waitPhase(String(task.id)) + 'ms';
     bar.appendChild(segment);
@@ -749,6 +807,22 @@
     return bar;
   }
 
+  /** D-115: the finished track — green and full. Only ever painted for a
+   *  `Completed` record, i.e. after verification AND history succeeded. */
+  function doneBar() {
+    var bar = el('div', 'bar');
+    bar.setAttribute('data-mode', 'done');
+    bar.setAttribute('data-tone', 'done');
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-valuemin', '0');
+    bar.setAttribute('aria-valuemax', '100');
+    bar.setAttribute('aria-valuenow', '100');
+    var fill = el('i');
+    fill.style.width = '100%';
+    bar.appendChild(fill);
+    return bar;
+  }
+
   function progressLine(task, mode, text) {
     var node = el('div', 'card-meta card-progress');
     node.setAttribute('data-progress', mode === 'value' ? String(task.percent) : mode);
@@ -769,8 +843,9 @@
     node.setAttribute('data-state', task.state);
     node.setAttribute('data-tab', tabOf(task.state));
     node.setAttribute('data-selected', model.selected[task.id] === true ? 'true' : 'false');
-    var mode = progressMode(task.state, hasPercent(task));
+    var mode = progressMode(task.state, hasPercent(task), task.stage);
     node.setAttribute('data-progress-mode', mode);
+    if (mode === 'working' && isStage(task.stage)) node.setAttribute('data-stage', task.stage);
 
     // D-87: per-task checkbox for multi-select.
     var check = doc.createElement('input');
@@ -817,7 +892,15 @@
     if (mode === 'value') {
       main.appendChild(valueBar(task));
       main.appendChild(progressLine(task, 'value', progressText(task)));
+    } else if (mode === 'working') {
+      // D-115: the transfer is over, the task is not. Percent is deliberately
+      // hidden — a video+audio pair reaches 100% twice and neither means done.
+      main.appendChild(waitBar(task, 'work'));
+      main.appendChild(progressLine(task, 'working', stageText(task.stage)));
     } else if (mode === 'complete') {
+      // D-115: green bar + the final transfer numbers. Reached only after
+      // verification passed and the history row was written (CD-12 order).
+      main.appendChild(doneBar());
       var done = el('div', 'card-meta card-progress');
       done.setAttribute('data-progress', '100');
       done.textContent = progressText({ percent: 100, downloadedBytes: task.downloadedBytes, totalBytes: task.totalBytes, state: 'Completed', speed: 0, eta: null });
@@ -1100,42 +1183,71 @@
     node.textContent = text;
   }
 
+  /**
+   * D-116: one destructive dialog for every entry point (single card, batch
+   * selection, clear-history).
+   *
+   * The old dialog offered TWO primary buttons — "only the record" and "also
+   * the files" — with the destructive one permanently red. That is a coin flip
+   * next to the mouse, not a decision. Now the default action is always the
+   * safe one and file deletion needs an explicit tick.
+   */
   function openModal(mode, ids) {
     pending.mode = mode;
     pending.ids = ids.slice();
-    var filesButton = doc.getElementById('queue-modal-files');
-    var historyButton = doc.getElementById('queue-modal-history');
+    var box = doc.getElementById('queue-modal-with-files');
     var note = doc.getElementById('queue-modal-note');
     if (mode === 'clear') {
       setModalText('queue-modal-title', t('queue.clear.title'));
       setModalText('queue-modal-message', t('queue.clear.message'));
       setModalText('queue-modal-count', t('queue.delete.count', { n: ids.length }));
-      setModalText('queue-modal-note', t('queue.tools.privateHint'));
-      if (historyButton !== null) {
-        historyButton.removeAttribute('data-i18n');
-        historyButton.textContent = t('queue.clear.confirm');
-      }
-      setHidden(filesButton, true);
+      setModalText('queue-modal-note', t('queue.clear.filesHint'));
+      setHidden(box, false);
       setHidden(note, false);
     } else {
       setModalText('queue-modal-title', t('queue.delete.title'));
       setModalText('queue-modal-message', t('queue.delete.message'));
       setModalText('queue-modal-count', t('queue.delete.count', { n: ids.length }));
       setModalText('queue-modal-note', t('queue.delete.filesHint'));
-      if (historyButton !== null) {
-        historyButton.removeAttribute('data-i18n');
-        historyButton.textContent = t('queue.delete.onlyHistory');
-      }
-      setHidden(filesButton, false);
+      setHidden(box, false);
       setHidden(note, false);
     }
-    var backdrop = doc.getElementById('queue-modal');
-    setHidden(backdrop, false);
+    // D-116: EVERY open starts unticked — a remembered tick is how a user
+    // deletes files they meant to keep on the second pass.
+    if (box !== null) box.checked = false;
+    syncDeleteRisk();
+    setHidden(doc.getElementById('queue-modal'), false);
+  }
+
+  /**
+   * D-116: reflect the tick in the confirm button. The button is the only
+   * element that changes colour, so "blue = records only / red = records AND
+   * files" stays unambiguous in both themes.
+   */
+  function syncDeleteRisk() {
+    var box = doc.getElementById('queue-modal-with-files');
+    var label = doc.getElementById('queue-modal-check');
+    var confirm = doc.getElementById('queue-modal-confirm');
+    var withFiles = box !== null && box.checked === true;
+    if (label !== null) label.setAttribute('data-risk', withFiles ? 'true' : 'false');
+    var risk = doc.getElementById('queue-modal-risk');
+    if (risk !== null) setHidden(risk, !withFiles);
+    if (confirm === null) return;
+    confirm.className = withFiles ? 'danger' : 'primary';
+    confirm.removeAttribute('data-i18n');
+    if (pending.mode === 'clear') {
+      confirm.textContent = t(withFiles ? 'queue.clear.confirmFiles' : 'queue.clear.confirm');
+    } else {
+      confirm.textContent = t(withFiles ? 'queue.delete.confirmFiles' : 'queue.delete.confirm');
+    }
   }
 
   function closeModal() {
     setHidden(doc.getElementById('queue-modal'), true);
     pending.ids = [];
+    // D-116: never carry the tick to the next dialog.
+    var box = doc.getElementById('queue-modal-with-files');
+    if (box !== null) box.checked = false;
   }
 
   function requestDelete(ids) {
@@ -1222,10 +1334,17 @@
         if (event && event.target === backdrop) closeModal();
       });
     }
-    var history = doc.getElementById('queue-modal-history');
-    if (history !== null) history.addEventListener('click', function () { performRemoval(pending.ids, false); });
-    var files = doc.getElementById('queue-modal-files');
-    if (files !== null) files.addEventListener('click', function () { performRemoval(pending.ids, true); });
+    // D-116: one confirm button; the checkbox decides whether the artifacts are
+    // recycled too. No second destructive button exists any more.
+    var confirm = doc.getElementById('queue-modal-confirm');
+    if (confirm !== null) {
+      confirm.addEventListener('click', function () {
+        var box = doc.getElementById('queue-modal-with-files');
+        performRemoval(pending.ids, box !== null && box.checked === true);
+      });
+    }
+    var withFilesBox = doc.getElementById('queue-modal-with-files');
+    if (withFilesBox !== null) withFilesBox.addEventListener('change', syncDeleteRisk);
 
     // D-88: private mode is persisted by the host and honoured on window close.
     var privateBox = doc.getElementById('queue-private-mode');

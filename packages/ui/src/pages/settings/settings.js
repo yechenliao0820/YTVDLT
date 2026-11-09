@@ -120,6 +120,14 @@
   function switchLocale(locale) {
     THEME_STATE.locale = locale;
     var url = String(global.location.href).replace(/[?&]lang=[^&]*/g, '');
+    // D-114: keep the version hint across the reload. A reload does not lose
+    // the query by itself, but a page that arrived without `?v=` would stay
+    // without it — and then only the async APP_INFO call keeps the footer right.
+    if (!/[?&]v=/.test(url)) {
+      var registry = global.YTVDLTAppVersion;
+      var known = registry && typeof registry.query === 'function' ? registry.query() : '';
+      if (known !== '') url += (url.indexOf('?') === -1 ? '?' : '&') + 'v=' + known;
+    }
     var separator = url.indexOf('?') === -1 ? '?' : '&';
     var next = locale === 'zh-CN' ? url : url + separator + 'lang=' + encodeURIComponent(locale);
     emit('language', locale);

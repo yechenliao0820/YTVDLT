@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-motion="reduced" data-lang="en"><head>
+<html lang="en" data-motion="reduced" data-app-version="" data-lang="en"><head>
 <meta charset="utf-8">
 <title>YTVDLT · 下载队列</title>
 <link rel="stylesheet" href="../../styles/ytvdlt.css">
@@ -138,6 +138,32 @@
   @media (prefers-reduced-motion: reduce) {
     .bar[data-mode="indeterminate"] > i { animation: none; transform: none; }
   }
+  /* ---------------------------------------------------------------- 0.2.6 (D-115)
+     阶段条：字节已经下完，任务还没结束（合并 / 后期处理 / 产物校验）。
+     复用同一条 6px 轨道和同一段扫光动画，只换色：
+       · 准备 / 等待  → --accent（现有蓝，不动）
+       · 整理中 / 合并中 → 琥珀色：进度不可测，但任务确实在动
+       · 已完成 → --ok（绿），满条且不再动
+     琥珀色单独给深浅两套，避免在深色面板上发灰。 */
+  .bar[data-tone="work"] > i {
+    background: linear-gradient(90deg,
+      rgba(201, 138, 6, 0) 0%,
+      rgba(201, 138, 6, 0.16) 20%,
+      rgba(201, 138, 6, 0.40) 45%,
+      rgba(201, 138, 6, 0.68) 72%,
+      rgba(201, 138, 6, 0.88) 94%,
+      rgba(201, 138, 6, 0.82) 100%);
+  }
+  html[data-theme="dark"] .bar[data-tone="work"] > i {
+    background: linear-gradient(90deg,
+      rgba(240, 184, 64, 0) 0%,
+      rgba(240, 184, 64, 0.20) 20%,
+      rgba(240, 184, 64, 0.46) 45%,
+      rgba(240, 184, 64, 0.74) 72%,
+      rgba(240, 184, 64, 0.92) 94%,
+      rgba(240, 184, 64, 0.86) 100%);
+  }
+  .bar[data-mode="done"] > i { background: var(--ok); }
   .card-foot { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .card-foot .spacer { flex: 1 1 auto; }
   .card-foot button { height: 26px; padding: 0 10px; font-size: 12px; }
@@ -167,6 +193,18 @@
   .modal p { margin: 0 0 6px; font-size: 13px; color: var(--muted); line-height: 1.6; }
   .modal .modal-count { font-size: 12px; color: var(--accent); font-weight: 700; }
   .modal .modal-note { font-size: 11px; padding: 8px 10px; margin: 10px 0 16px; border-radius: 6px; background: var(--accent-soft); color: var(--ink); }
+  /* D-116: the file-deletion opt-in. A checkbox (default OFF) instead of a
+     second red button: the destructive choice must be a deliberate tick, not a
+     button sitting one pixel away from "only delete the record". */
+  .modal .modal-check { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; line-height: 1.5; color: var(--ink); cursor: pointer; user-select: none; }
+  .modal .modal-check input { width: 15px; height: 15px; margin: 1px 0 0; accent-color: var(--danger); cursor: pointer; flex: 0 0 auto; }
+  .modal .modal-check span { flex: 1 1 auto; }
+  .modal .modal-check small { display: block; margin-top: 2px; font-size: 11px; color: var(--muted); }
+  /* Risk copy only appears once the box is ticked: before that the dialog is
+     not a warning, and a permanent red wall trains people to ignore it. */
+  .modal .modal-check[data-risk="true"] { border-color: var(--danger); background: #fdeaee; }
+  html[data-theme="dark"] .modal .modal-check[data-risk="true"] { background: #3a1a20; }
+  .modal .modal-check[data-risk="true"] small { color: var(--danger); font-weight: 700; }
   .modal-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
   .modal-actions button { height: 32px; padding: 0 14px; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); cursor: pointer; white-space: nowrap; }
   .modal-actions button.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 700; }
@@ -248,7 +286,7 @@
   <p class="queue-status" id="queue-status" role="status" aria-live="polite" hidden="true"></p>
 
   <section class="queue-body" id="queue-body" aria-live="polite">
-    <div class="cards" id="queue-cards" hidden="false"><article class="card" data-task-id="t-error-6" data-state="Error" data-tab="canceled" data-selected="false" data-progress-mode="value"><input type="checkbox" class="card-check" aria-label="Live concert — private stream"><div class="thumb" data-thumb="letter">L</div><div class="card-main"><div class="card-title" title="Live concert — private stream">Live concert — private stream</div><div class="card-meta"><span class="badge" data-state="Error">Failed</span> unknown · — · HTTP_403 · <span class="card-failure" data-failure-kind="forbidden">Unable to access this content</span></div><div class="bar" data-percent="12"><i style="width: 12%;"></i></div><div class="card-meta card-progress" data-progress="12">12.0%</div><div class="card-foot"><button type="button" data-action="retry" aria-disabled="false">Retry</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">Remove</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article><article class="card" data-task-id="t-cancel-5" data-state="Canceled" data-tab="canceled" data-selected="false" data-progress-mode="value"><input type="checkbox" class="card-check" aria-label="Cosmos Laundromat — pilot"><div class="thumb" data-thumb="letter">C</div><div class="card-main"><div class="card-title" title="Cosmos Laundromat — pilot">Cosmos Laundromat — pilot</div><div class="card-meta"><span class="badge" data-state="Canceled">Canceled</span> Gooseberry · 12:11</div><div class="bar" data-percent="37"><i style="width: 37%;"></i></div><div class="card-meta card-progress" data-progress="37">37.0% · 59.0 MB / 159 MB</div><div class="card-foot"><button type="button" data-action="retry" aria-disabled="false">Retry</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">Remove</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article><article class="card" data-task-id="t-done-4" data-state="Completed" data-tab="finished" data-selected="false" data-progress-mode="complete"><input type="checkbox" class="card-check" aria-label="Tears of Steel — 720p"><div class="thumb" data-thumb="letter">T</div><div class="card-main"><div class="card-title" title="Tears of Steel — 720p">Tears of Steel — 720p</div><div class="card-meta"><span class="badge" data-state="Completed">Completed</span> Mango Open Movie · 12:14</div><div class="card-meta card-progress" data-progress="100">100.0% · 304 MB / 304 MB</div><div class="card-foot"><button type="button" data-action="folder" aria-disabled="false">Open folder</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">Remove</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article><article class="card" data-task-id="t-ready-3" data-state="ReadyWithInfo" data-tab="downloading" data-selected="false" data-progress-mode="waiting"><input type="checkbox" class="card-check" aria-label="Sintel — 1080p"><div class="thumb" data-thumb="letter">S</div><div class="card-main"><div class="card-title" title="Sintel — 1080p">Sintel — 1080p</div><div class="card-meta"><span class="badge" data-state="ReadyWithInfo">Ready</span> Durian Open Movie · 14:48</div><div class="bar" data-mode="indeterminate" role="progressbar" aria-label="Preparing, progress unknown"><i style="animation-delay: -500ms;"></i></div><div class="card-meta">Parsed, ready to start</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">Cancel</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">Remove</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article><article class="card" data-task-id="t-fetch-2" data-state="FetchingInfo" data-tab="downloading" data-selected="false" data-progress-mode="waiting"><input type="checkbox" class="card-check" aria-label="Big Buck Bunny — 4K remaster"><div class="thumb" data-thumb="letter">B</div><div class="card-main"><div class="card-title" title="Big Buck Bunny — 4K remaster">Big Buck Bunny — 4K remaster</div><div class="card-meta"><span class="badge" data-state="FetchingInfo">Fetching info</span> Peach Open Movie · 9:56</div><div class="bar" data-mode="indeterminate" role="progressbar" aria-label="Preparing, progress unknown"><i style="animation-delay: -1698ms;"></i></div><div class="card-meta">Reading link info</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">Cancel</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article><article class="card" data-task-id="t-run-1" data-state="Running" data-tab="downloading" data-selected="false" data-progress-mode="value"><input type="checkbox" class="card-check" aria-label="Sprite Fright — Blender Open Movie"><div class="thumb" data-thumb="letter">S</div><div class="card-main"><div class="card-title" title="Sprite Fright — Blender Open Movie">Sprite Fright — Blender Open Movie</div><div class="card-meta"><span class="badge" data-state="Running">Downloading</span> Blender Studio · 10:24</div><div class="bar" data-percent="42"><i style="width: 42%;"></i></div><div class="card-meta card-progress" data-progress="42">42.0% · 90.0 MB / 214 MB · 4.0 MB/s · 1:36 left</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">Cancel</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article></div>
+    <div class="cards" id="queue-cards" hidden="false"><article class="card" data-task-id="t-error-6" data-state="Error" data-tab="canceled" data-selected="false" data-progress-mode="value"><input type="checkbox" class="card-check" aria-label="Live concert — private stream"><div class="thumb" data-thumb="letter">L</div><div class="card-main"><div class="card-title" title="Live concert — private stream">Live concert — private stream</div><div class="card-meta"><span class="badge" data-state="Error">Failed</span> unknown · — · HTTP_403 · <span class="card-failure" data-failure-kind="forbidden">Unable to access this content</span></div><div class="bar" data-percent="12"><i style="width: 12%;"></i></div><div class="card-meta card-progress" data-progress="12">12.0%</div><div class="card-foot"><button type="button" data-action="retry" aria-disabled="false">Retry</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">Remove</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article><article class="card" data-task-id="t-cancel-5" data-state="Canceled" data-tab="canceled" data-selected="false" data-progress-mode="value"><input type="checkbox" class="card-check" aria-label="Cosmos Laundromat — pilot"><div class="thumb" data-thumb="letter">C</div><div class="card-main"><div class="card-title" title="Cosmos Laundromat — pilot">Cosmos Laundromat — pilot</div><div class="card-meta"><span class="badge" data-state="Canceled">Canceled</span> Gooseberry · 12:11</div><div class="bar" data-percent="37"><i style="width: 37%;"></i></div><div class="card-meta card-progress" data-progress="37">37.0% · 59.0 MB / 159 MB</div><div class="card-foot"><button type="button" data-action="retry" aria-disabled="false">Retry</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">Remove</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article><article class="card" data-task-id="t-done-4" data-state="Completed" data-tab="finished" data-selected="false" data-progress-mode="complete"><input type="checkbox" class="card-check" aria-label="Tears of Steel — 720p"><div class="thumb" data-thumb="letter">T</div><div class="card-main"><div class="card-title" title="Tears of Steel — 720p">Tears of Steel — 720p</div><div class="card-meta"><span class="badge" data-state="Completed">Completed</span> Mango Open Movie · 12:14</div><div class="bar" data-mode="done" data-tone="done" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100"><i style="width: 100%;"></i></div><div class="card-meta card-progress" data-progress="100">100.0% · 304 MB / 304 MB</div><div class="card-foot"><button type="button" data-action="folder" aria-disabled="false">Open folder</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">Remove</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article><article class="card" data-task-id="t-ready-3" data-state="ReadyWithInfo" data-tab="downloading" data-selected="false" data-progress-mode="waiting"><input type="checkbox" class="card-check" aria-label="Sintel — 1080p"><div class="thumb" data-thumb="letter">S</div><div class="card-main"><div class="card-title" title="Sintel — 1080p">Sintel — 1080p</div><div class="card-meta"><span class="badge" data-state="ReadyWithInfo">Ready</span> Durian Open Movie · 14:48</div><div class="bar" data-mode="indeterminate" role="progressbar" aria-label="Preparing, progress unknown"><i style="animation-delay: -500ms;"></i></div><div class="card-meta">Parsed, ready to start</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">Cancel</button><button type="button" data-action="remove" aria-disabled="false" class="remove-btn">Remove</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article><article class="card" data-task-id="t-fetch-2" data-state="FetchingInfo" data-tab="downloading" data-selected="false" data-progress-mode="waiting"><input type="checkbox" class="card-check" aria-label="Big Buck Bunny — 4K remaster"><div class="thumb" data-thumb="letter">B</div><div class="card-main"><div class="card-title" title="Big Buck Bunny — 4K remaster">Big Buck Bunny — 4K remaster</div><div class="card-meta"><span class="badge" data-state="FetchingInfo">Fetching info</span> Peach Open Movie · 9:56</div><div class="bar" data-mode="indeterminate" role="progressbar" aria-label="Preparing, progress unknown"><i style="animation-delay: -1698ms;"></i></div><div class="card-meta">Reading link info</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">Cancel</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article><article class="card" data-task-id="t-run-1" data-state="Running" data-tab="downloading" data-selected="false" data-progress-mode="value"><input type="checkbox" class="card-check" aria-label="Sprite Fright — Blender Open Movie"><div class="thumb" data-thumb="letter">S</div><div class="card-main"><div class="card-title" title="Sprite Fright — Blender Open Movie">Sprite Fright — Blender Open Movie</div><div class="card-meta"><span class="badge" data-state="Running">Downloading</span> Blender Studio · 10:24</div><div class="bar" data-percent="42"><i style="width: 42%;"></i></div><div class="card-meta card-progress" data-progress="42">42.0% · 90.0 MB / 214 MB · 4.0 MB/s · 1:36 left</div><div class="card-foot"><button type="button" data-action="cancel" aria-disabled="false">Cancel</button><span class="spacer"></span><button type="button" data-action="detail" aria-disabled="false">Details</button></div></div></article></div>
     <div class="empty" id="queue-empty" data-variant="empty" hidden="true">
       <svg class="brand-watermark" viewBox="0 0 40 40" aria-hidden="true">
         <rect x="0" y="0" width="40" height="40" rx="11" fill="var(--accent)"></rect>
@@ -272,7 +310,7 @@
   <footer class="queue-foot">
     <span data-i18n="queue.foot.hint">YTVDLT · Paste a link to start · F11 also toggles full screen</span>
     <span class="spacer"></span>
-    <span class="queue-version" id="queue-version">v0.2.2</span>
+    <span class="queue-version" id="queue-version">v—</span>
     <span id="queue-foot-count">6 / 6</span>
   </footer>
 
@@ -298,13 +336,19 @@
 <div class="modal-backdrop" id="queue-modal" hidden="true" role="dialog" aria-modal="true">
   <div class="modal">
     <h2 id="queue-modal-title" data-i18n="queue.delete.title">Delete task</h2>
-    <p id="queue-modal-message" data-i18n="queue.delete.message">Choose what to delete. This only affects YTVDLT records and downloaded files.</p>
+    <p id="queue-modal-message" data-i18n="queue.delete.message">This removes the task record. Tick the option below to remove the files as well.</p>
     <p class="modal-count" id="queue-modal-count">共 0 个任务</p>
-    <p class="modal-note" id="queue-modal-note" data-i18n="queue.delete.filesHint">Local files go to the Windows Recycle Bin and can be restored; nothing is permanently deleted.</p>
+    <label class="modal-check" id="queue-modal-check" data-risk="false" for="queue-modal-with-files">
+      <input type="checkbox" id="queue-modal-with-files">
+      <span>
+        <span id="queue-modal-with-files-label" data-i18n="queue.delete.withFiles">Also delete local files</span>
+        <small id="queue-modal-risk" data-i18n="queue.delete.filesRisk">This task’s local files (video, audio, subtitles…) will move to the Recycle Bin.</small>
+      </span>
+    </label>
+    <p class="modal-note" id="queue-modal-note" data-i18n="queue.delete.filesHint">Records only by default; files move to the Recycle Bin only when the box above is ticked.</p>
     <div class="modal-actions">
       <button type="button" id="queue-modal-cancel" data-i18n="queue.delete.cancel">Cancel</button>
-      <button type="button" id="queue-modal-history" class="primary" data-i18n="queue.delete.onlyHistory">Delete history only</button>
-      <button type="button" id="queue-modal-files" class="danger" data-i18n="queue.delete.withFiles">Also delete local files</button>
+      <button type="button" id="queue-modal-confirm" class="primary" data-i18n="queue.delete.confirm">Delete</button>
     </div>
   </div>
 </div>
@@ -314,6 +358,7 @@
 <script src="../../shortcuts/shortcuts.js"></script>
 <script src="../../app-shell.js"></script>
 <script src="../../shell/app-nav.js"></script>
+<script src="../../shell/app-version.js"></script>
 <script src="./queue.js"></script>
 <script src="../../about/about.js"></script>
 <script src="../../updates/update-dialog.js"></script>

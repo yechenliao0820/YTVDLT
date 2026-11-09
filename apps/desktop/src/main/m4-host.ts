@@ -14,12 +14,13 @@
  * `createAppHost()` ports into this function once a window exists (M5-4).
  */
 import type {
-  CorePorts, DownloadEngine, DownloadKind, FormatDomain, SubtitleDomain,
+  CorePorts, DownloadEngine, DownloadKind, DownloadRequest, FormatDomain, SubtitleDomain,
   PathsDomain, NetworkDomain, AdvancedDomain, PlaylistInfo, TaskRecord,
 } from '@ytvdlt/shared';
 import {
   CommandTemplateStore, NotificationCenter, TaskDetailService,
   buildDownloadRequest, buildErrorReport, buildPlaylistBatchRecordsByUrl, expandEnvVars, formatErrorReport,
+  PRIVATE_OUTPUT_DIR, resolveDownloadTempDir,
   type ClipboardPort, type IArtifactVerifier, type DesktopNotification,
 } from '@ytvdlt/core';
 import { createTaskHost, type TaskHost } from './task-host.js';
@@ -49,6 +50,21 @@ export interface M4HostOptions {
    * byte-level progress the queue card depends on. See `resolveAria2cPath`.
    */
   bundledAria2cPath?: string;
+  /**
+   * D-117: `%USERVIDEOS%` and friends. Injected by the Electron entry (which is
+   * the only layer allowed to call `app.getPath`); absent in unit tests, where
+   * the token stays literal exactly as before.
+   */
+  expandPath?: (raw: string) => string;
+  /**
+   * D-117 / D-118: the app-private, always-writable directory (`<dataDir>/work`).
+   *
+   * Used for two things: the artefact manifest, and — when it is on the same
+   * volume as the output — the per-task temp folder that holds `.part` /
+   * `.ytdl`. Empty/absent keeps the legacy behaviour (manifest next to the
+   * media, no temp dir at all).
+   */
+  internalWorkDir?: string;
 }
 
 export interface PlaylistEnqueueInput {
@@ -89,7 +105,11 @@ export interface SingleEnqueueInput {
   readonly audioFormat?: 'auto' | 'mp3' | 'm4a';
 }
 
-function readDefaults(config: TaskHost['config'], bundledAria2cPath?: string): {
+function readDefaults(
+  config: TaskHost['config'],
+  bundledAria2cPath?: string,
+  expandPath?: (raw: string) => string,
+): {
   format: Partial<FormatDomain>;
   subtitle: Partial<SubtitleDomain>;
   paths: Partial<PathsDomain>;
@@ -99,10 +119,15 @@ function readDefaults(config: TaskHost['config'], bundledAria2cPath?: string): {
   const cast = <T>(domain: 'format' | 'subtitle' | 'paths' | 'network' | 'advanced'): T =>
     config.getDomain(domain) as unknown as T;
   const network = cast<Partial<NetworkDomain>>('network');
+  // D-118: `paths.tempDir` stays EXACTLY as the user stored it (usually '').
+  // Resolving it to a concrete directory is the per-task job of
+  // `resolveTempDirFor()` — filling it here would make an internal default
+  // indistinguishable from a user decision and defeat the volume check.
+  const paths = withExpandedPaths(cast<Partial<PathsDomain>>('paths'), expandPath);
   return {
     format: cast<Partial<FormatDomain>>('format'),
     subtitle: cast<Partial<SubtitleDomain>>('subtitle'),
-    paths: withExpandedPaths(cast<Partial<PathsDomain>>('paths')),
+    paths,
     // D-111: configured downloader only — '' / unset means "use yt-dlp's own",
     // a path means "the user's exe", and 'bundled' opts into the shipped one.
     network: { ...network, aria2cPath: resolveAria2cPath(network.aria2cPath, bundledAria2cPath) },
@@ -148,6 +173,39 @@ export function applyFormatChoice(
 }
 
 /**
+ * D-118: resolve THIS task's temp directory and write it into the request.
+ *
+ * The request is the only place the engine and the plan both read, so resolving
+ * it once here keeps three things in lockstep: `-P temp:` (argv), the child's
+ * cwd/TEMP, and the artifact manifest. Every branch returns a directory that is
+ * on the same volume as the final media, except an explicit user setting.
+ *
+ * `''` means "no safe directory" — callers must then fall back to yt-dlp's own
+ * behaviour rather than inventing a path.
+ */
+function resolveTempDirFor(
+  request: DownloadRequest,
+  taskId: string,
+  expandPath: ((raw: string) => string) | undefined,
+  internalWorkDir: string | undefined,
+): string {
+  const expand = expandPath ?? ((raw: string) => expandEnvVars(raw, process.env));
+  const paths = request.paths;
+  // Private mode writes into %LOCALAPPDATA%; comparing volumes against the
+  // user's Videos folder would be wrong there.
+  const outputDir = paths.privateMode === true
+    ? expand(PRIVATE_OUTPUT_DIR)
+    : (request.format.extractAudio ? paths.audioDir : paths.videoDir);
+  const resolved = resolveDownloadTempDir({
+    outputDir,
+    configuredTempDir: typeof paths.tempDir === 'string' ? paths.tempDir : '',
+    internalWorkDir: internalWorkDir ?? '',
+    taskId,
+  });
+  return resolved ?? '';
+}
+
+/**
  * D-79: expand `%USERPROFILE%`-style tokens in the user-facing directories.
  *
  * The shipped defaults carry those tokens, and a spawned `yt-dlp` never expands
@@ -155,14 +213,22 @@ export function applyFormatChoice(
  * manifest was empty, so every fresh install failed with `ARTIFACT_INCOMPLETE`.
  * The stored config keeps the author's original string — only the request gets
  * the absolute path — so the settings UI still shows what the user typed.
+ *
+ * D-117: the expander is injected so `%USERVIDEOS%` (the real Windows Videos
+ * folder, which is NOT an environment variable) resolves to the same path the
+ * settings page shows and the engine writes to.
  */
-function withExpandedPaths(paths: Partial<PathsDomain>): Partial<PathsDomain> {
+function withExpandedPaths(
+  paths: Partial<PathsDomain>,
+  expandPath?: (raw: string) => string,
+): Partial<PathsDomain> {
+  const expand = expandPath ?? ((raw: string): string => expandEnvVars(raw, process.env));
   const expanded: Partial<PathsDomain> = { ...paths };
   const keys = ['videoDir', 'audioDir', 'commandDir', 'tempDir'] as const;
   for (const key of keys) {
     const value = expanded[key];
     if (typeof value === 'string') {
-      (expanded as Record<string, unknown>)[key] = expandEnvVars(value, process.env);
+      (expanded as Record<string, unknown>)[key] = expand(value);
     }
   }
   return expanded;
@@ -268,7 +334,7 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
   const enqueueSingle = async (
     input: SingleEnqueueInput,
   ): Promise<readonly string[]> => {
-    const defaults = readDefaults(task.config, options.bundledAria2cPath);
+    const defaults = readDefaults(task.config, options.bundledAria2cPath, options.expandPath);
     const base = buildDownloadRequest({
       taskId: 'single-template',
       url: input.url,
@@ -277,6 +343,17 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
     });
     const now = ports.clock.nowIso();
     const taskId = `single-${now.replace(/[^0-9]/g, '')}-${++singleSeq}`;
+    // D-118: one resolved temp dir per task, shared by `-P temp:`, the child's
+    // cwd/TEMP and the artefact manifest.
+    const request: DownloadRequest = {
+      ...base,
+      taskId,
+      url: input.url,
+      paths: {
+        ...base.paths,
+        tempDir: resolveTempDirFor({ ...base, taskId, url: input.url }, taskId, options.expandPath, options.internalWorkDir),
+      },
+    };
     const record: TaskRecord = {
       id: taskId,
       url: input.url,
@@ -285,7 +362,7 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
       createdAt: now,
       updatedAt: now,
       mediaInfo: null,
-      request: { ...base, taskId, url: input.url },
+      request,
       artifacts: [],
       lastPercent: null,
       error: null,
@@ -304,7 +381,7 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
       taskId: 'batch-template',
       url: input.playlistUrl,
       kind: input.kind,
-      defaults: readDefaults(task.config, options.bundledAria2cPath),
+      defaults: readDefaults(task.config, options.bundledAria2cPath, options.expandPath),
     });
     // D-69: use each entry's own URL instead of a --playlist-items position.
     // The legacy position-based planner remains exported for the M4-4 contract.
@@ -317,7 +394,22 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
       privateMode: base.paths.privateMode,
     });
     if (plan.records.length === 0) return [];
-    return task.queue.enqueueBatch(plan.records);
+    // D-118: every batch member gets its OWN temp dir — a shared one would let
+    // two entries of the same playlist collide on `.part` / `.ytdl` names.
+    const records = plan.records.map((record) => {
+      if (record.request === null) return record;
+      return {
+        ...record,
+        request: {
+          ...record.request,
+          paths: {
+            ...record.request.paths,
+            tempDir: resolveTempDirFor(record.request, record.id, options.expandPath, options.internalWorkDir),
+          },
+        },
+      };
+    });
+    return task.queue.enqueueBatch(records);
   };
 
   const gateway = createIpcGateway({

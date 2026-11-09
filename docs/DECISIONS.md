@@ -1280,3 +1280,53 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 决策 | ① 发布走 REST：`POST /releases`（tag `v0.2.5`、`target_commitish=main`、`draft=false`）→ `POST /uploads.github.com/.../assets`（`latest.yml` → blockmap → exe，小文件先上）。② `latest.yml` 上传前把两处文件名改成点号版本（与 0.2.1–0.2.4 的资产命名一致），保持清单与资产同名。③ 说明正文用英文，`D-110…D-112` 作为括注保留可追溯性（铁律 14）。④ 不产便携版（铁律 9）。 |
 | 验证 | 资产三个全部 `uploaded` 且带 `digest`；本地 `sha256sum` = `8417c5a0…80abd0` 与资产 digest **逐字符相同**；`releases/latest` 返回 `v0.2.5` 与三个资产（应用本体更新通道读的就是这个接口）；`git fetch --tags` 后 `v0.2.5` 指向 `e196c1f`，与 HEAD 一致；Release 页面 200。 |
 | 未覆盖 | ① `https://github.com/.../releases/download/v0.2.5/latest.yml` 直链持续 **504**（删除重传一次仍 504），同版 `.exe` / `.blockmap` 与 0.2.4 的 `latest.yml` 均正常；经 API 资产端点取同一文件内容正确。判断为 GitHub 侧网关问题，未继续追。② 本产品未装配 `electron-updater`（`electron-updater-adapter.ts` 在运行时无引用），故该 504 不影响交付；将来若启用则必须复测该直链。③ 未在干净机器上跑「0.2.4 → 0.2.5」的真实更新链路（只验证了接口返回与摘要）。 |
+
+## D-114 · 2026-11-09 · 版本号只有一条真相：主进程说了算，URL 只是首帧提示
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 队列右下角、设置页、关于窗口都显示 `v0.2.2`，而实际运行的是 0.2.5。业主口述「0.25.5」与源码里的 `0.2.2` 不一致，无法据此判断哪边是错的。 |
+| 根因（实测） | 版本只以 `?v=<app.getVersion()>` 形式挂在页面 URL 上（`main.ts`）。`about.js` 读不到时回落到写死的 `FALLBACK_VERSION = '0.2.2'`——那是四个版本之前的值。**任何一次不携带 `v` 的导航都会永久丢掉它**：实测「队列 → 详情 → 返回队列」后 URL 变成 `queue/index.html?lang=en`，三处版本同时变回 `v0.2.2`。启动时的初始 URL 本身是对的（CDP 读到 `?v=0.2.5`），所以这不是安装包或 `app.getVersion()` 的问题。安装包元数据核对无误：`dist-0.2.5/…/app.asar` 内 `package.json` 版本为 `0.2.5`，`logs/app-*.jsonl` 显示以便携模式从 `dist-0.2.5/win-unpacked` 启动。 |
+| 决策 | ① 新增 append-only 通道 `ytvdlt:app:info`（`APP_INFO`），主进程直接回 `app.getVersion()`。② 新增 `packages/ui/src/shell/app-version.js`：`?v=` 只作首帧提示，`APP_INFO` 回来即覆盖（不一致时以主进程为准）；两者都没有时显示 `v—`，**绝不显示一个看起来合理的旧版本**。③ 删掉 `about.js` 的 `FALLBACK_VERSION`，改为实时 getter 并订阅 `onChange`，已打开的关于窗口无需重开即更新。④ 补全导航：队列 → 详情、详情 → 队列（`YTVDLTNav.pageUrl()`）、`app-nav.js` 的任意跳转、设置页语言重载，缺 `v` 时从注册表补。⑤ `queue/index.html` / `settings/index.html` 的初始占位从 `v0.1.10` / `v0.2.2` 改为 `v—`。 |
+| 验证 | 新增 `app-version.test.ts`（10 例）：URL 提示、主进程覆盖、空答案清空旧提示、通道失败保留提示、超长版本串被拒、`onChange` 广播、每次加载只问一次。`m5-channels.test.ts` 新增 3 例（含「不接受任何 payload 键」）。真实 Chromium 渲染实测：`?v=0.2.5` → `v0.2.5`、`?v=9.9.9` → `v9.9.9`、无参数 → `v—`；设置页同样，`?lang=en` 下 `data-i18n-missing="0"`。 |
+| 未覆盖 | ① **未在安装版 / 真实 Electron 中复验**（本轮未打包，理由与待验清单见本轮交付说明）。② 更新检查里的「当前版本」走 `APP_UPDATE_STATUS.currentVersion`，本来就来自主进程，未改动也未单独复验。 |
+
+## D-115 · 2026-11-09 · 下载到 100% 之后：显示真实的整理阶段，而不是一个冻住的数字
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 进度到 100% 后仍可能在合并或校验，卡片看起来卡住。 |
+| 根因 | `--progress-template` 只覆盖 yt-dlp 的**下载循环**；合并（ffmpeg）、提取音频、写元数据、以及应用自己的 `artifact-verifier` 都不产生进度行。队列状态在整个过程中一直是 `Running`，`percent` 停在 100，于是卡片画一条满的蓝条 + 「下载中」。视频+音频两条流各自 0%→100%，所以「看到 100%」连"传输结束"都不能证明。 |
+| 决策 | ① 新增 `packages/engine-ytdlp/src/postprocess-parser.ts`，从 stderr 逐行识别 yt-dlp 自己打印的**方括号标记**（`[Merger]` → `merging`；`[ExtractAudio]` / `[VideoConvertor]` / `[FixupM3u8]` / `[Metadata]` / `[EmbedThumbnail]` / `[SubtitlesConvertor]` / `[MoveFiles]` 等 → `postprocess`），未知行一律返回 `null`，**不猜**。② `EngineStage` 追加 `merging` / `verifying`（append-only）；`TaskRecord` 增加可选 `lastStage`；队列按 `isForwardStage()` **单调推进**，第二路流重回 `downloading` 不会把卡片打回去。③ 校验前由队列自己置 `verifying` 并广播，覆盖「引擎已退出、记录还没 Completed」这段空窗。④ UI 新增第五种进度呈现 `working`：复用准备阶段的扫光动画，改为琥珀色，文案「合并视频中」（仅 `merging`）/「整理中」（其余，含校验）；`Completed` 改为绿色满条。⑤ 旧快照没有 `lastStage`，卡片行为与改动前完全一致。 |
+| 验证 | `postprocess-parser.test.ts`（9 例，含「不得把 `[MergerX]` / 错误行 / 普通下载行判成阶段」与跨 chunk 断行）；`task-queue-stage.test.ts`（4 例：正向序列、回退被忽略、校验失败仍是 `Error`、重试清空阶段）；`queue-stage.test.ts`（7 例，跑真实 `queue.js`：`data-progress-mode="working"`、`data-tone="work"`、无 `data-percent`、中英文案、无阶段信息时保持旧行为、完成态 `data-mode="done"`）。全量 `1030` 例通过。 |
+| 未覆盖 | ① **没有跑真实下载**验证 `[Merger]` 行确实按预期出现（解析器按 yt-dlp 源码里的字面量对齐，但本轮未联网实测）。② 合并本身没有速度 / 剩余时间，只显示不确定条。③ 未在安装版复验。 |
+
+## D-116 · 2026-11-09 · 删除确认改成「默认不勾选」的复选框，确认按钮跟着变红
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 队列删除弹窗里并排两个按钮「仅删除历史记录」和「同时删除本地文件」，后一个常驻红色。希望改成：一个复选框「同时删除本地文件」，默认不勾，勾选后确认按钮变红并提示风险。 |
+| 根因 | 旧交互把「删记录」和「删文件」做成两个同等显眼的动作，其中一个是破坏性的。用户在弹窗里的默认视线落点是蓝色主按钮旁边那个红按钮，误点代价是文件进回收站。另：`openModal()` 没有重置任何状态，两次打开之间没有"恢复默认"。 |
+| 决策 | ① 弹窗只保留一个确认按钮 + 一个复选框（`#queue-modal-with-files`），每次打开强制 `checked = false`。② `syncDeleteRisk()` 统一驱动：未勾选 → `class="primary"` +「删除」/「确认清空」；勾选 → `class="danger"` +「删除并移入回收站」/「清空并移入回收站」，checkbox 容器 `data-risk="true"` 并显示风险提示（明确写出可能涉及视频、音频、字幕多个产物）。③ 清空历史复用同一弹窗：默认只清记录，勾选后才回收产物。④ **不新增任何删除机制**：仍然只走 `TASK_ACTION { action:'remove', withFiles:true }` → 主进程只取该任务 `artifacts` → `shell.trashItem`；渲染层不传路径、不按目录或前缀批量删。⑤ 详情页的删除功能原样保留（`queue.delete.onlyHistory` 仍被 `task-detail.js` 使用）。 |
+| 验证 | 新增 `queue-delete.test.ts`（10 例，跑真实 `queue.js`）：默认未勾选、勾选变红、取消变回、重开复位、取消不发 IPC、未勾选 `payload` 无 `withFiles`、勾选后 `withFiles: true`、清空历史两种路径、英文文案。e2e 的队列/设置/详情 11 个 case 因 DOM 变化按 §7 逐个重建基线（未全量覆盖）。 |
+| 未覆盖 | ① 未真机点一遍回收站链路（`shell.trashItem` 的实际行为只在主进程单元测试里用假端口覆盖）。② 「部分失败保留记录」逻辑未改动，也未新增用例。 |
+
+## D-117 · 2026-11-09 · 默认保存到系统「视频」库；清单与临时文件搬进应用自己的 work 目录
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 新用户默认下载到 `%USERPROFILE%\Downloads\YTVDLT`，希望改成 Windows「视频」文件夹下的 `YTVDLT`；同时成品目录里堆了一批 `ytvdlt-artifacts-*.txt`，还有 `_MEI*` 文件夹。 |
+| 根因 | ① `DEFAULT_PATH_TOKENS` 写的是 `%USERPROFILE%/Downloads/YTVDLT`。② `paths.tempDir` 默认空 → `resolveArtifactManifestDir()` 回落到输出目录，于是每个任务的 `ytvdlt-artifacts-<taskId>.txt` 都写进用户浏览的成品文件夹，且**读取后从未清理**。③ 子进程 `cwd` / `TEMP` 用的是输出目录（D-89 为保证可写而这么定），yt-dlp 的临时文件也落在成品目录。 |
+| 决策 | ① 默认值改为 `%USERVIDEOS%/YTVDLT`，`%USERVIDEOS%` 由**主进程**用 `app.getPath('videos')` 注入到展开表（不是 `process.env`，也不是 `%USERPROFILE%\Videos`——只有这个 API 会跟随 OneDrive / 库重定向）。② **不迁移存量配置**：旧默认值与用户手选的同一路径无法区分，猜错等于搬走一个媒体库。③ `paths.tempDir` 未显式配置时，请求里填 `<dataDir>/work`；显式配置仍然优先。④ 清单与子进程 `cwd`/`TEMP` 都落到 `<dataDir>/work/<taskId>/`，**按任务隔离**，避免并发任务共用同一个 TEMP 与清单目录。⑤ 清单只在「已读取 + 已解析 + 路径已交给队列」之后才 `unlink`；解析为空或失败时保留文件供诊断。⑥ 不自动清理任何既有堆积（`.part` / `.ytdl` / 分片 / `_MEI*` 一律不动）。 |
+| 验证 | `m5-channels.test.ts` 的 6 条路径断言改为新默认值并保留「音频/视频独立」「取消不算错误」「不可写拒绝保存」等原断言；`download-engine.download.contract.test.ts` 更新清单路径并新增 1 例「请求没有 tempDir 时仍回落到输出目录」。`_MEI*` 的来源**未证实属于本应用**（Electron 不产生 PyInstaller 的 `_MEI` 目录），只记录、不推测。 |
+| 未覆盖 | ① 未在真实 Windows「视频」库（含 OneDrive 重定向、中文用户名、含空格路径）上实测。② 未跑真实下载来确认成品目录不再出现 `ytvdlt-artifacts-*.txt`。③ 内部 `work/` 目录的**生命周期治理**（陈旧任务的目录回收）留到第二阶段，本轮只保证不再往成品目录写。④ `.part` / `.ytdl` / 分片按业主要求原样保留。 |
+
+## D-118 · 2026-11-09 · 中间文件搬出成品目录：只走同卷，续传优先，`_MEI` 交还系统临时目录
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 成品视频目录里混着 `.part`、`.ytdl`、`_MEIxxxxx` 文件夹，用户打开目录看到的是程序的工作区，不是自己的视频。 |
+| 根因（实测，随包 yt-dlp 2026.10.26） | ① `.part` 默认写在**最终文件旁边**；`-P temp:` 一直存在，但 `resolveDownloadPlan()` 用 `needsTempDir`（仅合并/转码/字幕时才为真）把它挡掉了，所以**普通单文件下载从来不带 temp 目录**。② HLS/DASH 中断时额外产生 `<name>.mp4.part-FragN.part`（并发分片）与 `<name>.mp4.ytdl`（分片索引，内容 `{"downloader":{"current_fragment":{"index":0}}}`），三者**都必须在中断后保留**才能续传。③ `_MEI<pid>` 是 yt-dlp（PyInstaller onefile）每次启动解包运行时的地方，跟随 `TEMP` 而非 `-P`；D-89/D-117 把子进程 TEMP 钉在输出目录/工作目录，于是**每次取消或崩溃都会在用户目录留下约 29.3 MB / 142 个文件**的 `_MEI`。 |
+| 决策 | ① **临时目录必须与输出目录同卷**：`resolveDownloadTempDir()` 三条分支——用户显式配置 `paths.tempDir`（加 `<taskId>` 子目录，尊重其卷）、应用私有 `<dataDir>/work`（同卷时）、`<outputDir>/.ytvdlt-incomplete/<taskId>`（跨卷或卷未知时）。跨卷从不用私有目录，因为 yt-dlp 的收尾是 `shutil.move`，跨卷会退化成"整份复制 + 删除"，空间翻倍、失败即两头空。② `-P temp:` 改为**每次下载都发**（去掉 `needsTempDir` 门槛），`DownloadPlan.explicitTempDir` 更名 `tempDir`（语义已变，旧名会骗人）。③ `paths.tempDir` 就是本任务的目录，engine 不再二次套 `<taskId>`。④ **TEMP 不再覆盖**：cwd 仍钉在可写目录（D-89），但 TEMP 保留继承值，`_MEI` 回到 Windows 临时目录；只有继承的 TEMP 为空/不可用时才回落到 cwd。⑤ 成功后若任务目录为空则 `rmdir`（**非递归**，端口新增 `FsPort.rmdir`）；有残留就保留——残留是续传数据或证据。 |
+| 验证（真实下载） | `YTVDLT_REAL_DOWNLOAD=1` + 随包 `yt-dlp.exe` + 本地 Range 服务器：① 限速 200K，3 s 时 `taskkill /T /F`（`child.kill()` 只杀父进程，实测无效）→ 输出目录为空，`.part` 在任务目录，**无 `_MEI`**；② 同一 argv 重跑 → `Resuming download at byte <n>`，成品落在输出目录，任务目录清空；③ 不配 tempDir 的请求保持旧行为（`.part` 仍在媒体旁），作为兼容性对照。另有 `volume.test.ts` 21 例（盘符/UNC/长路径/未知卷/空格与中文/任务段清洗）与 `m4-host.test.ts` 4 例（同卷、跨卷、音频走 audioDir、两任务不共享）。 |
+| 未覆盖 | ① **跨盘真实移动未实测**（本机只有 C: 盘，无法构造第二个卷）；跨盘分支靠"永不跨卷"的设计规避，而不是靠测试证明。② 未在真实安装版/Electron 中复跑（本轮未打包）。③ 被用户**删除**的任务，其 `work/<taskId>` 目录不会自动清理（递归删除需要新的原语，且要先确认租约），留待后续。④ 上次被取消的任务若重试成功，`work/<taskId>` 里可能仍有历史 `.part-FragN.part`/`.ytdl`（本次运行的 `.part` 会被消费，旧分片不一定），属保守保留。 |

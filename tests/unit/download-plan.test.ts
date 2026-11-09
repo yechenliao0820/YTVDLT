@@ -23,7 +23,8 @@ const subtitle = (o: Partial<SubtitleDomain> = {}): SubtitleDomain => ({
 const paths = (o: Partial<PathsDomain> = {}): PathsDomain => ({
   videoDir: 'C:/V', audioDir: 'C:/A', commandDir: 'C:/C', privateMode: false,
   subdirByExtractor: false, subdirByPlaylist: false,
-  outputTemplate: '%(title)s.%(ext)s', tempDir: 'C:/temp', ...o,
+  // D-118: '' is the shipped default; a non-empty value is a user decision.
+  outputTemplate: '%(title)s.%(ext)s', tempDir: '', ...o,
 });
 const network = (o: Partial<NetworkDomain> = {}): NetworkDomain => ({
   rateLimit: null, proxy: null, cookiesFile: null, userAgent: null,
@@ -58,7 +59,7 @@ describe('B1 · default request produces a completely inert plan', () => {
     expect(plan.splitChapters).toBe(false);
     expect(plan.chapterPrefix).toBe('');
     expect(plan.restrictFilenames).toBe(false);
-    expect(plan.explicitTempDir).toBeNull();
+    expect(plan.tempDir).toBeNull();
     expect(plan.ppa).toBeNull();
     expect(plan.debug).toBe(false);
     expect(plan.ipv4Only).toBe(false);
@@ -360,11 +361,18 @@ describe('B1 · network / advanced / path derivation', () => {
     expect(plan.privateMode).toBe(true);
   });
 
-  it('audio mode uses audioDir; post-processing requests a temp dir', () => {
+  it('D-118: the temp dir follows the CONFIG, not the post-processing need', () => {
+    // Audio mode still writes to audioDir…
     const audio = resolveDownloadPlan(req({ format: format({ extractAudio: true }) }));
     expect(audio.outputDir).toBe('C:/A');
-    expect(audio.explicitTempDir).toBe('C:/temp');
-    expect(resolveDownloadPlan(req()).explicitTempDir).toBeNull();
+    // …and a plain single-file download now carries a temp dir too, because
+    // `.part` / `.part-FragN.part` / `.ytdl` exist for every transfer. The old
+    // rule ("only when merging") is what left partials next to the media.
+    const plain = resolveDownloadPlan(req({ paths: paths({ tempDir: 'C:/work/t1' }) }));
+    expect(plain.extractAudio).toBe(false);
+    expect(plain.tempDir).toBe('C:/work/t1');
+    // No configured dir and no resolved one → emit nothing (legacy behaviour).
+    expect(resolveDownloadPlan(req()).tempDir).toBeNull();
   });
 
   it('whitespace in the output template is sanitized but does NOT enable --restrict-filenames (D-110)', () => {

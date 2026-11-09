@@ -41,7 +41,11 @@ const subtitle = (o: Partial<SubtitleDomain> = {}): SubtitleDomain => ({
 const paths = (o: Partial<PathsDomain> = {}): PathsDomain => ({
   videoDir: 'C:/V', audioDir: 'C:/A', commandDir: 'C:/C', privateMode: false,
   subdirByExtractor: false, subdirByPlaylist: false,
-  outputTemplate: '%(title)s.%(ext)s', tempDir: 'C:/temp', ...o,
+  // D-118: the SHIPPED default is ''. The previous fixture used 'C:/temp' and
+  // still expected no `-P temp:` because the plan gated it behind
+  // "needs post-processing"; that gate is gone, so the fixture now mirrors the
+  // real default and the "temp dir present" case has its own test below.
+  outputTemplate: '%(title)s.%(ext)s', tempDir: '', ...o,
 });
 const network = (o: Partial<NetworkDomain> = {}): NetworkDomain => ({
   rateLimit: null, proxy: null, cookiesFile: null, userAgent: null,
@@ -142,11 +146,33 @@ describe('B3 · literal expectations (EXPECTED_DOWNLOAD_ARGV / EXPECTED_MINIMAL)
     expect(DOWNLOAD_ARGV_FROZEN_ORDER.at(-1)).toBe('--');
   });
 
-  it('every documented M3 segment is conditional (never fires by default)', () => {
+  it('every documented M3 segment is conditional; only `-P temp:` may fire by default', () => {
     expect(DOWNLOAD_ARGV_M3_SEGMENTS.length).toBeGreaterThanOrEqual(18);
+    // D-118: `-P temp:` is the ONE exception. Partial files exist for every
+    // download, not only for the ones that need post-processing, so it fires
+    // whenever the caller resolved a temp dir. Everything else stays opt-in.
+    const exceptions = DOWNLOAD_ARGV_M3_SEGMENTS
+      .filter((segment) => segment.firesForDefaultRequest)
+      .map((segment) => segment.id);
+    expect(exceptions).toEqual(['D2′']);
     for (const segment of DOWNLOAD_ARGV_M3_SEGMENTS) {
+      if (segment.id === 'D2′') continue;
       expect(segment.firesForDefaultRequest).toBe(false);
     }
+  });
+
+  it('D-118: a resolved temp dir becomes `-P temp:<dir>` right after --restrict-filenames', () => {
+    const argv = buildDownload(req({ paths: paths({ tempDir: 'C:/work/t1' }) }), CTX);
+    const at = argv.indexOf('-P', argv.indexOf('-o'));
+    expect(argv[at]).toBe('-P');
+    expect(argv[at + 1]).toBe('temp:C:/work/t1');
+    // Never duplicated and never before the output pair.
+    expect(argv.filter((part) => part.startsWith('temp:'))).toHaveLength(1);
+  });
+
+  it('D-118: no temp dir means no `-P temp:` (legacy behaviour preserved)', () => {
+    const argv = buildDownload(req(), CTX);
+    expect(argv.some((part) => part.startsWith('temp:'))).toBe(false);
   });
 });
 
@@ -358,9 +384,16 @@ describe('B3 · M3 conditional segments + argv iron rules', () => {
     expect(spaced[argv_indexOf(spaced, '-o') + 1]).toBe('%(title).200B_[%(id)s].%(ext)s');
   });
 
-  it('-P temp:<dir> appears only for post-processing requests', () => {
+  it('D-118: `-P temp:<dir>` follows the resolved temp dir, not post-processing', () => {
     expect(buildDownload(req(), CTX).some((x) => x.startsWith('temp:'))).toBe(false);
-    const remux = buildDownload(req({ subtitle: subtitle({ embed: true }) }), CTX);
+    // A plain download with a temp dir gets the flag too — the partial files
+    // exist regardless of whether anything is merged afterwards.
+    const plain = buildDownload(req({ paths: paths({ tempDir: 'C:/temp' }) }), CTX);
+    expect(plain).toContain('temp:C:/temp');
+    assertInvariants(plain);
+    const remux = buildDownload(req({
+      paths: paths({ tempDir: 'C:/temp' }), subtitle: subtitle({ embed: true }),
+    }), CTX);
     expect(remux).toContain('temp:C:/temp');
     assertInvariants(remux);
   });

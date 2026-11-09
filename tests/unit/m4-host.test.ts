@@ -80,7 +80,7 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 3000): Promise<void
 const CONFIG_DIR = 'C:/Users/test/AppData/Roaming/YTVDLT/config';
 const SNAPSHOT = `${CONFIG_DIR}/tasks.json`;
 
-async function setup() {
+async function setup(extra: Partial<Parameters<typeof createM4Host>[0]> = {}) {
   const mem = createInMemoryPorts();
   mem.state.files.set(SNAPSHOT, JSON.stringify({
     schemaVersion: 1, savedAt: '2026-11-06T00:00:00.000Z', tasks: [snapshotRecord()],
@@ -99,6 +99,7 @@ async function setup() {
     engineVersion: '2026.10.26',
     clipboard: { async writeText(text: string) { clipboard.push(text); } },
     notificationAdapter: { show: (n) => { shown.push(n.kind); return true; } },
+    ...extra,
   });
   return { mem, counter, clipboard, shown, host };
 }
@@ -240,6 +241,74 @@ describe('M4 host · single enqueue applies the picked format (D-83)', () => {
     expect(host.task.queue.get(ids[0])?.request?.format).toMatchObject({
       extractAudio: true, audioFormat: null,
     });
+    host.dispose();
+  });
+});
+
+/**
+ * D-118: the desktop host is the ONLY place that knows the app data dir and the
+ * expanded user paths, so it is where the per-task temp dir gets resolved.
+ *
+ * The request is the contract the engine reads: `paths.tempDir` must be a
+ * concrete, per-task directory, and it must be on the same volume as the final
+ * media unless the user configured otherwise.
+ */
+describe('M4 host · per-task temp dir (D-118)', () => {
+  const expandTo = (videos: string) => (raw: string) => raw
+    .split('%USERVIDEOS%').join(videos)
+    .split('%USERPROFILE%').join('C:/Users/leo')
+    .split('%LOCALAPPDATA%').join('C:/Users/leo/AppData/Local');
+
+  it('same volume: partials go to the app work dir, one folder per task', async () => {
+    const { host } = await setup({
+      expandPath: expandTo('C:/Users/leo/Videos'),
+      internalWorkDir: 'C:/Users/leo/AppData/Roaming/YTVDLT/work',
+    });
+    const ids = await host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' });
+    const request = host.task.queue.get(ids[0])?.request;
+    expect(request?.paths.tempDir).toBe(`C:/Users/leo/AppData/Roaming/YTVDLT/work/${ids[0]}`);
+    host.dispose();
+  });
+
+  it('different volume: partials stay inside the output dir on that volume', async () => {
+    const { host } = await setup({
+      // `%USERVIDEOS%` is the Videos ROOT; the shipped template appends /YTVDLT.
+      expandPath: expandTo('D:/Media'),
+      internalWorkDir: 'C:/Users/leo/AppData/Roaming/YTVDLT/work',
+    });
+    const ids = await host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' });
+    const request = host.task.queue.get(ids[0])?.request;
+    expect(request?.paths.tempDir).toBe(`D:/Media/YTVDLT/.ytvdlt-incomplete/${ids[0]}`);
+    host.dispose();
+  });
+
+  it('audio tasks resolve against audioDir, not videoDir', async () => {
+    const { host } = await setup({
+      expandPath: (raw: string) => raw
+        .split('%USERVIDEOS%').join('D:/Media')
+        .split('%USERPROFILE%').join('C:/Users/leo'),
+      internalWorkDir: 'C:/Users/leo/AppData/Roaming/YTVDLT/work',
+    });
+    const ids = await host.enqueueSingle({ url: 'https://example.org/a', kind: 'audio' });
+    const request = host.task.queue.get(ids[0])?.request;
+    // audioDir is `%USERVIDEOS%/YTVDLT/Audio` → D:, so the same-volume work dir
+    // is unusable and the per-task folder lands next to the audio output.
+    expect(request?.paths.tempDir).toBe(`D:/Media/YTVDLT/Audio/.ytvdlt-incomplete/${ids[0]}`);
+    host.dispose();
+  });
+
+  it('two tasks never share a temp dir', async () => {
+    const { host } = await setup({
+      expandPath: expandTo('C:/Users/leo/Videos'),
+      internalWorkDir: 'C:/Users/leo/AppData/Roaming/YTVDLT/work',
+    });
+    const first = await host.enqueueSingle({ url: 'https://example.org/1', kind: 'video' });
+    const second = await host.enqueueSingle({ url: 'https://example.org/2', kind: 'video' });
+    const a = host.task.queue.get(first[0])?.request?.paths.tempDir;
+    const b = host.task.queue.get(second[0])?.request?.paths.tempDir;
+    expect(a).not.toBe(b);
+    expect(a).toContain(first[0] ?? '');
+    expect(b).toContain(second[0] ?? '');
     host.dispose();
   });
 });

@@ -237,13 +237,13 @@ export function resolveDownloadPlan(
     '%(playlist)s',
     extractAudio ? paths.audioDir : paths.videoDir,
   );
-  const needsTempDir = downloadSections !== null
-    || splitChapters
-    || mergeToMkv
-    || audioTranscode
-    || extractAudio
-    || embedSubs;
-  const explicitTempDir = needsTempDir && nonEmpty(paths.tempDir) ? paths.tempDir : null;
+  // D-118: a temp dir is a property of EVERY download, not of the ones that
+  // happen to need post-processing. Until 0.2.6 `-P temp:` was emitted only
+  // when a merge/convert step was in play, so a plain single-file download
+  // always dropped its `.part` next to the media — that is the exact litter
+  // this decision removes. `null` still means "emit nothing", which is what a
+  // caller that cannot resolve a safe directory gets.
+  const tempDir = nonEmpty(paths.tempDir) ? paths.tempDir : null;
   const privateMode = paths.privateMode === true;
 
   // ---- network ----
@@ -296,7 +296,7 @@ export function resolveDownloadPlan(
     outputDir,
     outputTemplate,
     restrictFilenames,
-    explicitTempDir,
+    tempDir,
     privateMode,
     rateLimit,
     proxy,

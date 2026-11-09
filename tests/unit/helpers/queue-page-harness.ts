@@ -87,6 +87,12 @@ export function harness(options: {
   lang?: 'zh-CN' | 'en';
   storedLocale?: 'zh-CN' | 'en';
   withLanguageButtons?: boolean;
+  /**
+   * D-116: extra elements the page looks up by id (the delete dialog). The
+   * harness only registers the queue shell by default, so a suite that drives
+   * the modal has to supply its nodes.
+   */
+  elements?: Record<string, FakeNode>;
 } = {}): QueuePageHarness {
   const sandbox: Record<string, any> = {};
   new Function('window', sources.messages)(sandbox);
@@ -99,6 +105,7 @@ export function harness(options: {
   const root = new FakeNode('main');
   const cards = new FakeNode('div');
   const registry: Record<string, FakeNode> = { 'queue-root': root, 'queue-cards': cards };
+  Object.assign(registry, options.elements ?? {});
   // A live list mutated in place: `bridge.invoke` reads it on every poll.
   const replies: { items: readonly unknown[] } = { items: options.items ?? [] };
   const storage = new Map<string, string>();
@@ -202,6 +209,8 @@ export function cardTask(overrides: Record<string, unknown> = {}): Record<string
     duration: 100, percent: null, speed: 0, eta: null, downloadedBytes: null,
     totalBytes: null, thumbPath: null, artifacts: 0, errorCode: null,
     failureKind: null,
+    // D-115: `null` = no reliable phase, which is what an old snapshot yields.
+    stage: null,
     ...overrides,
   };
 }
@@ -216,6 +225,9 @@ export function dto(overrides: Record<string, unknown> = {}): Record<string, unk
     totalBytes: task['totalBytes'], thumbPath: task['thumbPath'],
     artifactCount: task['artifacts'], errorCode: task['errorCode'],
     failureKind: task['failureKind'],
+    // D-115: the wire field the queue reads; omitted only when the caller did
+    // not set one, so the "no information" path stays testable.
+    ...(task['stage'] === null ? {} : { stage: task['stage'] }),
   };
 }
 

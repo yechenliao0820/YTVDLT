@@ -156,6 +156,13 @@ export function createInMemoryPorts(overrides: Partial<InMemoryState> = {}): InM
       state.files.delete(path);
       state.bytes.delete(path);
     },
+    // D-118: mirror the real primitive — an empty-dir-only remove.
+    async rmdir(path: string): Promise<void> {
+      const prefix = path.replace(/[\\/]+$/, '') + '/';
+      const occupied = [...state.files.keys(), ...state.bytes.keys()]
+        .some((key) => key.startsWith(prefix));
+      if (occupied) throw new Error(`ENOTEMPTY: ${path}`);
+    },
     async readdir(dir: string): Promise<string[]> {
       const prefix = dir.replace(/[\\/]+$/, '') + '/';
       const names = new Set<string>();

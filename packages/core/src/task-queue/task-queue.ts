@@ -10,9 +10,10 @@
  * write history.
  */
 import type {
-  DownloadEngine, EngineEvent, TaskRecord, TaskEvent, TaskState, AppError,
+  DownloadEngine, EngineEvent, EngineStage, TaskRecord, TaskEvent, TaskState, AppError,
   CorePorts, HistoryEntry, MediaInfo, ExpectedArtifactManifest, TaskSnapshot,
 } from '@ytvdlt/shared';
+import { isForwardStage } from '@ytvdlt/shared';
 import type { ICancelHandle, IArtifactVerifier, IHistoryStore, ITaskQueue, ITaskStore } from '../ports.js';
 import { detectPostprocessed } from '../download-flags.js';
 import { applyCopySuffix, nextCopySuffix } from '../path-resolver/copy-suffix.js';
@@ -252,6 +253,9 @@ export class TaskQueue implements ITaskQueue {
       // copy, not for an error.
       const effectiveRequest = await this.withCopySuffix(record, request);
       this.transition(record, 'Running');
+      // D-115: every run starts by moving bytes. `merging` / `postprocess` can
+      // only arrive later, from a marker the engine actually printed.
+      record.lastStage = 'downloading';
 
       const outcome = await this.executeDownload(record, effectiveRequest);
       if (outcome.kind === 'canceled') {
@@ -266,6 +270,14 @@ export class TaskQueue implements ITaskQueue {
 
       // --- 3) verify BEFORE completion (C12) ---
       record.artifacts = [...outcome.artifacts];
+      // D-115: the engine exited 0 and every stream is on disk, but the record
+      // is NOT `Completed` yet — verification still runs. Without this the card
+      // sat at "100.0% · 下载中" for the whole verification, which is the exact
+      // "looks stuck" complaint. The stage is set before the await so the very
+      // next poll already reports it; a failed verification turns the task into
+      // `Error` and the stage stops mattering.
+      record.lastStage = 'verifying';
+      this.emit({ type: 'stage', taskId: record.id, stage: 'verifying' });
       const report = await this.deps.verifier.verify({
         taskId: record.id,
         artifacts: outcome.artifacts,
@@ -393,6 +405,15 @@ export class TaskQueue implements ITaskQueue {
           }
           return;
         }
+        if (event.type === 'stage') {
+          // D-115: monotonic. A second stream restarting at 0% is still
+          // `downloading`; a marker that arrives late must not un-set `merging`
+          // (never mind `verifying`, which is set below by the queue itself).
+          if (event.stage !== record.lastStage && isForwardStage(record.lastStage ?? null, event.stage)) {
+            record.lastStage = event.stage as EngineStage;
+          }
+          return;
+        }
         if (event.type === 'completed') {
           settle({ kind: 'completed', artifacts: event.artifacts.map((a) => a.path) });
           return;
@@ -452,6 +473,9 @@ export class TaskQueue implements ITaskQueue {
     record.lastTotalBytes = null;
     record.lastSpeedBps = null;
     record.lastEtaSec = null;
+    // D-115: a retry starts at the transfer again; keeping "verifying" would
+    // make the fresh attempt claim it is already finishing.
+    record.lastStage = null;
     this.dropFromPending(taskId);
     this.pending.push(record.id);
     this.pump();
@@ -487,6 +511,9 @@ export class TaskQueue implements ITaskQueue {
         state: raw.state === 'Running' || raw.state === 'FetchingInfo' ? 'Canceled' : raw.state,
         artifacts: [...(raw.artifacts ?? [])],
         lastPercent: raw.lastPercent ?? null,
+        // D-115: older snapshots have no stage; `null` keeps the card on its
+        // pre-0.2.6 presentation instead of inventing a phase.
+        lastStage: raw.lastStage ?? null,
       };
       this.records.set(record.id, record);
       restored += 1;

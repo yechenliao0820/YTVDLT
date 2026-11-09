@@ -19,6 +19,13 @@ export interface FileSystemPort {
   mkdir(dir: string): Promise<void>;
   rename(from: string, to: string): Promise<void>;
   unlink(path: string): Promise<void>;
+  /**
+   * D-118: remove an EMPTY directory. Deliberately not recursive — a non-empty
+   * directory must fail here. Used only to retire a per-task temp folder after
+   * yt-dlp moved every finished file out of it; any leftover byte keeps the
+   * folder alive, because a leftover is either resumable data or evidence.
+   */
+  rmdir(path: string): Promise<void>;
   readdir(dir: string): Promise<string[]>;
   /**
    * M5 append-only (D-62): raw bytes, used by the engine self-updater to

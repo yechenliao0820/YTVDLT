@@ -89,6 +89,16 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     process.cwd(),
   );
   const appVersion = app.getVersion();
+  /**
+   * D-117: the real Windows "Videos" library — `app.getPath('videos')` follows
+   * the known-folder redirect (OneDrive, a moved library, a non-ASCII profile)
+   * where `%USERPROFILE%\Videos` would silently point at the wrong place. It is
+   * handed to the `%VAR%` expander as an extra key rather than written into
+   * `process.env`: the latter would leak into every child process and could be
+   * shadowed by a real variable of the same name.
+   */
+  const videosDir = app.getPath('videos');
+  const pathEnv: Record<string, string | undefined> = { ...process.env, USERVIDEOS: videosDir };
 
   // D-88: shared by the private-mode cleanup hooks and the queue intake gate.
   // It is assigned inside createHost(), which bootstrap() awaits before the
@@ -254,7 +264,13 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       thumbnails,
       // 0.2.1 (D-98): the output root is user-selectable. Expansion happens here
       // (main owns `process.env`); the channel layer only persists/validates.
-      expandPath: (raw: string) => expandEnvVars(raw, process.env),
+      // D-117: `%USERVIDEOS%` is NOT a Windows variable — `app.getPath('videos')`
+      // is the only API that follows a OneDrive / folder redirect, so it is
+      // injected into the expansion map instead of being read from the process.
+      expandPath: (raw: string) => expandEnvVars(raw, pathEnv),
+      // D-117: manifests and child-process temp files live under `<dataDir>/work`,
+      // never in the folder the user browses for their videos.
+      internalWorkDir: join(dataDir.dataDir, 'work'),
       pathPicker: createPathPicker(),
       clipboard: { writeText: async (text: string) => { clipboard.writeText(text); } },
       systemAppearance: {

@@ -68,7 +68,15 @@ export interface DownloadPlan {
   readonly outputDir: string;
   readonly outputTemplate: string;
   readonly restrictFilenames: boolean;
-  readonly explicitTempDir: string | null;
+  /**
+   * D-118: where yt-dlp parks `.part` / `.part-FragN.part` / `.ytdl`.
+   *
+   * Renamed from `explicitTempDir` because the meaning changed: it is no longer
+   * "the dir the user typed", it is the dir the app RESOLVED (user config wins,
+   * otherwise a same-volume work dir, otherwise a subfolder of the output dir).
+   * `null` means "emit no `-P temp:`" — the legacy behaviour.
+   */
+  readonly tempDir: string | null;
   readonly privateMode: boolean;
 
   // ---- network (M2 positions 32-41 + M3 conditional segments) ----

@@ -46,7 +46,12 @@ export interface M3Segment {
   readonly anchor: string;
   readonly options: readonly string[];
   readonly trigger: string;
-  readonly firesForDefaultRequest: false;
+  /**
+   * Documentation only (never read by the argv builder). `true` marks a segment
+   * that a plain single-video request now emits — D-118 made `-P temp:` one of
+   * them, because partial files are not a post-processing detail.
+   */
+  readonly firesForDefaultRequest: boolean;
 }
 
 /** Describes §4.2 insertion points; NEVER participates in argv construction. */
@@ -61,7 +66,7 @@ export const DOWNLOAD_ARGV_M3_SEGMENTS: readonly M3Segment[] = [
   { id: 'C4′', anchor: 'after C2′', options: ['--embed-chapters', '--write-thumbnail', '--convert-thumbnails'], trigger: 'derived metadata flags', firesForDefaultRequest: false },
   { id: 'D0′', anchor: '-P / -o values', options: ['-P', '-o'], trigger: 'plan.outputDir / plan.outputTemplate', firesForDefaultRequest: false },
   { id: 'D1′', anchor: 'after -o', options: ['--restrict-filenames'], trigger: 'plan.restrictFilenames', firesForDefaultRequest: false },
-  { id: 'D2′', anchor: 'after D1′', options: ['-P'], trigger: 'plan.explicitTempDir!==null', firesForDefaultRequest: false },
+  { id: 'D2′', anchor: 'after D1′', options: ['-P'], trigger: 'plan.tempDir!==null (D-118: every resolved download)', firesForDefaultRequest: true },
   { id: 'E1′', anchor: 'before --concurrent-fragments', options: ['-4'], trigger: 'plan.ipv4Only', firesForDefaultRequest: false },
   { id: 'E2′', anchor: 'after E1′', options: ['--downloader', '--downloader-args'], trigger: 'plan.aria2cPath!==null', firesForDefaultRequest: false },
   { id: 'E3′', anchor: '--concurrent-fragments condition', options: ['--concurrent-fragments'], trigger: 'plan.concurrentFragments!==null', firesForDefaultRequest: false },
@@ -133,7 +138,7 @@ export function buildDownload(req: DownloadRequest, ctx: DownloadContext): strin
   argv.push('-P', plan.outputDir, '-o', plan.outputTemplate);
   // D1′ / D2′ · conditional only (never constant — M-2 ruling)
   if (plan.restrictFilenames) argv.push('--restrict-filenames');
-  if (plan.explicitTempDir !== null) argv.push('-P', `temp:${plan.explicitTempDir}`);
+  if (plan.tempDir !== null) argv.push('-P', `temp:${plan.tempDir}`);
 
   // ---- E · network (M2 frozen positions 32-41) ----
   if (plan.rateLimit !== null) argv.push('-r', plan.rateLimit);

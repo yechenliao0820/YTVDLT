@@ -25,14 +25,25 @@ export interface ConfigFile {
 /**
  * 0.2.1 (D-98): the two download roots, in their STORED form.
  *
- * `%USERPROFILE%` is expanded at request time (`withExpandedPaths`); the
- * literal token is what the settings page shows before a user picks a folder,
- * and what "恢复默认" writes back. A user-picked folder is stored as an
- * absolute path instead — `paths.videoDir` accepts both shapes.
+ * `%USERPROFILE%` / `%USERVIDEOS%` are expanded at request time
+ * (`withExpandedPaths`); the literal token is what the settings page shows
+ * before a user picks a folder, and what "恢复默认" writes back. A user-picked
+ * folder is stored as an absolute path instead — `paths.videoDir` accepts both
+ * shapes.
+ *
+ * D-117: the default root moved from `Downloads\YTVDLT` to the real Windows
+ * "Videos" folder (`app.getPath('videos')`, which follows a OneDrive / folder
+ * redirection), with a `YTVDLT` subfolder of its own. `%USERVIDEOS%` is
+ * resolved by the MAIN process only — it is not a Windows environment variable,
+ * so `expandEnvVars` gets it through an injected map, never from `process.env`.
+ *
+ * Stored values are NOT migrated: an existing config keeps whatever it has,
+ * because "the old default" and "the folder this user picked on purpose" are
+ * indistinguishable strings and guessing wrong moves a library.
  */
 export const DEFAULT_PATH_TOKENS = {
-  videoDir: '%USERPROFILE%/Downloads/YTVDLT',
-  audioDir: '%USERPROFILE%/Downloads/YTVDLT/Audio',
+  videoDir: '%USERVIDEOS%/YTVDLT',
+  audioDir: '%USERVIDEOS%/YTVDLT/Audio',
 } as const;
 
 /** Baseline defaults (HANDOFF §11 default values table, M1 subset only). */

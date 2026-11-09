@@ -24,6 +24,8 @@ export {
 export * from './progress-template.js';
 export * from './progress-parser.js';
 export * from './artifact-manifest.js';
+// D-115 (append-only): post-process markers yt-dlp prints on stderr.
+export * from './postprocess-parser.js';
 // M3 additions (append-only): compliance whitelist + forbidden-option guard.
 export {
   ALLOWED_DOWNLOAD_OPTIONS, M3_FORBIDDEN_OPTIONS, assertNoForbiddenOptions,

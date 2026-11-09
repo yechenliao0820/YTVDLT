@@ -7,15 +7,15 @@
  * `webContents.executeJavaScript('window.YTVDLTAbout.open()')` — no new IPC
  * channel, no page reload.
  *
- * The real version arrives as `?v=<app.getVersion()>` from main.ts; the
- * hard-coded value is only the offline/file:// preview fallback. All copy goes
- * through the shipped two-locale catalogue, so switching language reloads the
- * page and rebuilds this dialog in the active language.
+ * D-114: the version now comes from `YTVDLTAppVersion` (URL hint + authoritative
+ * `APP_INFO`), never from a literal in this file. The old `FALLBACK_VERSION`
+ * was `0.2.2` and survived four releases: any navigation that dropped `?v=`
+ * made the footer, Settings and this dialog confidently display an obsolete
+ * build. Unknown now renders as `v—`, which is honest and visibly wrong.
  */
 (function (global) {
   'use strict';
   var doc = global.document;
-  var FALLBACK_VERSION = '0.2.2';
 
   function param(name) {
     var match = new RegExp('[?&]' + name + '=([^&]*)').exec(global.location ? global.location.search : '');
@@ -26,9 +26,27 @@
     return global.YTVDLT && global.YTVDLT.i18n ? global.YTVDLT.i18n.t(key) : key;
   }
 
-  var version = param('v') || FALLBACK_VERSION;
-  var label = 'v' + version;
+  /** Single source of truth (D-114); the URL parameter is only a fallback hint. */
+  function versionSource() {
+    var registry = global.YTVDLTAppVersion;
+    return registry && typeof registry.version === 'function' ? registry : null;
+  }
+
+  function version() {
+    var registry = versionSource();
+    if (registry !== null) return registry.version();
+    return param('v');
+  }
+
+  function label() {
+    var registry = versionSource();
+    if (registry !== null) return registry.label();
+    var value = param('v');
+    return 'v' + (value === '' ? '—' : value);
+  }
+
   var backdrop = null;
+  var versionValue = null;
 
   function setText(id, text) {
     var node = doc.getElementById(id);
@@ -37,9 +55,10 @@
 
   /** Publish the version wherever the current page shows it. */
   function paintVersion() {
-    setText('queue-version', label);
-    setText('settings-meta', label);
-    setText('about-version', label);
+    setText('queue-version', label());
+    setText('settings-meta', label());
+    setText('about-version', label());
+    if (versionValue !== null) versionValue.textContent = label();
   }
 
   function el(tag, style, text) {
@@ -97,8 +116,9 @@
       var dd = el('dd', 'margin:0;font-weight:700;', value);
       grid.appendChild(dt);
       grid.appendChild(dd);
+      return dd;
     };
-    row(t('about.version'), label);
+    versionValue = row(t('about.version'), label());
     row(t('about.author'), t('about.author.name'));
     box.appendChild(grid);
 
@@ -134,7 +154,20 @@
   function open() { setHidden(false); }
   function close() { setHidden(true); }
 
-  global.YTVDLTAbout = { open: open, close: close, version: version, label: label };
+  global.YTVDLTAbout = {
+    open: open,
+    close: close,
+    // D-114: live getters — a value captured at load time would freeze the
+    // pre-`APP_INFO` hint into the About box.
+    get version() { return version(); },
+    get label() { return label(); },
+  };
+
+  // The authoritative answer can arrive after this file ran; repaint both the
+  // page badges and an already-built dialog (no reload, no reopen).
+  if (global.YTVDLTAppVersion && typeof global.YTVDLTAppVersion.onChange === 'function') {
+    global.YTVDLTAppVersion.onChange(paintVersion);
+  }
 
   doc.addEventListener('keydown', function (event) {
     if (event && event.key === 'Escape') close();

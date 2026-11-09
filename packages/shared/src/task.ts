@@ -2,7 +2,7 @@
 import type { AppError } from './errors.js';
 import type { MediaInfo } from './media.js';
 import type { DownloadRequest } from './request.js';
-import type { EngineEvent } from './events.js';
+import type { EngineEvent, EngineStage } from './events.js';
 
 /** 7 states, aligned with Seal `Task.kt`. `Completed` is terminal. */
 export type TaskState =
@@ -42,6 +42,13 @@ export interface TaskRecord {
   lastTotalBytes?: number | null;
   lastSpeedBps?: number | null;
   lastEtaSec?: number | null;
+  /**
+   * D-115: the furthest real stage this run has reached, so a card that is
+   * still `Running` can say "merging / finalizing" instead of pretending the
+   * transfer is still going. Optional: an older `tasks.json` has no value and
+   * the UI then keeps the previous behaviour.
+   */
+  lastStage?: EngineStage | null;
   error: AppError | null;
   /** When true, completion does NOT write history. */
   privateMode: boolean;

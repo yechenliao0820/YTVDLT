@@ -95,6 +95,11 @@
       'queue.card.measuring': '正在获取下载进度',
       'queue.card.downloaded': '已下载 {done}',
       'queue.card.noProgress': '无进度信息',
+      // D-115: 下载结束后的真实阶段。`merging` 只在 yt-dlp 打印 [Merger] 时出现；
+      // 其余（转码、提取音频、写元数据、产物校验）统一说「整理中」，不猜测。
+      'queue.stage.merging': '合并视频中',
+      'queue.stage.finalizing': '整理中',
+      'queue.stage.working': '正在整理下载产物，进度未知',
       // D-109: 失败简报（下载列表卡片内的一句话原因）。键名里的 kind 是主进程
       // 发来的稳定分类（core/src/failure-summary），不是渲染层猜出来的。
       // 无法可靠判断时只用 unknown 一条，绝不编造具体原因。
@@ -312,15 +317,22 @@
       'queue.context.openFolder': '打开文件夹',
       'queue.context.detail': '查看详情',
       'queue.delete.title': '删除任务',
-      'queue.delete.message': '请选择删除方式。此操作只影响 YTVDLT 中的记录和已下载的产物文件。',
+      'queue.delete.message': '删除任务记录。如需同时清理本地文件，请勾选下方选项。',
       'queue.delete.onlyHistory': '仅删除历史记录',
       'queue.delete.withFiles': '同时删除本地文件',
       'queue.delete.cancel': '取消',
-      'queue.delete.filesHint': '本地文件会移入 Windows 回收站，可随时还原；不会永久删除。',
+      'queue.delete.filesHint': '默认只删除记录，本地文件保留；勾选上方选项才会把文件移入回收站。',
+      // D-116: 勾选后才出现的风险提示 + 随勾选变红的确认按钮。
+      // 「可能涉及多个产物」写进提示里：一个任务常常同时产出视频、音频或字幕。
+      'queue.delete.filesRisk': '该任务的本地文件（视频、音频、字幕等）将移入回收站。',
+      'queue.delete.confirm': '删除',
+      'queue.delete.confirmFiles': '删除并移入回收站',
       'queue.delete.count': '共 {n} 个任务',
       'queue.clear.title': '清空历史记录',
       'queue.clear.message': '将清空全部已完成、已取消和失败的任务记录，本地文件保留。',
       'queue.clear.confirm': '确认清空',
+      'queue.clear.confirmFiles': '清空并移入回收站',
+      'queue.clear.filesHint': '默认只清空记录，本地文件保留；勾选上面的复选框才会把产物移入回收站。',
       'queue.clear.empty': '没有可清空的历史记录',
       'queue.foot.hint': 'YTVDLT · 粘贴链接即可开始下载 · F11 也可切换全屏',
       'queue.status.removed': '已删除 {n} 个任务',
@@ -422,6 +434,10 @@
       'queue.card.measuring': 'Reading download progress',
       'queue.card.downloaded': '{done} downloaded',
       'queue.card.noProgress': 'No progress info',
+      // D-115: post-transfer stages. `merging` only when yt-dlp said so.
+      'queue.stage.merging': 'Merging video',
+      'queue.stage.finalizing': 'Finalizing',
+      'queue.stage.working': 'Finishing the downloaded files, progress unknown',
       // D-109: failure brief on the card. `kind` is the stable bucket from the
       // main process; `unknown` is the honest fallback when no cause is known.
       'queue.failure.network': 'Network connection failed',
@@ -636,15 +652,21 @@
       'queue.context.openFolder': 'Open folder',
       'queue.context.detail': 'View details',
       'queue.delete.title': 'Delete task',
-      'queue.delete.message': 'Choose what to delete. This only affects YTVDLT records and downloaded files.',
+      'queue.delete.message': 'This removes the task record. Tick the option below to remove the files as well.',
       'queue.delete.onlyHistory': 'Delete history only',
       'queue.delete.withFiles': 'Also delete local files',
       'queue.delete.cancel': 'Cancel',
-      'queue.delete.filesHint': 'Local files go to the Windows Recycle Bin and can be restored; nothing is permanently deleted.',
+      'queue.delete.filesHint': 'Records only by default; files move to the Recycle Bin only when the box above is ticked.',
+      // D-116: shown only after the box is ticked; the confirm button turns red.
+      'queue.delete.filesRisk': 'This task’s local files (video, audio, subtitles…) will move to the Recycle Bin.',
+      'queue.delete.confirm': 'Delete',
+      'queue.delete.confirmFiles': 'Delete and recycle files',
       'queue.delete.count': '{n} tasks',
       'queue.clear.title': 'Clear history',
       'queue.clear.message': 'This removes every completed, canceled and failed task record. Downloaded files are kept.',
       'queue.clear.confirm': 'Clear history',
+      'queue.clear.confirmFiles': 'Clear and recycle files',
+      'queue.clear.filesHint': 'Records only by default; files move to the Recycle Bin only when the box above is ticked.',
       'queue.clear.empty': 'No history to clear',
       'queue.foot.hint': 'YTVDLT · Paste a link to start · F11 also toggles full screen',
       'queue.status.removed': 'Removed {n} tasks',

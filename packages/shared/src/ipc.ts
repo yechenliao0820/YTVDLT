@@ -51,6 +51,12 @@ export const IPC_CHANNELS = {
   // asks, the BrowserWindow owns the state; never use the HTML Fullscreen API
   // and setFullScreen() side by side again.
   WINDOW_FULLSCREEN: 'ytvdlt:window:fullscreen',
+  // D-114 (append-only): the one reliable answer to "which version is this?".
+  // The `?v=` query parameter is a first-paint optimisation, NOT the source of
+  // truth: every renderer-side navigation that forgets to copy it used to fall
+  // back to a hard-coded literal. This channel reads `app.getVersion()` inside
+  // the main process, so it cannot rot and cannot be spoofed by the page.
+  APP_INFO: 'ytvdlt:app:info',
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

@@ -147,6 +147,23 @@ export interface M5ChannelDeps {
   readonly expandPath?: (raw: string) => string;
   /** D-98: native folder picker + reveal; absent = the path rows stay read-only. */
   readonly pathPicker?: PathPickerPort;
+  /**
+   * D-114: the running build's identity, straight from the main process.
+   *
+   * Absent means "this build cannot state its own version" — the renderer then
+   * shows a placeholder instead of a plausible-looking old number. Never fill
+   * this from a package.json literal: that is exactly how 0.2.2 survived four
+   * releases in the footer.
+   */
+  readonly appInfo?: AppInfoDto;
+}
+
+/** D-114: what `APP_INFO` answers. `version` is `''` when it is unknown. */
+export interface AppInfoDto {
+  readonly version: string;
+  readonly name: string;
+  /** True when the process runs from a packaged asar (not `electron .`). */
+  readonly packaged: boolean;
 }
 
 export interface TaskListItemDto {
@@ -170,6 +187,12 @@ export interface TaskListItemDto {
   readonly totalBytes: number | null;
   readonly speedBps: number | null;
   readonly etaSec: number | null;
+  /**
+   * D-115: how far the run has actually got. `null` / absent means "no reliable
+   * information" — the renderer then keeps the previous behaviour rather than
+   * assuming a merge. Values: `fetching|downloading|merging|postprocess|verifying`.
+   */
+  readonly stage?: string | null;
   /** 0.2.1 (D-96): absolute local cover path, or null for the letter badge. */
   readonly thumbPath: string | null;
 }
@@ -236,6 +259,8 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   // D-103: the renderer may read occupancy, ask for a manual prune, or change
   // two policy values. It can NEVER pass a file path to this channel.
   [IPC_CHANNELS.THUMBNAIL_CACHE]: ['action', 'enabled', 'maxBytes'],
+  // D-114: read-only identity; no input at all.
+  [IPC_CHANNELS.APP_INFO]: [],
 };
 
 /** D-103: the only cache actions the renderer may trigger. */
@@ -289,6 +314,9 @@ export function toTaskListItem(record: TaskRecord, thumbnailPath: string | null 
     totalBytes: record.lastTotalBytes ?? null,
     speedBps: record.lastSpeedBps ?? null,
     etaSec: record.lastEtaSec ?? null,
+    // D-115: only the queue knows how far the run got; the renderer must not
+    // infer a phase from `percent === 100` (two streams each reach 100%).
+    stage: record.lastStage ?? null,
     thumbPath: thumbnailPath,
   };
 }
@@ -652,11 +680,23 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     return { ok: true, action, available: true, policy: await cache.setMaxBytes(maxBytes) };
   });
 
+  // D-114: read-only build identity. Deliberately NOT derived from the page
+  // URL: the value must survive a navigation that drops query parameters, and
+  // it must never be a literal shipped inside the renderer bundle.
+  handlers.set(IPC_CHANNELS.APP_INFO, async (payload) => {
+    validateM5Payload(IPC_CHANNELS.APP_INFO, payload);
+    const info = deps.appInfo;
+    return {
+      version: typeof info?.version === 'string' ? info.version : '',
+      name: typeof info?.name === 'string' && info.name !== '' ? info.name : 'YTVDLT',
+      packaged: info?.packaged === true,
+    };
+  });
+
   handlers.set(IPC_CHANNELS.SETTINGS_GET, async (payload) => {
     validateM5Payload(IPC_CHANNELS.SETTINGS_GET, payload);
     return readAppearance(deps);
   });
-
   handlers.set(IPC_CHANNELS.SETTINGS_SET, async (payload) => {
     const record = validateM5Payload(IPC_CHANNELS.SETTINGS_SET, payload);
     const patch: Record<string, unknown> = {};
@@ -727,4 +767,5 @@ export const M5_CHANNELS: readonly string[] = [
   IPC_CHANNELS.SETTINGS_SET,
   IPC_CHANNELS.DOWNLOAD_START,
   IPC_CHANNELS.THUMBNAIL_CACHE,
+  IPC_CHANNELS.APP_INFO,
 ];

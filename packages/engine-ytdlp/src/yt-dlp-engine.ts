@@ -20,6 +20,7 @@ import { build } from './argv-builder.js';
 import { buildDownload } from './argv-builder-download.js';
 import { toMediaInfo, toPlaylistInfo } from './json-mapper.js';
 import { parseProgressChunk } from './progress-parser.js';
+import { createLineSplitter, detectStageFromLine, type DetectedStage } from './postprocess-parser.js';
 import {
   artifactManifestPath, resolveArtifactManifestDir, parseArtifactManifestDetailed,
 } from './artifact-manifest.js';
@@ -80,9 +81,17 @@ export class YtDlpEngine implements DownloadEngine {
    * C:\Program Files\YTVDLT\tmpXXXX.tmp` — even though the download folder is
    * perfectly writable. No administrator rights are required or desired.
    *
-   * Pin BOTH the child's CWD and the whole TEMP family to an absolute,
-   * user-writable directory. Downloads use their own output dir (already
-   * mkdir'ed by runDownload); probes fall back to the inherited %TEMP%.
+   * Pin the child's CWD to an absolute, user-writable directory.
+   *
+   * D-118: the TEMP family is deliberately NOT overridden any more. Measured
+   * with the bundled yt-dlp 2026.10.26: every start unpacks the ~29 MB
+   * PyInstaller runtime into `%TEMP%\_MEI<pid>` and removes it on a clean exit.
+   * While TEMP was pinned to the download/work folder, every cancelled or
+   * crashed download left those 29 MB behind — and before D-117, next to the
+   * user's videos (the `_MEI*` folders in the bug report). Leaving TEMP at the
+   * inherited system value keeps that unpack in the Windows temp directory,
+   * where it belongs and where the OS cleans it. `-P temp:` still decides where
+   * `.part` / `.ytdl` go, so partial isolation is unaffected.
    */
   private writableWorkDir(preferred?: string): string {
     const candidate = typeof preferred === 'string' ? preferred.trim() : '';
@@ -93,7 +102,7 @@ export class YtDlpEngine implements DownloadEngine {
       : '';
   }
 
-  /** Shared spawn base: PATH for the bundled tools + a writable CWD/TEMP. */
+  /** Shared spawn base: PATH for the bundled tools + a writable CWD. */
   private spawnBase(pathDirs: readonly string[], preferredDir?: string): {
     shell: false;
     windowsHide: true;
@@ -104,7 +113,12 @@ export class YtDlpEngine implements DownloadEngine {
     const env: Record<string, string> = {
       PATH: `${pathDirs.join(';')};${this.deps.ports.env.get('PATH') ?? ''}`,
     };
-    if (dir !== '') {
+    // Only step in when the inherited TEMP is unusable — otherwise the system
+    // temp dir is the right home for a child process's scratch files.
+    const inheritedTemp = this.deps.ports.env.get('TEMP') ?? this.deps.ports.env.get('TMP') ?? '';
+    const usableTemp = typeof inheritedTemp === 'string'
+      && inheritedTemp.trim() !== '' && isAbsolutePath(inheritedTemp.trim());
+    if (!usableTemp && dir !== '') {
       env['TEMP'] = dir;
       env['TMP'] = dir;
       env['TMPDIR'] = dir;
@@ -213,9 +227,15 @@ export class YtDlpEngine implements DownloadEngine {
   ): Promise<void> {
     const taskId = req.taskId;
     // D-68: never let an empty tempDir turn the manifest into a drive-root path.
-    const manifestDir = resolveArtifactManifestDir(
-      req.paths.tempDir, req.paths.videoDir, req.paths.audioDir, req.format.extractAudio,
-    );
+    const configuredTempDir = typeof req.paths.tempDir === 'string' ? req.paths.tempDir.trim() : '';
+    // D-118: `paths.tempDir` is now resolved BY THE CALLER and is already
+    // per-task (`resolveDownloadTempDir()` guarantees it for every branch:
+    // user config, app work dir, or `.ytvdlt-incomplete/<taskId>`). Adding a
+    // second `<taskId>` here would nest the manifest one level too deep and
+    // desynchronise it from where `-P temp:` actually points.
+    const manifestDir = configuredTempDir === ''
+      ? resolveArtifactManifestDir(undefined, req.paths.videoDir, req.paths.audioDir, req.format.extractAudio)
+      : configuredTempDir.replace(/[\\/]+$/, '');
     const manifestPath = artifactManifestPath(manifestDir, taskId);
 
     // `--print-to-file` APPENDS; a stale manifest would leak old paths.
@@ -252,12 +272,31 @@ export class YtDlpEngine implements DownloadEngine {
     // D-89: the output directory is absolute and was mkdir'ed above. Using it
     // as the child's CWD/TEMP keeps every yt-dlp temp file out of the read-only
     // install directory, without changing a single download argument.
+    //
+    // D-117: when the request carries a private work dir (the app's
+    // `<dataDir>/work`), that wins — the finished-media folder must not collect
+    // `tmp*.tmp` / manifest files the user never asked for. The output root
+    // stays the fallback so a request built by an older caller still works.
     const outputRoot = req.format.extractAudio ? req.paths.audioDir : req.paths.videoDir;
-    const spawnOptions = this.spawnBase(pathDirs, typeof outputRoot === 'string' ? outputRoot : '');
+    // Same per-task folder as the manifest, so CWD / TEMP / manifest of one
+    // download never overlap with another's.
+    const workRoot = configuredTempDir !== '' ? manifestDir : outputRoot;
+    const spawnOptions = this.spawnBase(pathDirs, typeof workRoot === 'string' ? workRoot : '');
     assertSafeSpawnOptions(spawnOptions);
 
     let stderrAll = '';
     let pending = '';
+    // D-115: yt-dlp announces merge / post-process on stderr, one message per
+    // line. A chunk can split a line, so the splitter keeps the tail; each
+    // marker is emitted at most once per task and only forwards.
+    const stderrLines = createLineSplitter();
+    let emittedStage: DetectedStage | null = null;
+    const emitStage = (line: string): void => {
+      const stage = detectStageFromLine(line);
+      if (stage === null || stage === emittedStage) return;
+      emittedStage = stage;
+      onEvent({ type: 'stage', taskId, stage });
+    };
     const handle = this.deps.ports.process.spawnStreaming(
       this.deps.enginePath,
       argv,
@@ -265,6 +304,7 @@ export class YtDlpEngine implements DownloadEngine {
       (chunk) => {
         if (chunk.stream === 'stderr') {
           stderrAll += chunk.text;
+          for (const line of stderrLines.push(chunk.text)) emitStage(line);
           return;
         }
         pending += chunk.text;
@@ -297,6 +337,8 @@ export class YtDlpEngine implements DownloadEngine {
     register(handle.pid, () => handle.kill());
 
     const result = await handle.done;
+    // A final marker without a trailing newline must still reach the queue.
+    for (const line of stderrLines.flush()) emitStage(line);
 
     if (isCanceled()) {
       // yt-dlp keeps the `.part` file; we never touch it here.
@@ -344,6 +386,26 @@ export class YtDlpEngine implements DownloadEngine {
       artifacts.push({ taskId, path, kind: kindOf(path), sizeBytes });
     }
     onEvent({ type: 'completed', taskId, artifacts });
+
+    // D-117: the manifest has been read, parsed and handed over (the queue now
+    // owns absolute artifact paths), so it is safe to remove. Only here — an
+    // empty/failed parse returns above and deliberately KEEPS the file for
+    // diagnosis. Failure to unlink is ignored: a leftover file must never fail
+    // a download that already succeeded.
+    await this.deps.ports.fs.unlink(manifestPath).catch(() => undefined);
+
+    // D-118: yt-dlp moved every finished file out of the temp dir, and the
+    // manifest is gone too, so an EMPTY directory is pure residue. `rmdir` is
+    // non-recursive: if anything is left (a stray `.part`, a `.ytdl`, a
+    // subdirectory) the call fails and the folder stays — leftovers are either
+    // resumable data or evidence, never ours to destroy for tidiness.
+    if (configuredTempDir !== '') {
+      await this.deps.ports.fs.readdir(configuredTempDir)
+        .then((entries) => (entries.length === 0
+          ? this.deps.ports.fs.rmdir(configuredTempDir).catch(() => undefined)
+          : undefined))
+        .catch(() => undefined);
+    }
   }
 
   async probePlaylist(url: string, opts: ProbeOptions): Promise<PlaylistInfo> {

@@ -124,6 +124,13 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     ...(options.expandPath === undefined ? {} : { expandPath: options.expandPath }),
     ...(options.pathPicker === undefined ? {} : { pathPicker: options.pathPicker }),
     ...(options.trashFiles === undefined ? {} : { trashFiles: options.trashFiles }),
+    // D-114: the authoritative build identity. Sourced from the same
+    // `app.getVersion()` the package metadata carries, never from a literal.
+    appInfo: {
+      version: options.appVersion,
+      name: 'YTVDLT',
+      packaged: options.ports.env.isPackaged(),
+    },
     enqueueSingle: (input) => m4.enqueueSingle(input),
   });
 

@@ -84,6 +84,14 @@
         var value = params.get(key);
         if (value !== null && value !== '') keep.push(encodeURIComponent(key) + '=' + encodeURIComponent(value));
       });
+      // D-114: a page reached without `?v=` (task detail, deep link) must not
+      // stay stripped forever — the next hop re-attaches what the registry
+      // knows, so the footer never falls back to a literal.
+      if (params.get('v') === null) {
+        var registry = global.YTVDLTAppVersion;
+        var known = registry && typeof registry.query === 'function' ? registry.query() : '';
+        if (known !== '') keep.push('v=' + known);
+      }
     } catch (error) { /* no URLSearchParams: navigate without query */ }
     return keep.length > 0 ? file + '?' + keep.join('&') : file;
   }
