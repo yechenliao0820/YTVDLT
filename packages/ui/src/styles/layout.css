@@ -145,7 +145,11 @@ html body .thumb { width: var(--thumb-w); height: var(--thumb-h); }
 html body .card-title { font-size: var(--fs-sm); }
 html body .card-meta { font-size: var(--fs-xs); }
 html body .badge { font-size: var(--fs-tiny); }
-html body .card-foot button { font-size: var(--fs-xs); }
+html body .card-foot button {
+  font-size: var(--fs-xs);
+  height: clamp(26px, calc(26px + var(--ui-step) * 1.2), 46px);
+  white-space: nowrap;
+}
 html body .queue-foot { font-size: var(--fs-tiny); }
 html body .queue-version,
 html body .queue-status { font-size: var(--fs-xs); }

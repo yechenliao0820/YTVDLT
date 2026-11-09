@@ -160,6 +160,9 @@
     return size.toFixed(digits) + ' ' + units[index];
   }
 
+  var appBusy = false;
+  var appFeedback = '';
+
   function paintApp(update) {
     var block = doc.getElementById('settings-app-block');
     var current = doc.getElementById('settings-app-current');
@@ -191,16 +194,15 @@
     else text = t('settings.app.uptodate');
 
     if (stateNode !== null) {
-      stateNode.textContent = text;
+      stateNode.textContent = appFeedback || text;
       stateNode.setAttribute('data-update-state', phase);
     }
     if (block !== null) block.setAttribute('data-update-state', phase);
     if (checkButton !== null) {
-      checkButton.disabled = phase === 'checking' || phase === 'downloading';
+      checkButton.disabled = appBusy || phase === 'checking' || phase === 'downloading';
       checkButton.removeAttribute('data-i18n');
-      checkButton.textContent = phase === 'available' || phase === 'ready'
-        ? t('update.download')
-        : t('settings.app.check');
+      checkButton.textContent = phase === 'ready' ? t('update.install')
+        : phase === 'available' ? t('update.download') : t('settings.app.check');
     }
     if (pageButton !== null) {
       var hasPage = Boolean(update.latest && update.latest.pageUrl);
@@ -217,12 +219,25 @@
   }
 
   function appAction(action) {
+    if (appBusy) return;
+    appBusy = true;
+    appFeedback = '';
+    var button = doc.getElementById('settings-app-update');
+    if (button !== null) button.disabled = true;
     var pending = invokeBridge(APP_CHANNELS.action, { action: action });
-    if (pending === null) { paintApp(null); return; }
+    if (pending === null) { appBusy = false; paintApp(null); return; }
     Promise.resolve(pending).then(function (result) {
+      appBusy = action === 'install' && result && result.ok === true;
+      if (result && result.message && (result.ok === false || action === 'install')) {
+        appFeedback = result.message;
+      }
       if (result && result.state) paintApp(result.state);
       else readAppState();
-    }).catch(function () { readAppState(); });
+    }).catch(function (error) {
+      appBusy = false;
+      appFeedback = t('settings.app.error', { reason: String(error) });
+      readAppState();
+    });
   }
 
   /* --- 0.2.1 (D-98): 下载位置 ------------------------------------------- */
@@ -773,7 +788,7 @@
       appCheck.addEventListener('click', function () {
         var current = doc.getElementById('settings-app-block');
         var phase = current === null ? 'idle' : current.getAttribute('data-update-state');
-        appAction(phase === 'available' || phase === 'ready' ? 'download' : 'check');
+        appAction(phase === 'ready' ? 'install' : phase === 'available' ? 'download' : 'check');
       });
     }
     var appPage = doc.getElementById('settings-app-page');

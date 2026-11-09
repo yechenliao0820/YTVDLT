@@ -1330,3 +1330,13 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 决策 | ① **临时目录必须与输出目录同卷**：`resolveDownloadTempDir()` 三条分支——用户显式配置 `paths.tempDir`（加 `<taskId>` 子目录，尊重其卷）、应用私有 `<dataDir>/work`（同卷时）、`<outputDir>/.ytvdlt-incomplete/<taskId>`（跨卷或卷未知时）。跨卷从不用私有目录，因为 yt-dlp 的收尾是 `shutil.move`，跨卷会退化成"整份复制 + 删除"，空间翻倍、失败即两头空。② `-P temp:` 改为**每次下载都发**（去掉 `needsTempDir` 门槛），`DownloadPlan.explicitTempDir` 更名 `tempDir`（语义已变，旧名会骗人）。③ `paths.tempDir` 就是本任务的目录，engine 不再二次套 `<taskId>`。④ **TEMP 不再覆盖**：cwd 仍钉在可写目录（D-89），但 TEMP 保留继承值，`_MEI` 回到 Windows 临时目录；只有继承的 TEMP 为空/不可用时才回落到 cwd。⑤ 成功后若任务目录为空则 `rmdir`（**非递归**，端口新增 `FsPort.rmdir`）；有残留就保留——残留是续传数据或证据。 |
 | 验证（真实下载） | `YTVDLT_REAL_DOWNLOAD=1` + 随包 `yt-dlp.exe` + 本地 Range 服务器：① 限速 200K，3 s 时 `taskkill /T /F`（`child.kill()` 只杀父进程，实测无效）→ 输出目录为空，`.part` 在任务目录，**无 `_MEI`**；② 同一 argv 重跑 → `Resuming download at byte <n>`，成品落在输出目录，任务目录清空；③ 不配 tempDir 的请求保持旧行为（`.part` 仍在媒体旁），作为兼容性对照。另有 `volume.test.ts` 21 例（盘符/UNC/长路径/未知卷/空格与中文/任务段清洗）与 `m4-host.test.ts` 4 例（同卷、跨卷、音频走 audioDir、两任务不共享）。 |
 | 未覆盖 | ① **跨盘真实移动未实测**（本机只有 C: 盘，无法构造第二个卷）；跨盘分支靠"永不跨卷"的设计规避，而不是靠测试证明。② 未在真实安装版/Electron 中复跑（本轮未打包）。③ 被用户**删除**的任务，其 `work/<taskId>` 目录不会自动清理（递归删除需要新的原语，且要先确认租约），留待后续。④ 上次被取消的任务若重试成功，`work/<taskId>` 里可能仍有历史 `.part-FragN.part`/`.ytdl`（本次运行的 `.part` 会被消费，旧分片不一定），属保守保留。 |
+
+## D-119 · 2026-11-09 · 设置页更新进入安装分支；队列操作按钮高度随字号适配
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 设置页安装包已下载并校验后，再点按钮仍出现下载进度归零与缓存完成循环；大窗口下队列底部打开文件夹、删除、详情文字贴边。 |
+| 根因 | 设置页把 available 与 ready 都映射为 download，且两种状态使用同一下载文案，未进入 install；主进程 download 重置字节数后复验缓存回到 ready。响应式样式只放大 card-foot 按钮字号，却保持页面中的固定 26px 高度。 |
+| 决策 | 设置页 ready 使用立即安装文案并发送 install，其余 available/download 与 idle/check 保持不变；请求期间禁用按钮并阻止重复操作，安装成功等待退出期间继续锁定；显示动作返回的失败信息，失败后允许重试安装，不触碰主进程安装前校验。卡片按钮高度使用 clamp(26px, calc(26px + var(--ui-step) * 1.2), 46px)，文字禁止折行，沿用原生按钮内容居中与操作行 flex 居中；1280×800 仍为 26px，不改冻结 ytvdlt.css。 |
+| 验证 | 新增 settings-app-update.test.ts 四例，覆盖检查/下载/安装分支与文案、防重复点击、轮询期间锁定、安装失败提示与重试。全量 81 文件 1064 测试通过，覆盖率最低 85.11%。31/31 E2E 与 5/5 反例全部通过，所有截图差异 0px，未更新基线。build-desktop 成功。pnpm typecheck 的 turbo 因环境缺少可发现的包管理器二进制失败，随后直接执行五个包原有 tsc --noEmit -p tsconfig.json 命令全部通过。真实 Chrome headless 对队列 fixture 测量 1024×768、1280×800、1920×1080、2560×1440 中英文共八种布局、各16按钮，按钮及文字均未越界；按钮高度分别26、26、34.39、45.19px。handoff-check 已运行。 |
+| 未覆盖 | 未打安装包、未在用户虚拟机安装版执行 GitHub 下载→安装→重启闭环，也未验证系统 DPI/字体差异下的视觉效果；VM 测试模拟桥接返回，不等价于真实安装器启动。未提交、推送或发布。 |
