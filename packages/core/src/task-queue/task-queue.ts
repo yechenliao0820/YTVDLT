@@ -442,6 +442,16 @@ export class TaskQueue implements ITaskQueue {
     this.transition(record, target);
     record.error = null;
     record.artifacts = [];
+    // D-107: a retry is a NEW run. Keeping the previous run's percent made the
+    // card claim "37.0%" while the fresh process was still starting up — a
+    // number from the last attempt presented as this attempt's progress. The
+    // `.part` file on disk (yt-dlp resume) is untouched: the first real
+    // progress event of the new run reports whatever is actually on disk.
+    record.lastPercent = null;
+    record.lastDownloadedBytes = null;
+    record.lastTotalBytes = null;
+    record.lastSpeedBps = null;
+    record.lastEtaSec = null;
     this.dropFromPending(taskId);
     this.pending.push(record.id);
     this.pump();

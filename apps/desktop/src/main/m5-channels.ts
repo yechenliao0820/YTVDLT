@@ -18,12 +18,12 @@ import type {
   AppUpdateAction, AppUpdateActionResult, AppUpdateState, DownloadKind, FormatDomain, TaskRecord,
 } from '@ytvdlt/shared';
 import {
-  ACCENT_PRESETS, DEFAULT_PATH_TOKENS, buildTaskListSnapshot, maskUrlSecrets,
+  ACCENT_PRESETS, DEFAULT_PATH_TOKENS, buildTaskListSnapshot, classifyFailure, maskUrlSecrets,
   normalizeHexColor, normalizeThemeMode, normalizeMotionMode, parseAccent,
 } from '@ytvdlt/core';
 import type {
   AccentChoice, CommandTemplateInput, CommandTemplateStore, IConfigStore,
-  MotionMode, TaskDetailAction, TaskDetailResult, TaskTab, ThemeMode,
+  FailureKind, MotionMode, TaskDetailAction, TaskDetailResult, TaskTab, ThemeMode,
 } from '@ytvdlt/core';
 import type { ThumbnailCacheStatus, ThumbnailPruneReport } from './thumbnail-cache.js';
 
@@ -158,6 +158,12 @@ export interface TaskListItemDto {
   readonly duration: number | null;
   readonly percent: number | null;
   readonly errorCode: string | null;
+  /**
+   * D-109: stable bucket for the one-line failure brief. `null` when the task
+   * holds no error at all; the human sentence is resolved by the renderer from
+   * `queue.failure.<kind>`, so switching language needs no new IPC round trip.
+   */
+  readonly failureKind: FailureKind | null;
   readonly artifactCount: number;
   /** 0.2.1 (D-95): transfer numbers; `null` = unknown, never "zero". */
   readonly downloadedBytes: number | null;
@@ -275,6 +281,9 @@ export function toTaskListItem(record: TaskRecord, thumbnailPath: string | null 
     duration: record.mediaInfo?.duration ?? null,
     percent: record.lastPercent,
     errorCode: record.error?.code ?? null,
+    // D-109: derived from the stable code only — never from yt-dlp text, and
+    // never a localized string (the renderer owns the copy).
+    failureKind: record.error === null ? null : classifyFailure(record.error.code),
     artifactCount: record.artifacts.length,
     downloadedBytes: record.lastDownloadedBytes ?? null,
     totalBytes: record.lastTotalBytes ?? null,

@@ -7,8 +7,10 @@
  *   - language switch reloads with `?lang=` because the M3 dialogs are frozen
  *     phrase-table pages (a reload is the only way back to Chinese without
  *     keeping the whole original DOM in memory — documented in M5-2-REPORT);
- *   - every change is also emitted as `{action, value}` so the main process can
- *     persist it through `CONFIG_SET` (A-4.4-20 / A-4.4-21 persistence).
+ *   - D-106: theme / accent / motion are written by `theme.js` into the real
+ *     `SETTINGS_SET` channel (config.json) plus a synchronous local cache, so
+ *     they survive page jumps and restarts. The old `CONFIG_SET` emission was
+ *     an M3 fixture that never persisted anything — it no longer pretends to.
  *
  * The page never writes config itself: `node:fs` is forbidden here.
  */
@@ -28,11 +30,15 @@
   }
 
   function initial() {
-    var base = settingsInjected();
-    var theme = param('theme', base.theme || 'system');
-    var accent = param('accent', base.accent || 'system');
-    var motion = param('motion', base.motion || 'system');
-    var locale = param('lang', base.locale || 'zh-CN');
+    var injected = settingsInjected();
+    // D-106: the shared appearance state (config.json + local cache) is the
+    // single source of truth; `?theme=` still wins for deterministic renders.
+    var appearance = global.YTVDLTTheme && typeof global.YTVDLTTheme.state === 'function'
+      ? global.YTVDLTTheme.state() : {};
+    var theme = param('theme', appearance.theme || injected.theme || 'system');
+    var accent = param('accent', appearance.accent || injected.accent || 'system');
+    var motion = param('motion', appearance.motion || injected.motion || 'system');
+    var locale = param('lang', injected.locale || injected.language || 'zh-CN');
     return {
       theme: theme === 'light' || theme === 'dark' ? theme : 'system',
       accent: /^#?[0-9a-f]{6}$/i.test(accent) ? accent : (
@@ -51,20 +57,27 @@
       output.textContent = JSON.stringify(payload, null, 2);
       output.setAttribute('data-last-action', action);
     }
-    var bridge = global.ytvdltBridge;
-    if (bridge && typeof bridge.invoke === 'function') {
-      try { bridge.invoke('CONFIG_SET', { domain: 'general', key: action, value: value }); } catch (error) { /* offline */ }
-    }
+    // D-106: `CONFIG_SET` is an M3 fixture channel and NEVER wrote config.json.
+    // Appearance persistence is owned by theme.js -> SETTINGS_SET; the `<pre>`
+    // above stays a debug surface for the screenshot suite only.
     return payload;
   }
 
   function paintTheme() {
+    var appearance = global.YTVDLTTheme && typeof global.YTVDLTTheme.state === 'function'
+      ? global.YTVDLTTheme.state() : null;
+    if (appearance !== null) {
+      THEME_STATE.theme = appearance.theme;
+      THEME_STATE.accent = appearance.accent;
+      THEME_STATE.motion = appearance.motion;
+    }
     if (global.YTVDLTTheme) {
       global.YTVDLTTheme.apply({
         theme: THEME_STATE.theme,
         accent: THEME_STATE.accent,
         motion: THEME_STATE.motion,
-        systemAccent: settingsInjected().systemAccent || null
+        systemAccent: appearance === null
+          ? (settingsInjected().systemAccent || null) : appearance.systemAccent
       });
     }
     var root = doc.getElementById('settings-root');
@@ -88,23 +101,20 @@
     });
   }
 
-  function persistTheme(theme) {
-    THEME_STATE.theme = theme;
+  /** D-106: one write fans out to the local cache, this DOM and config.json. */
+  function persistAppearance(patch, action, value) {
+    if (global.YTVDLTTheme && typeof global.YTVDLTTheme.set === 'function') {
+      global.YTVDLTTheme.set(patch);
+    } else if (patch.theme !== undefined) THEME_STATE.theme = patch.theme;
+    else if (patch.accent !== undefined) THEME_STATE.accent = patch.accent;
+    else if (patch.motion !== undefined) THEME_STATE.motion = patch.motion;
+    emit(action, value);
     paintTheme();
-    emit('theme', theme);
   }
 
-  function persistAccent(accent) {
-    THEME_STATE.accent = accent;
-    paintTheme();
-    emit('accent', accent);
-  }
-
-  function persistMotion(motion) {
-    THEME_STATE.motion = motion;
-    paintTheme();
-    emit('motion', motion);
-  }
+  function persistTheme(theme) { persistAppearance({ theme: theme }, 'theme', theme); }
+  function persistAccent(accent) { persistAppearance({ accent: accent }, 'accent', accent); }
+  function persistMotion(motion) { persistAppearance({ motion: motion }, 'motion', motion); }
 
   /** Language needs a reload: `i18n.js` only translates forward (zh -> en). */
   function switchLocale(locale) {
@@ -723,6 +733,9 @@
     if (pendingSettings !== null) {
       Promise.resolve(pendingSettings).then(function (snapshot) {
         if (snapshot === null || typeof snapshot !== 'object') return;
+        // D-106: config.json is authoritative; repaint once it has landed so
+        // the three segmented controls never show a stale local value.
+        paintTheme();
         paintPaths(snapshot);
         if (appAuto !== null && typeof snapshot.autoCheckAppUpdate === 'boolean') {
           appAuto.checked = snapshot.autoCheckAppUpdate;

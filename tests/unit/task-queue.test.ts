@@ -267,6 +267,38 @@ describe('A-4.4-13 / A-4.4-14 · cancel and restart', () => {
     expect(queue.get('t1')?.state).toBe('Completed');
   });
 
+  // D-107: a retry is a NEW run. The previous attempt's numbers must not be
+  // presented as this run's progress while the new process is still starting.
+  it('restart() clears the previous run’s progress (cancel keeps it)', async () => {
+    const { queue } = setup('hang');
+    await queue.enqueue(record('t1'));
+    await tick();
+    expect(queue.get('t1')?.lastPercent).toBe(50);
+
+    await queue.cancel('t1');
+    expect(queue.get('t1')?.state).toBe('Canceled');
+    expect(queue.get('t1')?.lastPercent).toBe(50);
+
+    // Read the record exactly when the new run announces `Running`: that is the
+    // window the card renders, and it must not carry the old percentage.
+    let atRunning: TaskRecord | undefined;
+    const off = queue.onEvent((event) => {
+      if (event.type === 'state-changed' && event.to === 'Running') atRunning = queue.get('t1');
+    });
+    await queue.restart('t1');
+    await tick();
+    off();
+
+    expect(atRunning?.state).toBe('Running');
+    expect(atRunning?.lastPercent).toBeNull();
+    expect(atRunning?.lastDownloadedBytes ?? null).toBeNull();
+    expect(atRunning?.lastTotalBytes ?? null).toBeNull();
+    expect(atRunning?.lastSpeedBps ?? null).toBeNull();
+    expect(atRunning?.lastEtaSec ?? null).toBeNull();
+    // ... and the new run still reports its own progress normally.
+    expect(queue.get('t1')?.lastPercent).toBe(50);
+  });
+
   it('cancel() on an unknown task returns false', async () => {
     const { queue } = setup('completed');
     expect(await queue.cancel('nope')).toBe(false);

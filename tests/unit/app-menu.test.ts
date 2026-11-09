@@ -18,6 +18,7 @@ function harness(platform = 'win32'): { context: AppMenuContext; calls: string[]
       openSettings: () => { calls.push('settings'); },
       openQueue: () => { calls.push('queue'); },
       openAbout: () => { calls.push('about'); },
+      toggleFullscreen: () => { calls.push('fullscreen'); },
     },
   };
 }
@@ -43,8 +44,21 @@ describe('app menu · 中文顶层菜单', () => {
     expect((edit?.submenu ?? []).map((item) => item.role))
       .toEqual(['undo', 'redo', undefined, 'cut', 'copy', 'paste', 'selectAll']);
     const view = buildAppMenu(context).find((item) => String(item.label).startsWith('视图'));
-    expect((view?.submenu ?? []).map((item) => item.role))
-      .toContain('togglefullscreen');
+    const roles = (view?.submenu ?? []).map((item) => item.role);
+    expect(roles).toContain('resetZoom');
+    // D-106: fullscreen is NOT a native role any more — one BrowserWindow
+    // controller owns it, otherwise the renderer button cannot exit it.
+    const fullscreen = (view?.submenu ?? []).find((item) => item.label === '全屏');
+    expect(fullscreen?.role).toBeUndefined();
+    expect(fullscreen?.accelerator).toBe('F11');
+    expect(typeof fullscreen?.click).toBe('function');
+  });
+
+  it('D-106: F11 menu item toggles the same window state as the button', () => {
+    const { context, calls } = harness();
+    const view = buildAppMenu(context).find((item) => String(item.label).startsWith('视图'));
+    (view?.submenu ?? []).find((item) => item.label === '全屏')?.click?.();
+    expect(calls).toEqual(['fullscreen']);
   });
 });
 

@@ -496,6 +496,7 @@ const M3_TEST_FILE_MAP = {
   'request-builder.test.ts': ['A-M4-09'],
   // M5 test files (append-only; the map is shared by the M3/M4/M5 gates).
   'appearance.test.ts': ['A-4.4-20', 'A-4.6-06'],
+  'ui-global-state.test.ts': ['A-4.4-20', 'A-M5-00'],
   'i18n.test.ts': ['A-4.4-21'],
   'shortcuts.test.ts': ['A-4.1-02'],
   'task-view.test.ts': ['A-4.4-16'],
@@ -532,6 +533,11 @@ const M3_TEST_FILE_MAP = {
   // D-104: cached-installer integrity; D-105: portable E2E browser discovery.
   'app-update-service-cache.test.ts': ['A-4.4-29'],
   'browser-discovery.test.ts': ['A-M3-06'],
+  // D-107: the queue card tells a real percent from "unknown" (no fake 0%).
+  'queue-progress.test.ts': ['A-4.4-16', 'A-4.4-21'],
+  // D-109: one-line failure brief on the card + its stable error bucket.
+  'failure-summary.test.ts': ['A-4.4-16', 'A-4.5-07'],
+  'queue-failure.test.ts': ['A-4.4-16', 'A-4.4-21'],
 };
 
 /** Honest, separately-listed deviations (never reported as PASS assertions). */

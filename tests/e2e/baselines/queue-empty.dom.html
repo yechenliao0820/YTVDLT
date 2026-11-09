@@ -4,6 +4,8 @@
 <title>YTVDLT · 下载队列</title>
 <link rel="stylesheet" href="../../styles/ytvdlt.css">
 <link rel="stylesheet" href="../../styles/theme.css">
+<link rel="stylesheet" href="../../styles/layout.css">
+<script src="../../theme/theme.js"></script>
 <style>
   /* D-86: responsive queue surface. The shared ytvdlt.css pins html/body to a
      fixed 1280x800 for the frozen M3 screenshot pages; this page overrides it
@@ -89,7 +91,13 @@
   .thumb[data-thumb="image"]::after { content: ""; position: absolute; inset: 0; border-radius: 6px; box-shadow: inset 0 0 0 1px rgba(15, 30, 50, .10); pointer-events: none; }
   .card-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .card-title { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 20px; }
-  .card-meta { color: var(--muted); font-size: 12px; }
+  .card-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  /* D-109: 失败简报——普通用户能读懂的一句话原因。位置：仍在该 .card-meta 行内、
+     「失败」徽标与错误代码的右侧、进度条之上。刻意保持纯行内文本：放得下就同行，
+     窄窗口自然换到下一行，不改变行盒高度、不牵动下方卡片，也不需要伪弹层。
+     .card-meta 上的 overflow-wrap 兜住超长错误码/英文单词，保证不撑破卡片。
+     颜色用 --ink 而非 --danger：红色已经由徽标表达，这句是「解释」，不是第二个报警。 */
+  .card-failure { color: var(--ink); font-weight: 700; }
   /* 0.2.1 (D-95): numbers must not jitter while the queue polls every 1.2 s. */
   .card-progress { font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 11px; font-weight: 700; background: var(--accent-soft); color: var(--accent); }
@@ -167,7 +175,7 @@
 </style>
 </head>
 <body>
-<main class="queue-page" id="queue-root" data-state="empty" data-tab="all" data-visible-count="0" data-total-count="0" data-concurrency="2/3" data-kind="video">
+<main class="queue-page" id="queue-root" data-state="empty" data-tab="all" data-visible-count="0" data-total-count="0" data-concurrency="2/3" data-kind="video"><nav class="ytv-nav" id="ytvdlt-app-nav" role="navigation" aria-label="页面导航"><button type="button" class="ytv-nav-btn" data-nav="queue" data-i18n="nav.backToQueue" hidden="true">← 返回下载队列</button><button type="button" class="ytv-nav-btn" data-nav="settings" data-i18n="nav.settings">设置</button><span class="ytv-nav-spacer"></span><span class="ytv-nav-current">下载队列</span><button type="button" class="ytv-nav-btn" id="ytvdlt-nav-fullscreen" data-fullscreen-action="toggle" aria-pressed="false" data-fullscreen="false">⛶ 全屏</button></nav>
   <header class="queue-head">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">
@@ -193,7 +201,7 @@
       <button type="button" data-locale="zh-CN" aria-pressed="true" data-i18n="queue.lang.zh" data-fit="">中文</button>
       <button type="button" data-locale="en" aria-pressed="false" data-i18n="queue.lang.en" data-fit="">EN</button>
     </div>
-    <button type="button" class="icon-btn" id="queue-fullscreen" data-fit="" aria-pressed="false" data-fullscreen="false">⛶ 全屏</button>
+    <button type="button" class="icon-btn" id="queue-fullscreen" data-i18n="queue.fullscreen.enter" data-fit="" aria-pressed="false" data-fullscreen="false">⛶ 全屏</button>
   </header>
 
   <nav class="queue-tabs" role="tablist" aria-label="队列筛选">
@@ -303,9 +311,9 @@
 
 <script src="../../i18n/messages.js"></script>
 <script src="../../i18n/i18n.js"></script>
-<script src="../../theme/theme.js"></script>
 <script src="../../shortcuts/shortcuts.js"></script>
 <script src="../../app-shell.js"></script>
+<script src="../../shell/app-nav.js"></script>
 <script src="./queue.js"></script>
 <script src="../../about/about.js"></script>
 <script src="../../updates/update-dialog.js"></script>

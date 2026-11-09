@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
-import type { TaskRecord } from '@ytvdlt/shared';
+import type { AppError, ErrorCode, TaskRecord } from '@ytvdlt/shared';
 import { CommandTemplateStore, ConfigStore, maskUrlSecrets } from '@ytvdlt/core';
 import type { TaskDetailAction, TaskDetailResult } from '@ytvdlt/core';
 import {
@@ -530,5 +530,57 @@ describe('m5 ipc · download location (D-98)', () => {
     };
     expect(result.ok).toBe(false);
     expect(result.error).toContain('不支持');
+  });
+});
+
+describe('D-109 · the list DTO carries a stable bucket, the detail DTO keeps the raw error', () => {
+  const appError = (code: ErrorCode): AppError => ({
+    code,
+    message: '请求过于频繁，请稍后重试',
+    detail: 'C://Users//leolee//AppData//logs//yt-dlp.err: HTTP Error 429',
+    retryable: true,
+    report: '{"url":"https://example.org/watch?v=abc&token=***REDACTED***"}',
+  });
+
+  it('projects failureKind from the code, and null when the record has no error', () => {
+    expect(toTaskListItem(record('t1')).failureKind).toBeNull();
+    expect(toTaskListItem(record('t2', {
+      state: 'Error', error: appError('HTTP_429'),
+    })).failureKind).toBe('service');
+    expect(toTaskListItem(record('t3', {
+      state: 'Error', error: appError('UNKNOWN'),
+    })).failureKind).toBe('unknown');
+    expect(toTaskListItem(record('t4', {
+      state: 'Canceled', error: appError('HTTP_429'),
+    })).failureKind).toBe('service'); // the renderer still gates on state === 'Error'
+  });
+
+  it('never ships a localized sentence, a raw stderr path or the signed URL', () => {
+    const dto = toTaskListItem(record('t5', {
+      state: 'Error', error: appError('HTTP_403'),
+    }));
+    expect(dto.failureKind).toBe('forbidden');
+    const wire = JSON.stringify(dto);
+    expect(wire).not.toContain('SUPERSECRET');
+    expect(wire).not.toContain('yt-dlp.err');
+    expect(wire).not.toContain('C://Users');
+    expect(wire).not.toContain('请求过于频繁');
+    expect(wire).not.toContain('无法访问该内容');
+    expect(wire).toContain('"errorCode":"HTTP_403"'); // technical info is preserved
+  });
+
+  it('the detail view still exposes the full error code / message / artifacts / log path', () => {
+    const detail = toTaskDetail(record('t6', {
+      state: 'Error',
+      artifacts: ['C:/out/video.mp4'],
+      error: appError('HTTP_403'),
+    }));
+    expect(detail.errorCode).toBe('HTTP_403');
+    expect(detail.errorMessage).toBe('请求过于频繁，请稍后重试');
+    expect(detail.artifacts).toEqual(['C:/out/video.mp4']);
+    expect(detail.url).toBe(maskUrlSecrets(SIGNED_URL));
+    expect(detail.url).not.toContain('SUPERSECRET');
+    // The brief is a list-only projection: the detail shape is unchanged.
+    expect(Object.keys(detail)).not.toContain('failureKind');
   });
 });

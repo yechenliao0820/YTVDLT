@@ -93,7 +93,7 @@ ytvdlt/
 │   ├── shared/                    # 纯类型 + 常量：IPC 通道、请求/任务/错误/更新契约
 │   ├── core/                      # 纯逻辑（禁 node:*）：队列、校验、路径、配置、错误映射
 │   ├── engine-ytdlp/              # yt-dlp 适配：argv、进度解析、产物清单、子进程启动环境
-│   └── ui/src/                    # 零依赖静态前端：pages / styles / i18n / theme / dialogs / about
+│   └── ui/src/                    # 零依赖静态前端：pages / styles / shell / i18n / theme / dialogs / about
 ├── resources/runtime/win-x64/     # 随包二进制：yt-dlp / ffmpeg / aria2c / node（不进 git）
 ├── scripts/                       # 构建、测试、验收、烟测脚本（见 §7）
 ├── tests/                         # unit / contract / integration / e2e（截图基线在 e2e/baselines）
@@ -130,18 +130,22 @@ ui（零依赖） ← preload ← apps/desktop
 | 下载计划、清晰度、音频码率、私有模式 | `packages/core/src/decision/download-plan.ts`、`config-store/defaults.ts` |
 | yt-dlp 参数、进度、产物清单 | `packages/engine-ytdlp/src/argv-builder-download.ts`、`progress-parser.ts`、`artifact-manifest.ts` |
 | **子进程启动环境（cwd / TEMP / PATH）** | `packages/engine-ytdlp/src/yt-dlp-engine.ts::spawnBase` —— 任何新 spawn 都从这里取 |
-| 产物校验、错误码与中文提示、错误报告 | `core/src/artifact-verifier/`、`shared/src/errors.ts`、`core/src/error-mapper/`、`error-report/` |
+| 产物校验、错误码与中文提示、错误报告 | `core/src/artifact-verifier/`、`shared/src/errors.ts`、`core/src/error-mapper/`、`error-report/`；列表页一句话失败简报（D-109）：`core/src/failure-summary/`（稳定码→分类）→ `main/m5-channels.ts::toTaskListItem`（`failureKind`）→ `ui/src/pages/queue/queue.js::failureKeyOf`（`queue.failure.<kind>`），详情 DTO 不动 |
 | 队列调度、并发、暂停、历史快照 | `core/src/task-queue/`、`task-store/`；数据目录判定在 `data-dir.ts` |
 | 详情页、日志页、设置页、M3 三个对话框 | `packages/ui/src/pages/*`、`packages/ui/src/dialogs/*` |
 | 打包配置、图标、安装包 | `apps/desktop/electron-builder.yml`、`scripts/make-icon.mjs`、`apps/desktop/build/installer.nsh` |
 | **应用本体更新（检查 / 说明弹窗 / 下载校验 / 安装 / 忽略版本）** | `main/app-update-service.ts`、`main/github-releases.ts`、`main/adapters/http-download.ts`；纯规则在 `core/src/app-update/`；弹窗在 `ui/src/updates/update-dialog.js`。D-104：缓存复用与安装前都重算 SHA-256，基准为发布 `digest` 或 `<target>.sha256` sidecar，失败只隔离不删 |
 | **yt-dlp 组件更新（版本查询 / 换文件 / 自动检查）** | `main/component-updater.ts`（`feedUrl` / `versionApiUrl`）、`engine-ytdlp/src/self-updater.ts` |
-| **队列进度（总大小 / 速度 / 剩余时间）** | `core/src/task-queue/task-queue.ts`（progress 分支）→ `main/m5-channels.ts::toTaskListItem` → `ui/src/pages/queue/queue.js::progressText` |
+| **队列进度（总大小 / 速度 / 剩余时间 / 未知 vs 0%）** | `core/src/task-queue/task-queue.ts`（progress 分支）→ `main/m5-channels.ts::toTaskListItem`（`percent` 可为 `null`）→ `ui/src/pages/queue/queue.js::progressMode`（`value / unknown / none / waiting`）→ `progressText` / `waitBar`；`null` 一律不得写成 0（D-107） |
 | **队列封面缩略图** | `main/thumbnail-cache.ts`、`main/m5-channels.ts::ThumbnailPort`、`queue.js::thumbNode` |
 | **封面缓存清理（占用 / 自动清理 / 立即清理）** | `core/src/thumbnail-cache-policy/`（纯策略）→ `main/thumbnail-cache.ts`（`index.json` / `status()` / `prune()`）→ `main/m5-channels.ts::THUMBNAIL_CACHE` → `ui/src/pages/settings/settings.js::installCacheControls()`；配置在 `advanced.autoCleanThumbnailCache` / `thumbnailCacheMaxBytes` / `MaxFiles` / `MaxAgeDays` |
 | **下载位置（视频 / 音频目录）** | `ui/src/pages/settings/*`（`#section-paths`）→ `main/m5-channels.ts::PATH_ACTION` → `core/config-store/defaults.ts::DEFAULT_PATH_TOKENS`；原生对话框在 `main/adapters/path-picker.ts` |
 | **设置页分区目录 + 滚动联动** | `ui/src/pages/settings/index.html`（`.settings-shell` / `.settings-nav` / `.settings-scroll`）、`settings.js::installSectionNav()` |
 | 截图基线用例 | `scripts/e2e-cases.mjs`、`tests/e2e/baselines/` |
+| **全局导航 / 返回下载队列 / 队列视图状态** | `packages/ui/src/shell/app-nav.js`（导航条注入、`saveView/restoreView`）、`pages/queue/queue.js::saveView/restoreView` |
+| **全屏唯一真相（菜单 / 按钮 / 所有页面）** | `apps/desktop/src/main/bootstrap.ts`（`WINDOW_FULLSCREEN` handler + 事件推送）、`main/app-menu.ts`（F11 click）、`ui/src/shell/app-nav.js`（按钮与 Esc） |
+| **主题 / 强调色 / 动效全局状态与持久化** | `packages/ui/src/theme/theme.js`（`set/sync/listen/state`）、`pages/settings/settings.js`、`main/m5-channels.ts::SETTINGS_GET/SET` |
+| **响应式布局（视口宽高驱动）** | `packages/ui/src/styles/layout.css`（`--ui-step` + 高特异性覆盖）；`ytvdlt.css` 仍是 M3 固定画幅，**不要改它** |
 
 ---
 
@@ -161,6 +165,8 @@ ui（零依赖） ← preload ← apps/desktop
 | **e2e 全红** | ① 是否刚改了 UI（DOM/像素必然变）② 失败 case 的 `dom=true` 是否仍成立 ③ 是否只有预期 case 失败 | 基线是冻结快照，改 UI 不等于改坏 | 按 §6 逐 case 重建；**不要**改松断言或全量覆盖 |
 | **打包后界面还是旧的** | ① 是否先跑 `build-desktop.mjs` ② asar 内对应文件是否是新内容 ③ `package.json` 是否被构建改写未还原 | 顺序反了会把上一版前端塞进包 | 再查缓存、`dist/` 与输出目录、图标是否重生成 |
 | **改了代码没效果 / 行为异常** | ① `grep` 定位真实实现（别猜文件名）② 是否违反分层 ③ 是否改到了 fixture 分支 | 项目有多处同名的 M3/M4/M5 通道 | 再按 §1 优先级查日志与当场输出 |
+| **主题只在设置页生效 / 重启回浅色** | ① 设置页是否还在走 `CONFIG_SET`（M3 fixture，不持久化）② `theme.js` 的 `ytvdlt.appearance` 本地缓存与 `SETTINGS_GET` 回读 ③ `<html>` 上的 `data-theme` | 真正的持久化只走 `SETTINGS_SET` → `general.theme` | 再查 `config.json` 是否被只读目录回落、`theme.css` 是否被覆盖 |
+| **全屏退不出去 / 各页面按钮不一致** | ① 是否同时用了 HTML Fullscreen API 与 `Window.setFullScreen()` ② 菜单 F11 是否还挂 `role:'togglefullscreen'` ③ `WINDOW_FULLSCREEN` handler 是否注册、`enter-full-screen` 是否推送 | D-106 把两套状态合并为主进程单一真相 | 再查 `shell/app-nav.js` 的 bridge 分支与静态预览降级 |
 | **「检查更新」没反应 / 一直提示失败** | ① `logs/app-*.jsonl` 里 `app-update` 与 `component-check` ② GitHub API 是否可达（`api.github.com/repos/yechenliao0820/YTVDLT/releases/latest`）③ `advanced.autoCheckAppUpdate` / `lastAppUpdateCheckAt` 是否把自动检查挡在节流窗口内 ④ 该版本是否已被「以后不再提示」写进 `advanced.skippedAppVersion` | 更新链路不碰 UI 状态，失败只写日志、不动正在运行的版本 | 再查 Release 资产名是否还能被 `selectInstallerAsset` 认出来（改名成非 `Setup` 且带 portable 字样会被打 0 分） |
 
 ---
@@ -296,6 +302,9 @@ ui（零依赖） ← preload ← apps/desktop
 
 12. **更新器缓存复用不等于「已校验」**（D-104）：大小 + `MZ` 只能证明文件像 exe，证明不了它是当初验证过的那份。复用与安装前都必须用 `CorePorts.hash.sha256File()` 重算；发布端可能不给 `digest`，所以首次下载要落 `.sha256` sidecar；两个基准都没有就拒绝复用、重新下载，绝不因为「没有哈希」而跳过校验。可疑文件只改名隔离，不永久删除。
 13. **截图基线的载体是 `chrome-headless-shell`**（D-105）：完整 Chrome 与 headless shell 的滚动条 / 字体光栅化不同，自动发现时 headless-shell 构建必须优先命中，否则会出现「版本字符串相同但像素全变」。版本门槛默认严格；换机器先用 env 指路，找不到浏览器要给安装命令而不是 ENOENT。
+
+14. **不要改 `styles/ytvdlt.css` 的固定 1280×800**：M3 冻结基线靠它。主窗口页面的响应式全部在 `styles/layout.css`，用 `--ui-step`（1280×800 时恒为 0）与高特异性选择器覆盖各页内联 `<style>`；改变量上限不会动冻结基线，改 `ytvdlt.css` 会一次毁掉 16 张。
+15. **全屏只有主进程一个真相**：渲染层按钮发 `WINDOW_FULLSCREEN`，菜单 F11 走同一个 `applyFullscreen()`；只有静态预览（无 preload bridge）才退化到 HTML Fullscreen API。任何「两套状态并存」的写法都会复现「退出全屏按钮点了没反应」。
 
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 

@@ -61,10 +61,21 @@
   /**
    * Boot the shell: theme first (avoid a light flash), then shortcuts.
    * `handlers` maps a shortcut id to a function; unknown ids are ignored.
+   *
+   * D-106: `theme.js` already applied the synchronous local cache in <head>.
+   * Here we additionally pull the authoritative config.json, follow OS changes
+   * and follow other windows — so every page shares ONE appearance state.
    */
   function boot(handlers) {
     var themeResult = null;
-    if (global.YTVDLTTheme) themeResult = global.YTVDLTTheme.apply();
+    var offSystem = function noop() {};
+    var offStorage = function noop() {};
+    if (global.YTVDLTTheme) {
+      themeResult = global.YTVDLTTheme.apply();
+      if (typeof global.YTVDLTTheme.sync === 'function') global.YTVDLTTheme.sync();
+      if (typeof global.YTVDLTTheme.watch === 'function') offSystem = global.YTVDLTTheme.watch();
+      if (typeof global.YTVDLTTheme.listen === 'function') offStorage = global.YTVDLTTheme.listen();
+    }
     var dispose = function noop() {};
     if (global.YTVDLT && global.YTVDLT.shortcuts) {
       var map = handlers !== null && typeof handlers === 'object' ? handlers : {};
@@ -73,7 +84,10 @@
       });
       dispose = global.YTVDLT.shortcuts.install(doc);
     }
-    return { theme: themeResult, dispose: dispose };
+    return {
+      theme: themeResult,
+      dispose: function () { dispose(); offSystem(); offStorage(); }
+    };
   }
 
   /** Fill the paste box with a deep-link / global-hotkey URL and fire `onSubmit`. */

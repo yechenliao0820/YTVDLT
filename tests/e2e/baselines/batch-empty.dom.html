@@ -4,6 +4,8 @@
 <title>YTVDLT · 批量入队预览</title>
 <link rel="stylesheet" href="../../styles/ytvdlt.css">
 <link rel="stylesheet" href="../../styles/theme.css">
+<link rel="stylesheet" href="../../styles/layout.css">
+<script src="../../theme/theme.js"></script>
 <style>
   .batch-page { padding: 16px 20px; }
   .batch-title { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
@@ -27,7 +29,7 @@
 </style>
 </head>
 <body>
-<main class="batch-page" id="ytvdlt-batch" data-state="empty" data-enqueue-batch="on-confirm" data-task-count="0">
+<main class="batch-page" id="ytvdlt-batch" data-state="empty" data-enqueue-batch="on-confirm" data-task-count="0"><nav class="ytv-nav" id="ytvdlt-app-nav" role="navigation" aria-label="页面导航"><button type="button" class="ytv-nav-btn" data-nav="queue" data-i18n="nav.backToQueue">← 返回下载队列</button><button type="button" class="ytv-nav-btn" data-nav="settings" data-i18n="nav.settings">设置</button><span class="ytv-nav-spacer"></span><span class="ytv-nav-current">任务页面</span><button type="button" class="ytv-nav-btn" id="ytvdlt-nav-fullscreen" data-fullscreen-action="toggle" aria-pressed="false" data-fullscreen="false">⛶ 全屏</button></nav>
   <h1 class="batch-title" id="batch-title">Recorded Flat Playlist</h1>
   <p class="batch-sub">每条选中项生成一个独立任务（各自进度 / 取消 / 重试），并发上限 <span id="batch-limit">3</span>。</p>
 
@@ -58,9 +60,9 @@
 </main>
 <script src="../../i18n/messages.js"></script>
 <script src="../../i18n/i18n.js"></script>
-<script src="../../theme/theme.js"></script>
 <script src="../../shortcuts/shortcuts.js"></script>
 <script src="../../app-shell.js"></script>
+<script src="../../shell/app-nav.js"></script>
 <script src="./playlist-batch.js"></script>
 
 

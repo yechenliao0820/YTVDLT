@@ -25,7 +25,12 @@ export interface TaskRecord {
   request: DownloadRequest | null;
   /** Absolute artifact paths, filled after manifest parsing. */
   artifacts: string[];
-  /** Last progress percent; preserved across cancel/failure/restart. */
+  /**
+   * Last progress percent; preserved across cancel/failure so a stopped task
+   * still shows where it stopped. `restart()` clears it (D-107): a retry is a
+   * new run, and the previous attempt's number must not be shown as this one's.
+   * `null` = unknown — never coerce it to 0.
+   */
   lastPercent: number | null;
   /**
    * 0.2.1 (D-95): the last observed transfer numbers, so the queue card can

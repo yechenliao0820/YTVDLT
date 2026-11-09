@@ -137,7 +137,10 @@ describe('bootstrap · launch guards', () => {
     const { host } = fakeHost();
     const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
     expect(handle).not.toBeNull();
-    expect(log.handlers.slice().sort()).toEqual([IPC_CHANNELS.PROBE, IPC_CHANNELS.TASK_LIST, IPC_CHANNELS.SETTINGS_GET].sort());
+    expect(log.handlers.slice().sort()).toEqual([
+      IPC_CHANNELS.PROBE, IPC_CHANNELS.TASK_LIST, IPC_CHANNELS.SETTINGS_GET,
+      IPC_CHANNELS.WINDOW_FULLSCREEN,
+    ].sort());
 
     const windowOptions = log.windows[0] as BrowserWindowOptionsLike;
     expect(windowOptions.width).toBe(1280);
@@ -149,7 +152,7 @@ describe('bootstrap · launch guards', () => {
       sandbox: true,
       webSecurity: true,
     });
-    expect(handle?.registeredChannels).toHaveLength(3);
+    expect(handle?.registeredChannels).toHaveLength(4);
     handle?.dispose();
   });
 });

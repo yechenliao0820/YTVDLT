@@ -34,6 +34,9 @@
       'nav.queue': '下载队列',
       'nav.settings': '设置',
       'nav.about': '关于',
+      'nav.backToQueue': '← 返回下载队列',
+      'nav.other': '任务页面',
+      'nav.label': '页面导航',
 
       'queue.title': '下载队列',
       'queue.subtitle': '粘贴链接，选好类型与清晰度后开始下载。',
@@ -82,6 +85,21 @@
       'queue.card.queued': '排队中',
       // 0.2.2 (D-102): 等待态不确定进度条的无障碍标签（不编造百分比）。
       'queue.card.waiting': '正在准备，进度未知',
+      // D-107: 每个真实阶段一个准确标签。进度未知 ≠ 0%，
+      // 「排队中 / 解析中 / 准备下载」必须各说各的阶段。
+      'queue.card.parsing': '正在解析链接',
+      'queue.card.preparing': '准备下载',
+      'queue.card.measuring': '正在获取下载进度',
+      'queue.card.downloaded': '已下载 {done}',
+      'queue.card.noProgress': '无进度信息',
+      // D-109: 失败简报（下载列表卡片内的一句话原因）。键名里的 kind 是主进程
+      // 发来的稳定分类（core/src/failure-summary），不是渲染层猜出来的。
+      // 无法可靠判断时只用 unknown 一条，绝不编造具体原因。
+      'queue.failure.network': '网络连接失败',
+      'queue.failure.service': '服务暂时不可用',
+      'queue.failure.forbidden': '无法访问该内容',
+      'queue.failure.save': '保存文件失败',
+      'queue.failure.unknown': '下载失败，请查看详情',
       'queue.action.cancel': '取消',
       'queue.action.retry': '重试',
       'queue.action.open-folder': '打开文件夹',
@@ -343,6 +361,9 @@
       'nav.queue': 'Queue',
       'nav.settings': 'Settings',
       'nav.about': 'About',
+      'nav.backToQueue': '← Back to queue',
+      'nav.other': 'Task view',
+      'nav.label': 'Page navigation',
 
       'queue.title': 'Download queue',
       'queue.subtitle': 'Paste a link, pick a type and quality, then start.',
@@ -389,6 +410,19 @@
       'queue.card.queued': 'Queued',
       // 0.2.2 (D-102): accessible label for the indeterminate waiting bar.
       'queue.card.waiting': 'Preparing, progress unknown',
+      // D-107: one accurate label per real stage — unknown is not 0%.
+      'queue.card.parsing': 'Reading link info',
+      'queue.card.preparing': 'Preparing download',
+      'queue.card.measuring': 'Reading download progress',
+      'queue.card.downloaded': '{done} downloaded',
+      'queue.card.noProgress': 'No progress info',
+      // D-109: failure brief on the card. `kind` is the stable bucket from the
+      // main process; `unknown` is the honest fallback when no cause is known.
+      'queue.failure.network': 'Network connection failed',
+      'queue.failure.service': 'Service temporarily unavailable',
+      'queue.failure.forbidden': 'Unable to access this content',
+      'queue.failure.save': 'Unable to save the file',
+      'queue.failure.unknown': 'Download failed. See details',
       'queue.action.cancel': 'Cancel',
       'queue.action.retry': 'Retry',
       'queue.action.open-folder': 'Open folder',

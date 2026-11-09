@@ -13,6 +13,7 @@
 import type { TaskState } from '@ytvdlt/shared';
 import type { NotificationKind } from '../notifications/notification-center.js';
 import { TASK_STATES } from '../task-queue/state-machine.js';
+import { FAILURE_KINDS, type FailureKind } from '../failure-summary/failure-summary.js';
 
 export const LOCALES = ['zh-CN', 'en'] as const;
 export type Locale = (typeof LOCALES)[number];
@@ -42,6 +43,11 @@ export function stateKey(state: TaskState): string {
   return `task.state.${state}`;
 }
 
+/** D-109: `queue.failure.<kind>` — the one-line brief under a failed card. */
+export function failureKey(kind: FailureKind): string {
+  return `queue.failure.${kind}`;
+}
+
 export function notificationKeys(kind: NotificationKind): { readonly titleKey: string; readonly bodyKey: string } {
   return { titleKey: `notification.${kind}.title`, bodyKey: `notification.${kind}.body` };
 }
@@ -67,6 +73,7 @@ export const UI_REQUIRED_KEYS: readonly string[] = [
 export function requiredKeys(): readonly string[] {
   const keys = new Set<string>(UI_REQUIRED_KEYS);
   for (const state of TASK_STATES) keys.add(stateKey(state));
+  for (const kind of FAILURE_KINDS) keys.add(failureKey(kind));
   for (const kind of NOTIFICATION_KINDS) {
     const { titleKey, bodyKey } = notificationKeys(kind);
     keys.add(titleKey);

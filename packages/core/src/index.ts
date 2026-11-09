@@ -44,3 +44,5 @@ export * from './platform/index.js';
 export * from './app-update/index.js';
 // D-103 (append-only): pure retention policy for the cover-image cache.
 export * from './thumbnail-cache-policy/index.js';
+// D-109 (append-only): stable error code → one plain-language failure bucket.
+export * from './failure-summary/index.js';

@@ -9,8 +9,10 @@
  * `Menu.buildFromTemplate()`；和 `tray.ts` 同样的分层理由：没有 Electron
  * 二进制也能单测（D-39）。
  *
- * 角色（role）与标签并存：role 决定行为（撤销/复制/粘贴/缩放/全屏…），
+ * 角色（role）与标签并存：role 决定行为（撤销/复制/粘贴/缩放…），
  * label 只覆盖显示文字，所以行为仍是 Electron 原生实现，不自己造轮子。
+ * D-106 起「全屏」是唯一例外：改为统一窗口控制器，避免与渲染层
+ * HTML Fullscreen API 形成两套互不知情的状态。
  * D-85：`locale` 让菜单跟随界面语言；默认仍是中文，因此既有断言不变。
  */
 
@@ -37,6 +39,8 @@ export interface AppMenuContext {
   readonly openSettings?: () => void;
   readonly openQueue?: () => void;
   readonly openAbout?: () => void;
+  /** D-106: fullscreen must go through the BrowserWindow, not a native role. */
+  readonly toggleFullscreen?: () => void;
 }
 
 interface MenuLabels {
@@ -135,7 +139,15 @@ export function buildAppMenu(context: AppMenuContext): readonly AppMenuItem[] {
       { label: L.zoomIn, role: 'zoomIn', accelerator: 'CmdOrCtrl+Plus' },
       { label: L.zoomOut, role: 'zoomOut', accelerator: 'CmdOrCtrl+-' },
       { type: 'separator' },
-      { label: L.fullscreen, role: 'togglefullscreen', accelerator: isMac ? 'Ctrl+Cmd+F' : 'F11' },
+      // D-106: `role: 'togglefullscreen'` toggled the NATIVE window while the
+      // renderer button used the HTML Fullscreen API — two independent states,
+      // so the button could never exit a fullscreen entered from this menu.
+      // Both now go through the same BrowserWindow controller.
+      {
+        label: L.fullscreen,
+        accelerator: isMac ? 'Ctrl+Cmd+F' : 'F11',
+        click: () => { context.toggleFullscreen?.(); },
+      },
       { label: L.devTools, role: 'toggleDevTools', accelerator: isMac ? 'Alt+Cmd+I' : 'Ctrl+Shift+I' },
     ],
   };

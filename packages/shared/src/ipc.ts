@@ -47,6 +47,10 @@ export const IPC_CHANNELS = {
   PATH_ACTION: 'ytvdlt:path:action',
   // D-103 (append-only): cover-cache occupancy / auto-clean switch / prune.
   THUMBNAIL_CACHE: 'ytvdlt:thumbnail:cache',
+  // D-106 (append-only): ONE window-level fullscreen authority. The renderer
+  // asks, the BrowserWindow owns the state; never use the HTML Fullscreen API
+  // and setFullScreen() side by side again.
+  WINDOW_FULLSCREEN: 'ytvdlt:window:fullscreen',
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

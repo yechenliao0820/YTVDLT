@@ -17,6 +17,7 @@
  * runtime layout and electron-builder output (N1), so `createHost` is injected
  * and the real wiring lands with the packaging block (M5-4).
  */
+import { IPC_CHANNELS } from '@ytvdlt/shared';
 import type { M5Host } from './m5-host.js';
 import { buildTrayMenu, trayTooltip, shouldHideToTray, canQuit, type TrayStats } from './tray.js';
 import { buildAppMenu } from './app-menu.js';
@@ -55,6 +56,9 @@ export interface BrowserWindowLike {
   restore(): void;
   hide(): void;
   destroy(): void;
+  /** D-106: optional so the unit-test fake stays valid without an Electron binary. */
+  isFullScreen?(): boolean;
+  setFullScreen?(flag: boolean): void;
 }
 
 export interface TrayLike {
@@ -223,6 +227,36 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
     },
   });
 
+  // D-106: ONE fullscreen authority. Every renderer page and the 视图 menu
+  // ask this handler; enter/leave events push the resulting state back so the
+  // visible button always says the truth (and can always exit).
+  const currentFullscreen = (): boolean =>
+    typeof window.isFullScreen === 'function' ? window.isFullScreen() : false;
+  function pushFullscreenState(flag: boolean): void {
+    void Promise.resolve(window.webContents.executeJavaScript?.(
+      `window.YTVDLTShell && window.YTVDLTShell.setFullscreenState(${flag === true})`,
+    )).catch(() => { /* renderer not ready yet */ });
+  }
+  function applyFullscreen(flag: boolean): boolean {
+    if (typeof window.setFullScreen === 'function') window.setFullScreen(flag);
+    const actual = currentFullscreen();
+    pushFullscreenState(actual);
+    return actual;
+  }
+  ipcMain.handle(IPC_CHANNELS.WINDOW_FULLSCREEN, (_event, payload) => {
+    const record = payload !== null && typeof payload === 'object'
+      ? payload as Record<string, unknown> : {};
+    const action = record['action'] === 'get' || record['action'] === 'set'
+      ? record['action'] : 'toggle';
+    const current = currentFullscreen();
+    if (action === 'get') return { ok: true, fullscreen: current };
+    const target = action === 'set' ? record['value'] === true : !current;
+    return { ok: true, fullscreen: target === current ? current : applyFullscreen(target) };
+  });
+  window.on('enter-full-screen', () => { pushFullscreenState(true); });
+  window.on('leave-full-screen', () => { pushFullscreenState(false); });
+  registeredChannels.push(IPC_CHANNELS.WINDOW_FULLSCREEN);
+
   const stats = options.trayStats ?? (() => EMPTY_STATS);
   let quitting = false;
 
@@ -264,6 +298,7 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
       openAbout: () => {
         void window.webContents.executeJavaScript?.('window.YTVDLTAbout && window.YTVDLTAbout.open()');
       },
+      toggleFullscreen: () => { applyFullscreen(!currentFullscreen()); },
     });
     Menu.setApplicationMenu?.(Menu.buildFromTemplate(appMenu));
   }
@@ -303,6 +338,9 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
   await window.webContents.loadURL(pageUrlWithPrefill(launchUrl, deepLink));
   window.webContents.on('did-finish-load', () => {
     window.show();
+    // D-106: a page jump (menu / nav bar) rebuilds the renderer, so re-push
+    // the current window state instead of leaving the fresh button stale.
+    pushFullscreenState(currentFullscreen());
     // D-85: switching the language reloads the renderer. Re-read the setting
     // and repaint the native menu so File/Edit/View/Window follow the page.
     void (async () => {

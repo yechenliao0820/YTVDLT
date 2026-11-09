@@ -4,6 +4,8 @@
 <title>YTVDLT · 任务详情</title>
 <link rel="stylesheet" href="../../styles/ytvdlt.css">
 <link rel="stylesheet" href="../../styles/theme.css">
+<link rel="stylesheet" href="../../styles/layout.css">
+<script src="../../theme/theme.js"></script>
 <style>
   .detail-page { padding: 16px 20px; }
   .detail-title { font-size: 18px; font-weight: 600; margin: 0 0 6px; }
@@ -23,7 +25,7 @@
 </style>
 </head>
 <body>
-<main class="detail-page" id="ytvdlt-task-detail" data-state="error" data-task-id="t1">
+<main class="detail-page" id="ytvdlt-task-detail" data-state="error" data-task-id="t1"><nav class="ytv-nav" id="ytvdlt-app-nav" role="navigation" aria-label="页面导航"><button type="button" class="ytv-nav-btn" data-nav="queue" data-i18n="nav.backToQueue">← 返回下载队列</button><button type="button" class="ytv-nav-btn" data-nav="settings" data-i18n="nav.settings">设置</button><span class="ytv-nav-spacer"></span><span class="ytv-nav-current">任务页面</span><button type="button" class="ytv-nav-btn" id="ytvdlt-nav-fullscreen" data-fullscreen-action="toggle" aria-pressed="false" data-fullscreen="false">⛶ 全屏</button></nav>
   <h1 class="detail-title" id="detail-title">任务详情</h1>
   <div class="empty" id="detail-empty" data-variant="empty" hidden="true">
     <span class="glyph" aria-hidden="true">?</span>
@@ -53,9 +55,9 @@
 </main>
 <script src="../../i18n/messages.js"></script>
 <script src="../../i18n/i18n.js"></script>
-<script src="../../theme/theme.js"></script>
 <script src="../../shortcuts/shortcuts.js"></script>
 <script src="../../app-shell.js"></script>
+<script src="../../shell/app-nav.js"></script>
 <script src="./task-detail.js"></script>
 
 

@@ -29,7 +29,7 @@
     },
     {
       id: 't-fetch-2', state: 'FetchingInfo', title: 'Big Buck Bunny — 4K remaster',
-      uploader: 'Peach Open Movie', duration: 596, percent: 0,
+      uploader: 'Peach Open Movie', duration: 596, percent: null,
       speed: 0, eta: null, kind: 'video', artifacts: 0, errorCode: null,
       downloadedBytes: null, totalBytes: null, thumbPath: null
     },
@@ -55,6 +55,8 @@
       id: 't-error-6', state: 'Error', title: 'Live concert — private stream',
       uploader: 'unknown', duration: null, percent: 12,
       speed: 0, eta: null, kind: 'audio', artifacts: 0, errorCode: 'HTTP_403',
+      // D-109: what `toTaskListItem()` would send for an HTTP_403 record.
+      failureKind: 'forbidden',
       downloadedBytes: null, totalBytes: null, thumbPath: null
     }
   ];
@@ -122,6 +124,50 @@
   }
   function readStore(key) {
     try { return global.localStorage ? global.localStorage.getItem(key) : null; } catch (error) { return null; }
+  }
+
+  /** D-106: one queue view survives menu / nav-bar page switches. */
+  var viewReady = false;
+
+  function saveView() {
+    if (!viewReady) return;
+    var nav = global.YTVDLTNav;
+    if (!nav || typeof nav.saveView !== 'function') return;
+    var body = doc.getElementById('queue-body');
+    nav.saveView({
+      tab: model.tab,
+      query: model.query,
+      sort: model.sort,
+      kind: choice.kind,
+      selected: Object.keys(model.selected || {}),
+      scroll: body === null ? 0 : body.scrollTop
+    });
+  }
+
+  function restoreView() {
+    var nav = global.YTVDLTNav;
+    var saved = nav && typeof nav.restoreView === 'function' ? nav.restoreView() : null;
+    if (saved === null || typeof saved !== 'object') return;
+    // An explicit ?tab= / ?kind= (e2e, deep link) must always win.
+    var hasQuery = param('tab', '') !== '' || param('kind', '') !== '';
+    if (!hasQuery) {
+      if (TABS.indexOf(saved.tab) !== -1) model.tab = saved.tab;
+      if (typeof saved.query === 'string') model.query = saved.query;
+      var searchBox = doc.getElementById('queue-search');
+      if (searchBox !== null) searchBox.value = model.query;
+      if (['newest', 'oldest', 'name', 'state'].indexOf(saved.sort) !== -1) model.sort = saved.sort;
+      var sortBox = doc.getElementById('queue-sort');
+      if (sortBox !== null) sortBox.value = model.sort;
+      if (param('kind', '') === '' && (saved.kind === 'audio' || saved.kind === 'video')) setKind(saved.kind);
+    }
+    if (Array.isArray(saved.selected)) {
+      model.selected = {};
+      saved.selected.forEach(function (id) { model.selected[id] = true; });
+    }
+    if (typeof saved.scroll === 'number' && saved.scroll >= 0) {
+      var body = doc.getElementById('queue-body');
+      global.setTimeout(function () { if (body !== null) body.scrollTop = saved.scroll; }, 0);
+    }
   }
 
   /**
@@ -197,7 +243,11 @@
       title: item.title || item.id,
       uploader: item.uploader || '—',
       duration: typeof item.duration === 'number' ? item.duration : null,
-      percent: typeof item.percent === 'number' ? item.percent : 0,
+      // D-107: `null` means "no usable percent yet" and MUST survive the
+      // projection. Coercing it to 0 painted a fake 0.0% on a task whose first
+      // progress line had not arrived; a real 0 is a legal observation and is
+      // kept as 0 (see `progressMode()`), so this is a type check, never `|| 0`.
+      percent: typeof item.percent === 'number' && isFinite(item.percent) ? item.percent : null,
       // 0.2.1 (D-95): these four are what makes the card useful while it runs.
       speed: typeof item.speedBps === 'number' ? item.speedBps : 0,
       eta: typeof item.etaSec === 'number' ? item.etaSec : null,
@@ -206,8 +256,35 @@
       // 0.2.1 (D-96): a local, already-cached cover path — never a remote URL.
       thumbPath: typeof item.thumbPath === 'string' && item.thumbPath !== '' ? item.thumbPath : null,
       artifacts: typeof item.artifactCount === 'number' ? item.artifactCount : 0,
-      errorCode: item.errorCode || null
+      errorCode: item.errorCode || null,
+      // D-109: the main process sends a STABLE bucket, never a sentence. `null`
+      // when the record carries no error; the copy is resolved at paint time so
+      // a language switch repaints in the new language without a new request.
+      failureKind: isFailureKind(item.failureKind) ? item.failureKind : null
     };
+  }
+
+  /** D-109: mirror of core's `FailureKind` — guards the i18n key lookup so an
+   *  unknown bucket can never print a raw `queue.failure.x` key on a card. */
+  var FAILURE_KINDS = ['network', 'service', 'forbidden', 'save', 'unknown'];
+
+  function isFailureKind(value) {
+    return typeof value === 'string' && FAILURE_KINDS.indexOf(value) !== -1;
+  }
+
+  /**
+   * D-109: which i18n key a card shows, or `null` when it must show none.
+   *
+   * Only `Error` counts as a failure. A canceled task, a queued one, one that is
+   * being retried (state flips back to ReadyWithInfo/Idle and `error` is
+   * cleared) or one still running must never look like "download failed".
+   * When the backend recorded a failure but no usable code, the honest brief is
+   * the generic one — never a guessed cause.
+   */
+  function failureKeyOf(task) {
+    if (task.state !== 'Error') return null;
+    var kind = isFailureKind(task.failureKind) ? task.failureKind : 'unknown';
+    return 'queue.failure.' + kind;
   }
 
   /** 0.2.1 (D-96): a full re-render replaces every `<img>`; polling every 1.2 s
@@ -333,6 +410,7 @@
     renderQualityOptions();
     var root = doc.getElementById('queue-root');
     if (root !== null) root.setAttribute('data-kind', choice.kind);
+    saveView();
   }
 
   if (kindButtons !== null) {
@@ -452,20 +530,46 @@
     var s = shell();
     return s !== null && typeof s.formatEta === 'function' ? s.formatEta(value) : String(value);
   }
+  /** D-107: never invent a number. Unknown is a dash, not 0.0%. */
   function percentLabel(value) {
-    var number = Number(value);
-    if (!isFinite(number)) return '0.0%';
-    return (Math.round(number * 10) / 10).toFixed(1) + '%';
+    if (typeof value !== 'number' || !isFinite(value)) return '—';
+    return (Math.round(value * 10) / 10).toFixed(1) + '%';
   }
-  function progressText(task) {
-    var parts = [percentLabel(task.percent)];
+
+  /** D-107: a usable percent is a finite NUMBER — `0` is legal data. */
+  function hasPercent(task) {
+    return typeof task.percent === 'number' && isFinite(task.percent);
+  }
+
+  /**
+   * D-107: which of the four progress presentations a card needs.
+   *
+   *   value   — a real percent from THIS run → numeric bar.
+   *   unknown — Running, no usable percent yet → keep the D-102 wait animation.
+   *             The backend state already IS `Running` (cancel/scheduling depend
+   *             on it); only the visual is undecided, so this never waits for a
+   *             timer or delays the download.
+   *   none    — Canceled / Error that never produced a number: an inert track,
+   *             no animation, no fake 0% (the terminal text must win).
+   *   waiting — Idle / FetchingInfo / ReadyWithInfo: nothing started yet.
+   */
+  function progressMode(state, hasValue) {
+    if (state === 'Completed') return 'complete';
+    if (state === 'Running') return hasValue ? 'value' : 'unknown';
+    if (state === 'Canceled' || state === 'Error') return hasValue ? 'value' : 'none';
+    return 'waiting';
+  }
+
+  /** Size / speed / ETA — only what the engine actually reported. */
+  function transferParts(task) {
+    var parts = [];
     var done = task.downloadedBytes;
     var total = task.totalBytes;
-    if (typeof done === 'number' && done > 0) {
-      if (typeof total === 'number' && total > 0) {
+    if (typeof done === 'number' && isFinite(done) && done > 0) {
+      if (typeof total === 'number' && isFinite(total) && total > 0) {
         parts.push(t('queue.card.size', { done: fmtBytes(done), total: fmtBytes(total) }));
       } else {
-        parts.push(fmtBytes(done));
+        parts.push(t('queue.card.downloaded', { done: fmtBytes(done) }));
       }
     }
     if (task.state === 'Running' && typeof task.speed === 'number' && task.speed > 0) {
@@ -474,6 +578,22 @@
         parts.push(t('queue.card.eta', { eta: fmtEta(task.eta) }));
       }
     }
+    return parts;
+  }
+
+  function progressText(task) {
+    return [percentLabel(task.percent)].concat(transferParts(task)).join(' · ');
+  }
+
+  /**
+   * D-107: the line under the wait animation while Running.
+   *
+   * Real bytes are shown when the engine reported them (never a made-up total
+   * or percent); otherwise the honest stage is "preparing the download".
+   */
+  function unknownProgressText(task) {
+    var parts = transferParts(task);
+    parts.push(t(parts.length > 0 ? 'queue.card.measuring' : 'queue.card.preparing'));
     return parts.join(' · ');
   }
 
@@ -534,12 +654,49 @@
     return bar;
   }
 
+  /** Numeric progress: the classic filled track. Only reached when the value is a
+   *  real number (`0` included), so the width never falls back to a guess. */
+  function valueBar(task) {
+    var pct = hasPercent(task) ? Math.max(0, Math.min(100, task.percent)) : 0;
+    var bar = el('div', 'bar');
+    var fill = el('i');
+    fill.style.width = pct + '%';
+    bar.appendChild(fill);
+    bar.setAttribute('data-percent', String(task.percent));
+    return bar;
+  }
+
+  /** A terminal task that never reported a number: inert track, no animation. */
+  function idleBar() {
+    var bar = el('div', 'bar');
+    bar.setAttribute('data-mode', 'idle');
+    bar.setAttribute('aria-hidden', 'true');
+    bar.appendChild(el('i'));
+    return bar;
+  }
+
+  function progressLine(task, mode, text) {
+    var node = el('div', 'card-meta card-progress');
+    node.setAttribute('data-progress', mode === 'value' ? String(task.percent) : mode);
+    node.textContent = text;
+    return node;
+  }
+
+  /** Stage copy under the wait animation — one honest label per real phase. */
+  function waitHint(state) {
+    if (state === 'FetchingInfo') return t('queue.card.parsing');
+    if (state === 'ReadyWithInfo') return t('queue.card.ready');
+    return t('queue.card.queued');
+  }
+
   function card(task) {
     var node = el('article', 'card');
     node.setAttribute('data-task-id', task.id);
     node.setAttribute('data-state', task.state);
     node.setAttribute('data-tab', tabOf(task.state));
     node.setAttribute('data-selected', model.selected[task.id] === true ? 'true' : 'false');
+    var mode = progressMode(task.state, hasPercent(task));
+    node.setAttribute('data-progress-mode', mode);
 
     // D-87: per-task checkbox for multi-select.
     var check = doc.createElement('input');
@@ -570,31 +727,43 @@
     var suffix = task.uploader + ' · ' + (shell() ? shell().formatDuration(task.duration) : String(task.duration));
     if (task.errorCode) suffix += ' · ' + task.errorCode;
     meta.appendChild(doc.createTextNode(suffix));
+    // D-109: one plain-language reason for ordinary users, immediately RIGHT of
+    // the existing red failure info (the Error badge + error code) and ABOVE the
+    // progress bar. The code, the badge, retry and the detail entry are all
+    // untouched — this is an addition, never a replacement.
+    var failureKey = failureKeyOf(task);
+    if (failureKey !== null) {
+      meta.appendChild(doc.createTextNode(' · '));
+      var failure = el('span', 'card-failure', t(failureKey));
+      failure.setAttribute('data-failure-kind', isFailureKind(task.failureKind) ? task.failureKind : 'unknown');
+      meta.appendChild(failure);
+    }
     main.appendChild(meta);
 
-    if (task.state === 'Running' || task.state === 'Canceled' || task.state === 'Error') {
-      var bar = el('div', 'bar');
-      var fill = el('i');
-      fill.style.width = Math.max(0, Math.min(100, Number(task.percent) || 0)) + '%';
-      bar.appendChild(fill);
-      bar.setAttribute('data-percent', String(task.percent));
-      main.appendChild(bar);
-      var progress = el('div', 'card-meta card-progress');
-      progress.setAttribute('data-progress', String(task.percent));
-      progress.textContent = progressText(task);
-      main.appendChild(progress);
-    } else if (task.state === 'Completed') {
+    if (mode === 'value') {
+      main.appendChild(valueBar(task));
+      main.appendChild(progressLine(task, 'value', progressText(task)));
+    } else if (mode === 'complete') {
       var done = el('div', 'card-meta card-progress');
       done.setAttribute('data-progress', '100');
       done.textContent = progressText({ percent: 100, downloadedBytes: task.downloadedBytes, totalBytes: task.totalBytes, state: 'Completed', speed: 0, eta: null });
       main.appendChild(done);
+    } else if (mode === 'unknown') {
+      // D-107: the D-102 animation keeps running after the state turns
+      // `Running` — a percent only appears once THIS run reported one.
+      main.appendChild(waitBar(task));
+      main.appendChild(progressLine(task, 'unknown', unknownProgressText(task)));
+    } else if (mode === 'none') {
+      // Canceled / Error before the first progress line: the terminal state must
+      // win, and "0.0%" would be an invented number.
+      main.appendChild(idleBar());
+      main.appendChild(progressLine(task, 'none', t('queue.card.noProgress')));
     } else {
-      // 0.2.2 (D-102): 下载尚未开始（Idle / FetchingInfo / ReadyWithInfo / Queued）。
+      // 0.2.2 (D-102): 下载尚未开始（Idle / FetchingInfo / ReadyWithInfo）。
       // 复用下载进度条的轨道，换成循环短条：大文件解析较久时也有可见反馈，
       // 不会被当成卡死；状态文案保留，但不编造百分比。
       main.appendChild(waitBar(task));
-      var hint = task.state === 'ReadyWithInfo' ? t('queue.card.ready') : t('queue.card.queued');
-      main.appendChild(el('div', 'card-meta', hint));
+      main.appendChild(el('div', 'card-meta', waitHint(task.state)));
     }
 
     var foot = el('div', 'card-foot');
@@ -752,6 +921,7 @@
   function selectTab(tab) {
     if (TABS.indexOf(tab) === -1) return;
     model.tab = tab;
+    saveView();
     render();
   }
 
@@ -786,38 +956,18 @@
     });
   }
 
-  // ---- D-86: full-screen toggle (HTML Fullscreen API, no IPC needed) ------
-  function paintFullscreenButton() {
-    var button = doc.getElementById('queue-fullscreen');
-    if (button === null) return;
-    button.removeAttribute('data-i18n');
-    var active = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
-    button.textContent = '⛶ ' + t(active ? 'queue.fullscreen.exit' : 'queue.fullscreen.enter');
-    button.setAttribute('aria-pressed', active ? 'true' : 'false');
-    button.setAttribute('data-fullscreen', active ? 'true' : 'false');
-  }
-
+  // ---- D-106: full-screen is owned by shell/app-nav.js -------------------
+  // The old button used the HTML Fullscreen API while 视图/全屏 used Electron's
+  // setFullScreen(); the button could never exit a fullscreen entered from the
+  // menu. One shared controller now drives the native window state, and the
+  // main process pushes enter/leave back to the renderer.
   function installFullscreen() {
-    var button = doc.getElementById('queue-fullscreen');
-    paintFullscreenButton();
-    if (button !== null) {
-      button.addEventListener('click', function () {
-        var active = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
-        try {
-          if (active) {
-            if (doc.exitFullscreen) doc.exitFullscreen();
-            else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
-          } else {
-            var root = doc.documentElement;
-            if (root.requestFullscreen) root.requestFullscreen();
-            else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
-          }
-        } catch (error) { /* browser refused: leave the layout as-is */ }
-        paintFullscreenButton();
-      });
+    var nav = global.YTVDLTNav;
+    if (nav && typeof nav.bindFullscreenButton === 'function') {
+      // layout.css hides the legacy header button, but keep it in sync so any
+      // older markup never shows a stale label.
+      nav.bindFullscreenButton('queue-fullscreen');
     }
-    doc.addEventListener('fullscreenchange', paintFullscreenButton);
-    doc.addEventListener('webkitfullscreenchange', paintFullscreenButton);
   }
 
   // ---- D-87: right-click menu + delete / clear confirmation ---------------
@@ -975,6 +1125,7 @@
       sort.addEventListener('change', function () {
         model.sort = ['newest', 'oldest', 'name', 'state'].indexOf(sort.value) === -1 ? 'newest' : sort.value;
         store('ytvdlt.sort', model.sort);
+        saveView();
         render();
       });
     }
@@ -1033,6 +1184,7 @@
   if (search !== null) {
     search.addEventListener('input', function () {
       model.query = String(search.value || '').trim();
+      saveView();
       render();
     });
   }
@@ -1101,6 +1253,14 @@
   installLanguageSwitch();
   installFullscreen();
   installTaskManagement();
+  restoreView();
+  viewReady = true;
+  var bodyScroll = doc.getElementById('queue-body');
+  if (bodyScroll !== null) bodyScroll.addEventListener('scroll', saveView);
+  if (global.YTVDLTNav && typeof global.YTVDLTNav.onLeave === 'function') {
+    global.YTVDLTNav.onLeave(saveView);
+  }
+  global.addEventListener('pagehide', saveView);
   var result = render();
   if (live.active) {
     refresh();

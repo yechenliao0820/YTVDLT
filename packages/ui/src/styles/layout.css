@@ -1,0 +1,183 @@
+/* layout.css — global navigation shell + real responsive layout (D-106).
+ *
+ * `ytvdlt.css` is the FROZEN M3 baseline: it pins html/body to 1280x800 so the
+ * dialog screenshots stay byte-identical. This file is loaded ONLY by the main
+ * window pages (queue / settings / task-detail / task-log / playlist-batch);
+ * the M3 dialogs never reference it.
+ *
+ * Design rule: every token below resolves EXACTLY to the old pixel value at
+ * 1280x800 (the e2e viewport). `--ui-step` is 0px there, so introducing this
+ * file changes no default-rendering pixel; scaling only starts above/below the
+ * frozen viewport. This is real responsive layout (fluid type + fluid
+ * containers), NOT a browser zoom / transform:scale on the whole document.
+ */
+:root {
+  /* Width AND height drive the scale, whichever is the tighter constraint.
+     1280x800 -> 0px (frozen baseline); 1920x1080 -> 7px; 2560x1440 -> 16px.
+     The 80px/40px divisors make type grow roughly with the viewport (13px ->
+     19px at 1920), so a maximised window no longer looks like a small page
+     lost in a big frame. */
+  --ui-step: clamp(-3px, min(calc((100vw - 1280px) / 80), calc((100vh - 800px) / 40)), 16px);
+  --fs-h1: clamp(17px, calc(20px + var(--ui-step) * 1.5), 44px);
+  --fs-brand: clamp(14px, calc(17px + var(--ui-step) * 1.1), 36px);
+  --fs-body: clamp(12px, calc(14px + var(--ui-step)), 30px);
+  --fs-sm: clamp(11px, calc(13px + var(--ui-step) * 0.9), 27px);
+  --fs-xs: clamp(10px, calc(12px + var(--ui-step) * 0.8), 25px);
+  --fs-tiny: clamp(9px, calc(11px + var(--ui-step) * 0.7), 23px);
+  --fs-micro: clamp(8px, calc(10px + var(--ui-step) * 0.6), 20px);
+  --h-btn: clamp(28px, calc(30px + var(--ui-step) * 1.2), 52px);
+  --h-btn-sm: clamp(26px, calc(28px + var(--ui-step) * 1.1), 48px);
+  --sp-page: clamp(12px, calc(16px + var(--ui-step) * 1.2), 38px);
+  --sp-inline: clamp(14px, calc(20px + var(--ui-step) * 1.5), 48px);
+  --sp-gap: clamp(6px, calc(10px + var(--ui-step)), 26px);
+  --card-min: clamp(340px, calc(420px + var(--ui-step) * 24), 820px);
+  --thumb-w: clamp(100px, calc(118px + var(--ui-step) * 10), 280px);
+  --thumb-h: clamp(56px, calc(66px + var(--ui-step) * 6), 162px);
+  --side-nav: clamp(132px, calc(156px + var(--ui-step) * 12), 348px);
+  --content-max: clamp(760px, calc(960px + (100vw - 1280px) * 0.6), 2200px);
+}
+
+/* Undo the frozen dialog canvas for real windows. The body stays a flex/flow
+   host at 100% of the viewport; each page owns its own scrolling region. */
+html, body { width: 100%; height: 100%; }
+body { font-size: var(--fs-body); }
+
+/* ---------- shared navigation bar (injected by shell/app-nav.js) ---------- */
+.ytv-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-height: var(--h-btn);
+  padding: 0 0 6px;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-sm);
+}
+.ytv-nav[data-hidden="true"] { display: none; }
+.ytv-nav .ytv-nav-spacer { flex: 1 1 auto; }
+.ytv-nav .ytv-nav-current {
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  white-space: nowrap;
+  letter-spacing: .02em;
+}
+.ytv-nav .ytv-nav-btn {
+  height: var(--h-btn-sm);
+  padding: 0 clamp(8px, calc(12px + var(--ui-step)), 20px);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.ytv-nav .ytv-nav-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ytv-nav .ytv-nav-btn[aria-current="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+.ytv-nav .ytv-nav-btn[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+  font-weight: 700;
+}
+html[data-theme="dark"] .ytv-nav .ytv-nav-btn {
+  background: var(--panel);
+  color: var(--ink);
+  border-color: var(--line);
+}
+html[data-theme="dark"] .ytv-nav .ytv-nav-btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: #0e1720;
+}
+.ytv-nav .ytv-nav-btn[hidden="true"] { display: none !important; }
+
+/* ---------- fluid overrides -------------------------------------------------
+ * Specificity, not source order: these selectors outrank the per-page inline
+ * <style> blocks (which load after this file). Every value equals the old
+ * literal at 1280x800, so the frozen viewport renders unchanged. The M3
+ * dialogs do not load this file and are therefore untouched.
+ */
+html body .queue-page {
+  padding: var(--sp-page) var(--sp-inline) 10px;
+  gap: var(--sp-gap);
+}
+html body .queue-head h1 { font-size: var(--fs-h1); }
+html body .queue-sub { font-size: var(--fs-xs); }
+html body .brand-text b { font-size: var(--fs-brand); }
+html body .brand-text small { font-size: var(--fs-micro); }
+html body .queue-search {
+  width: calc(240px + var(--ui-step) * 12);
+  height: var(--h-btn);
+  font-size: var(--fs-sm);
+}
+html body .queue-count { font-size: var(--fs-xs); }
+html body .lang-switch button { height: var(--h-btn); font-size: var(--fs-xs); }
+html body .icon-btn { height: var(--h-btn); font-size: var(--fs-sm); }
+html body .queue-tab { height: var(--h-btn); font-size: var(--fs-sm); }
+html body .queue-url {
+  width: calc(250px + var(--ui-step) * 12);
+  height: var(--h-btn);
+  font-size: var(--fs-sm);
+}
+html body .queue-actions button { height: var(--h-btn); font-size: var(--fs-sm); }
+html body .queue-actions .queue-kind-btn { height: var(--h-btn-sm); font-size: var(--fs-xs); }
+html body .queue-select { height: var(--h-btn); font-size: var(--fs-xs); }
+html body .queue-tools { gap: var(--sp-gap); font-size: var(--fs-body); }
+html body .queue-tools label,
+html body .queue-tools select,
+html body .queue-tools button { font-size: var(--fs-xs); }
+html body .queue-tools button { height: var(--h-btn-sm); }
+html body .queue-tools .tools-hint { font-size: var(--fs-tiny); }
+html body .queue-selected { font-size: var(--fs-xs); }
+html body .cards {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--card-min)), 1fr));
+  gap: var(--sp-gap);
+}
+html body .card { padding: var(--sp-gap); gap: var(--sp-gap); }
+html body .thumb { width: var(--thumb-w); height: var(--thumb-h); }
+html body .card-title { font-size: var(--fs-sm); }
+html body .card-meta { font-size: var(--fs-xs); }
+html body .badge { font-size: var(--fs-tiny); }
+html body .card-foot button { font-size: var(--fs-xs); }
+html body .queue-foot { font-size: var(--fs-tiny); }
+html body .queue-version,
+html body .queue-status { font-size: var(--fs-xs); }
+html body .queue-ambient span { font-size: calc(30px + var(--ui-step) * 2); }
+/* D-106: fullscreen is ONE shared control in the navigation bar; keep the
+   legacy header button in the DOM for compatibility but never show two. */
+html body #queue-fullscreen { display: none; }
+
+html body .settings-page {
+  padding: var(--sp-page) var(--sp-inline) 12px;
+  gap: calc(12px + var(--ui-step));
+}
+html body .settings-head h1 { font-size: var(--fs-h1); }
+html body .settings-head .meta { font-size: var(--fs-xs); }
+html body .settings-shell { gap: calc(16px + var(--ui-step) * 1.2); }
+html body .settings-nav { flex: 0 0 var(--side-nav); }
+html body .settings-nav a { font-size: var(--fs-xs); }
+html body .settings-scroll > .section { max-width: var(--content-max); }
+html body .section { padding: calc(12px + var(--ui-step)) calc(14px + var(--ui-step)); }
+html body .section h2 { font-size: var(--fs-body); }
+html body .row { font-size: var(--fs-sm); }
+html body .row .label { width: calc(132px + var(--ui-step) * 8); }
+html body .segmented button { height: var(--h-btn); font-size: var(--fs-sm); }
+html body .note { font-size: var(--fs-xs); }
+html body .cache-label { font-size: var(--fs-tiny); }
+html body .update-row button { height: var(--h-btn-sm); font-size: var(--fs-xs); }
+html body .path-row { font-size: var(--fs-xs); }
+html body .about-line { font-size: var(--fs-xs); }
+html body .settings-page select { height: var(--h-btn); font-size: var(--fs-sm); }
+
+html body .detail-page,
+html body .log-page,
+html body .batch-page { padding: var(--sp-page) var(--sp-inline); }
+html body .detail-title { font-size: calc(18px + var(--ui-step) * 1.2); }
+html body .detail-grid { font-size: var(--fs-sm); }

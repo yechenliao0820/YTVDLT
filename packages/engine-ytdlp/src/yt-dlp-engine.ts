@@ -219,12 +219,21 @@ export class YtDlpEngine implements DownloadEngine {
     const manifestPath = artifactManifestPath(manifestDir, taskId);
 
     // `--print-to-file` APPENDS; a stale manifest would leak old paths.
-    try { await this.deps.ports.fs.unlink(manifestPath); } catch { /* absent is fine */ }
-    try { await this.deps.ports.fs.mkdir(manifestDir); } catch { /* best effort */ }
-    try { await this.deps.ports.fs.mkdir(req.paths.videoDir); } catch { /* best effort */ }
-    if (req.format.extractAudio) {
-      try { await this.deps.ports.fs.mkdir(req.paths.audioDir); } catch { /* best effort */ }
-    }
+    //
+    // D-108: these four preparations are independent — no path is a parent of
+    // another's *target file*, every one is best-effort, and all four must
+    // finish before the spawn (yt-dlp writes the manifest into `manifestDir`).
+    // Issuing them as one batch removes three sequential round trips from the
+    // launch path. When the manifest is still absent (first run into a folder)
+    // the `unlink` resolves ENOENT, which was already swallowed here.
+    await Promise.all([
+      this.deps.ports.fs.unlink(manifestPath).catch(() => undefined),
+      this.deps.ports.fs.mkdir(manifestDir).catch(() => undefined),
+      this.deps.ports.fs.mkdir(req.paths.videoDir).catch(() => undefined),
+      ...(req.format.extractAudio
+        ? [this.deps.ports.fs.mkdir(req.paths.audioDir).catch(() => undefined)]
+        : []),
+    ]);
 
     const argv = buildDownload(req, {
       jsRuntimePath: this.deps.jsRuntimePath,
