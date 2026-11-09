@@ -313,6 +313,10 @@ ui（零依赖） ← preload ← apps/desktop
 
 17. **`--restrict-filenames` 不是「清理非法字符」**：它的语义是只保留 ASCII，CJK 会被直接删空（中文标题实测变成 `_ [_].mp4`）。Windows 非法字符交给 yt-dlp 默认行为即可（`?`→`？`、`|`→`｜`，是替换不是删除）。这个标志只能作为用户显式选择，绝不能从模板内容推导。
 
+18. **GitHub Release 的资产名会被静默改写**：上传时名字里的空格一律转成点（`YTVDLT Setup 0.2.5.exe` → `YTVDLT.Setup.0.2.5.exe`），你本地文件名不变，线上变了。因此 **`latest.yml` 的 `url` / `path` 必须按点号版本重写再上传**，否则清单指向一个不存在的文件名（404），任何按清单取包的客户端都会失败。这条只影响 `latest.yml` 的消费者（`electron-updater`），应用本体走 `releases/latest` + `browser_download_url`，不受影响（D-113）。
+
+19. **小文件资产的 `/releases/download/` 直链可能 504，而同一版的大资产正常**：0.2.5 的 `latest.yml` 直链连续 504（重传一次仍 504），同一版的 `.exe` / `.blockmap` 都是 302，0.2.4 的同名文件也正常。判断方法：改用 API 资产端点 `GET /releases/assets/<id>`（带 `Accept: application/octet-stream`）能正常取到内容，说明文件本身没问题、是 GitHub 侧的网关/CDN 问题。本产品不消费 `latest.yml`，故不阻塞交付；**若将来真的启用 `electron-updater`，发布后必须实测这条直链**。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 ---
@@ -379,6 +383,38 @@ node scripts/check-layering.mjs                     # 有没有偷偷 import nod
   `.gitignore` 是否仍覆盖 `node_modules/`、`dist-*`、`_to-delete/`、随包 exe、`reports/`。
 - 上传后把**仓库地址、分支、本次提交号**写进回复交给业主／下一位；
   发布二进制 Release 同样等业主明确指令，产物在 `dist-<version>/`。
+
+### 发布 Release（0.2.5 起实测路径）
+
+本机**没有 `gh` CLI**（`gh: command not found`），发布走 GitHub REST API，凭据复用
+Git Credential Manager 里那份（`git credential fill` 取 `password`，只在 shell 变量里用，不要打印）。
+
+```bash
+CREDS=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill)
+TOKEN=$(printf '%s' "$CREDS" | sed -n 's/^password=//p')
+
+# 1) 建 release（body 是英文 markdown；tag 由 target_commitish 指向 main 头）
+#    POST https://api.github.com/repos/yechenliao0820/YTVDLT/releases
+#    {tag_name: v<ver>, target_commitish: main, name: "YTVDLT <ver>", body, draft:false}
+
+# 2) 传资产（顺序：latest.yml → blockmap → exe，小文件先上）
+#    POST https://uploads.github.com/repos/<o>/<r>/releases/<id>/assets?name=<URL编码名>
+#    -H "Content-Type: application/octet-stream" --data-binary @"<本地文件>"
+
+# 3) 校验
+curl -s -H "Authorization: Bearer $TOKEN" .../releases/latest   # 应用真实读取的接口
+sha256sum "dist-<ver>/YTVDLT Setup <ver>.exe"                   # 必须等于资产 digest
+```
+
+**发布后的三条硬校验**（缺一条就不算发完）：
+
+1. `releases/latest` 返回新 tag，且资产里 `digest` 非空；
+2. 本地 exe 的 `sha256sum` 与资产 `digest` 逐字符相同（证明上传字节未损坏）；
+3. `git fetch --tags` 后 `git rev-list -n1 v<ver>` == `git rev-parse HEAD`。
+
+**资产名会被 GitHub 改写**：上传名里的空格一律变成点（`YTVDLT Setup 0.2.5.exe` →
+`YTVDLT.Setup.0.2.5.exe`），所以 `latest.yml` 的 `url` / `path` 必须同步改成点号版本再上传
+（见 §9 坑 18）。只传 exe 不改清单，会让任何按清单取文件的客户端 404。
 
 ---
 

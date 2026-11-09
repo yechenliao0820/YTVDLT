@@ -1270,3 +1270,13 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 决策 | ① 新增 `queue.card.connecting`（中：正在连接服务器 / 英：Connecting to the server），`Running` 且无字节时用它；已有字节仍显示「正在获取下载进度」。② 轮询改自适应：有活动任务 400 ms、空闲回落 1200 ms（保持既有节奏，不给空闲场景加负载）；同时把 `paintKey`（DOM 形状）与 `progressKey`（数字）拆开——只有形状变化才整表重绘，数字变化走 `patchProgress()` 原位更新，避免 400 ms 重建 `<img>` 造成封面闪烁。③ 引擎丢弃「`percent === 100` 且 `downloadedBytes < 64 KiB`」的元数据传输。 |
 | 验证 | `queue-progress.test.ts` 更新文案断言并补沙箱定时器；新增契约用例（712 B 的 100% 行必须被跳过，percent 序列为 `[3, 50]`）；单测 `985` 例、L2 集成 `10` 例、e2e `31/31 + 反例 5/5`（0 像素，无需重建基线）；真机开发模式 100 ms 采样可见连续百分比。 |
 | 未覆盖 | ① 下载到 100% 之后的封装/校验空窗（实测 95 s → 130 s，约 35 s）仍在，属于「下载等待时间」范畴，业主明确本轮不处理。② 多流下载（先视频后音频）在流切换时百分比会回落，未做跨流加权。③ 未在安装版复验。 |
+
+## D-113 · 2026-11-09 · 0.2.5 的发布方式：无 gh CLI，走 REST API；资产名与清单必须对齐
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主要求发布 0.2.5 并写英文更新说明。本机 `gh` 不存在（`gh: command not found`），无法用 `gh release create`。 |
+| 根因 / 约束 | ① 没有 `gh`，但 Git Credential Manager 里已存有 GitHub 凭据，`git credential fill` 可取出 token（40 位），足以调用 REST API。② GitHub 会**改写** release 资产名：上传名里的空格统一转成点（`YTVDLT Setup 0.2.5.exe` → `YTVDLT.Setup.0.2.5.exe`）。而 `electron-builder` 产出的 `latest.yml` 里 `url` / `path` 写的是**带空格**的本地名，直接用就会指向一个不存在的资产。 |
+| 决策 | ① 发布走 REST：`POST /releases`（tag `v0.2.5`、`target_commitish=main`、`draft=false`）→ `POST /uploads.github.com/.../assets`（`latest.yml` → blockmap → exe，小文件先上）。② `latest.yml` 上传前把两处文件名改成点号版本（与 0.2.1–0.2.4 的资产命名一致），保持清单与资产同名。③ 说明正文用英文，`D-110…D-112` 作为括注保留可追溯性（铁律 14）。④ 不产便携版（铁律 9）。 |
+| 验证 | 资产三个全部 `uploaded` 且带 `digest`；本地 `sha256sum` = `8417c5a0…80abd0` 与资产 digest **逐字符相同**；`releases/latest` 返回 `v0.2.5` 与三个资产（应用本体更新通道读的就是这个接口）；`git fetch --tags` 后 `v0.2.5` 指向 `e196c1f`，与 HEAD 一致；Release 页面 200。 |
+| 未覆盖 | ① `https://github.com/.../releases/download/v0.2.5/latest.yml` 直链持续 **504**（删除重传一次仍 504），同版 `.exe` / `.blockmap` 与 0.2.4 的 `latest.yml` 均正常；经 API 资产端点取同一文件内容正确。判断为 GitHub 侧网关问题，未继续追。② 本产品未装配 `electron-updater`（`electron-updater-adapter.ts` 在运行时无引用），故该 504 不影响交付；将来若启用则必须复测该直链。③ 未在干净机器上跑「0.2.4 → 0.2.5」的真实更新链路（只验证了接口返回与摘要）。 |
