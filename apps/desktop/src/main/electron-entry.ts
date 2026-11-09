@@ -16,7 +16,7 @@ import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeTheme, shell, Tray 
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { CorePorts, EngineUpdateSource } from '@ytvdlt/shared';
-import { ArtifactVerifier, ErrorMapper, Logger, expandEnvVars } from '@ytvdlt/core';
+import { ArtifactVerifier, ErrorMapper, Logger, expandEnvVars, type IConfigStore } from '@ytvdlt/core';
 import { createEngine } from '@ytvdlt/engine-ytdlp';
 import { createNodePorts } from './adapters/node-ports.js';
 import { createElectronShellPort } from './adapters/electron-shell-port.js';
@@ -26,7 +26,7 @@ import { createNodeProbePort, resolveDataDir } from './data-dir.js';
 import { createQueueIntakeGate } from './adapters/queue-intake-gate.js';
 import { LocalDirUpdateSource } from './adapters/local-dir-update-source.js';
 import { createAppUpdateService, type AppUpdateService } from './app-update-service.js';
-import { createThumbnailCache } from './thumbnail-cache.js';
+import { createThumbnailCache, type ThumbnailCache } from './thumbnail-cache.js';
 import {
   createComponentUpdater, type ComponentUpdatePort,
 } from './component-updater.js';
@@ -94,6 +94,11 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
   // It is assigned inside createHost(), which bootstrap() awaits before the
   // first window close can happen.
   let hostRef: M5Host | null = null;
+  // D-103: the cache is assembled inside createHost(), but the private-mode
+  // cleanup and the boot auto-prune live in this scope. Mutable holders keep
+  // the dependency direction one-way (same pattern as `hostRef`).
+  let configRef: IConfigStore | null = null;
+  let thumbnailsRef: ThumbnailCache | null = null;
 
   /** Clear history only when `general.privateMode` is on; never touches files. */
   const clearPrivateHistory = async (): Promise<void> => {
@@ -104,6 +109,9 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       for (const record of host.m4.task.queue.list()) {
         if (record.state === 'Running' || record.state === 'FetchingInfo') continue;
         await host.m4.task.queue.remove(record.id);
+        // D-103: drop the cover reference too; the file is recycled by a later
+        // prune pass, never here (shutdown must not touch the filesystem).
+        thumbnailsRef?.forget(record.id);
       }
     } catch {
       // Best effort: a failed snapshot write must never block shutdown.
@@ -196,11 +204,38 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     };
 
     // 0.2.1 (D-96): covers are cached next to the config, never hot-linked.
+    // D-103: the same cache now owns its own retention. All policy values come
+    // from `advanced.*` in config.json, so the Settings page and a manual edit
+    // of the config file are the same source of truth.
+    const numeric = (value: unknown, fallback: number): number =>
+      typeof value === 'number' && Number.isFinite(value) ? value : fallback;
     const thumbnails = createThumbnailCache({
       dir: join(dataDir.dataDir, 'thumbs'),
       ...(ports.http === undefined ? {} : { http: ports.http }),
       logger,
+      liveTaskIds: () => (hostRef?.m4.task.queue.list().map((item) => item.id) ?? []),
+      policy: () => ({
+        enabled: configRef?.get('advanced', 'autoCleanThumbnailCache') !== false,
+        maxBytes: numeric(configRef?.get('advanced', 'thumbnailCacheMaxBytes'), 128 * 1024 * 1024),
+        maxFiles: numeric(configRef?.get('advanced', 'thumbnailCacheMaxFiles'), 500),
+        maxAgeDays: numeric(configRef?.get('advanced', 'thumbnailCacheMaxAgeDays'), 30),
+      }),
+      setPolicy: async (patch) => {
+        const config = configRef;
+        if (config === null) return;
+        const next: Record<string, unknown> = {};
+        if (patch['enabled'] !== undefined) next['autoCleanThumbnailCache'] = patch['enabled'];
+        if (patch['maxBytes'] !== undefined) next['thumbnailCacheMaxBytes'] = patch['maxBytes'];
+        if (Object.keys(next).length > 0) await config.setDomain('advanced', next);
+      },
+      // §0.1 of the maintenance handbook: the ONLY deletion primitive is the
+      // OS recycle bin. Nothing in the cache adapter can permanently unlink.
+      trash: async (path) => {
+        try { await shell.trashItem(path); return true; }
+        catch { return false; }
+      },
     });
+    thumbnailsRef = thumbnails;
 
     const host = await createM5Host({
       ports,
@@ -243,6 +278,7 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       },
     });
     hostRef = host;
+    configRef = host.m4.task.config;
 
     componentUpdater = createComponentUpdater({
       ports,
@@ -310,20 +346,29 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
 
     // Covers: one attempt per task, triggered the moment the probe result is
     // known (first progress event) and once at boot for restored tasks.
-    const ensureCover = (taskId: string): void => {
+    // D-103: `ensure()` now hits the local file first, so the boot restore is
+    // also what rebuilds the task -> cover references before the first prune.
+    const ensureCover = (taskId: string): Promise<string | null> => {
       const record = host.m4.task.queue.get(taskId);
       const url = record?.mediaInfo?.thumbnail ?? null;
-      if (url !== null) void thumbnails.ensure(taskId, url);
+      return url === null ? Promise.resolve(null) : thumbnails.ensure(taskId, url);
     };
     host.m4.task.queue.onEvent((event) => {
-      if (event.type === 'progress') { ensureCover(event.taskId); return; }
-      if (event.type === 'state-changed' && event.to === 'Running') ensureCover(event.taskId);
+      if (event.type === 'progress') { void ensureCover(event.taskId); return; }
+      if (event.type === 'state-changed' && event.to === 'Running') void ensureCover(event.taskId);
     });
     let bootCovers = 0;
+    const bootCoverAttempts: Promise<string | null>[] = [];
     for (const record of host.m4.task.queue.list()) {
       if (bootCovers >= 20) break;
-      if (record.mediaInfo?.thumbnail) { ensureCover(record.id); bootCovers += 1; }
+      if (record.mediaInfo?.thumbnail) { bootCoverAttempts.push(ensureCover(record.id)); bootCovers += 1; }
     }
+    // Never delay the first frame, and never prune before the references above
+    // have been attached. A failed/slow fetch cannot block housekeeping.
+    void Promise.allSettled(bootCoverAttempts).then(async () => {
+      if (configRef?.get('advanced', 'autoCleanThumbnailCache') === false) return;
+      await thumbnails.prune();
+    }).catch(() => undefined);
 
     // Never awaited: a slow network must not delay the first frame.
     if (appUpdater.shouldAutoCheck()) void appUpdater.check();

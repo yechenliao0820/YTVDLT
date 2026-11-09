@@ -134,10 +134,11 @@ ui（零依赖） ← preload ← apps/desktop
 | 队列调度、并发、暂停、历史快照 | `core/src/task-queue/`、`task-store/`；数据目录判定在 `data-dir.ts` |
 | 详情页、日志页、设置页、M3 三个对话框 | `packages/ui/src/pages/*`、`packages/ui/src/dialogs/*` |
 | 打包配置、图标、安装包 | `apps/desktop/electron-builder.yml`、`scripts/make-icon.mjs`、`apps/desktop/build/installer.nsh` |
-| **应用本体更新（检查 / 说明弹窗 / 下载校验 / 安装 / 忽略版本）** | `main/app-update-service.ts`、`main/github-releases.ts`、`main/adapters/http-download.ts`；纯规则在 `core/src/app-update/`；弹窗在 `ui/src/updates/update-dialog.js` |
+| **应用本体更新（检查 / 说明弹窗 / 下载校验 / 安装 / 忽略版本）** | `main/app-update-service.ts`、`main/github-releases.ts`、`main/adapters/http-download.ts`；纯规则在 `core/src/app-update/`；弹窗在 `ui/src/updates/update-dialog.js`。D-104：缓存复用与安装前都重算 SHA-256，基准为发布 `digest` 或 `<target>.sha256` sidecar，失败只隔离不删 |
 | **yt-dlp 组件更新（版本查询 / 换文件 / 自动检查）** | `main/component-updater.ts`（`feedUrl` / `versionApiUrl`）、`engine-ytdlp/src/self-updater.ts` |
 | **队列进度（总大小 / 速度 / 剩余时间）** | `core/src/task-queue/task-queue.ts`（progress 分支）→ `main/m5-channels.ts::toTaskListItem` → `ui/src/pages/queue/queue.js::progressText` |
 | **队列封面缩略图** | `main/thumbnail-cache.ts`、`main/m5-channels.ts::ThumbnailPort`、`queue.js::thumbNode` |
+| **封面缓存清理（占用 / 自动清理 / 立即清理）** | `core/src/thumbnail-cache-policy/`（纯策略）→ `main/thumbnail-cache.ts`（`index.json` / `status()` / `prune()`）→ `main/m5-channels.ts::THUMBNAIL_CACHE` → `ui/src/pages/settings/settings.js::installCacheControls()`；配置在 `advanced.autoCleanThumbnailCache` / `thumbnailCacheMaxBytes` / `MaxFiles` / `MaxAgeDays` |
 | **下载位置（视频 / 音频目录）** | `ui/src/pages/settings/*`（`#section-paths`）→ `main/m5-channels.ts::PATH_ACTION` → `core/config-store/defaults.ts::DEFAULT_PATH_TOKENS`；原生对话框在 `main/adapters/path-picker.ts` |
 | **设置页分区目录 + 滚动联动** | `ui/src/pages/settings/index.html`（`.settings-shell` / `.settings-nav` / `.settings-scroll`）、`settings.js::installSectionNav()` |
 | 截图基线用例 | `scripts/e2e-cases.mjs`、`tests/e2e/baselines/` |
@@ -184,6 +185,7 @@ ui（零依赖） ← preload ← apps/desktop
 6. **更新三分家**（D-93 / D-94）：`APP_UPDATE_*` 管应用本体（GitHub Release），`COMPONENT_CHECK` / `COMPONENT_UPDATE` 管随包二进制，`COMPONENT_STATUS` 只读本地版本。`APP_UPDATE_STATUS` 是纯内存读，队列页与设置页都以轮询方式消费，**不要为它加主进程推送**。
 7. **`TASK_LIST` 只回本地封面路径 `thumbPath`**：远端缩略图 URL 由主进程缓存成文件，URL 本身永不出主进程（与 URL 脱敏同一条规则）。
 8. **`PATH_ACTION` 不接受路径字符串**（D-98）：渲染层只能发 `{action: pick|reset|open, kind: video|audio}`，能写进 `paths.*` 的只有主进程对话框选出来的目录。改这条等于给渲染层开一个"任意写配置路径"的口子。
+9. **`THUMBNAIL_CACHE` 不接受路径**（D-103）：渲染层只能发 `{action: status|prune|set-auto|set-max-bytes, enabled?, maxBytes?}`。删除只在主进程发生，且必须经 `isSafeCacheName()` + 目录前缀校验后走 `shell.trashItem`；把路径或删除原语带进这个通道等于给渲染层开一个"任意删文件"的口子。
 
 ---
 
@@ -195,7 +197,7 @@ ui（零依赖） ← preload ← apps/desktop
 | 装到 `C:\Program Files`（不可写） | `%APPDATA%\YTVDLT\config\…`（`data-dir.ts` 写探针实测可写性） |
 | 默认下载目录 | 视频 `%USERPROFILE%\Downloads\YTVDLT`、音频 `…\YTVDLT\Audio`（**运行时展开**，spawn 不经过 shell） |
 | 用户改过下载目录 | `paths.videoDir` / `paths.audioDir` 存**绝对路径**；未改过则存 token（`%USERPROFILE%/…`），换机器仍跟用户目录走（D-98） |
-| 封面缓存 / 更新包 | `<dataDir>\thumbs\<sha1(url)>.<ext>`、`<dataDir>\updates\YTVDLT-Setup-*.exe`（D-93 / D-96） |
+| 封面缓存 / 更新包 | `<dataDir>\thumbs\<sha1(url)>.<ext>`、同目录 `index.json`（D-103 持久索引：taskIds / bytes / lastUsedAt）、`<dataDir>\updates\YTVDLT-Setup-*.exe`（D-93 / D-96） |
 
 `config/config.json` 按域组织：`general / format / subtitle / paths / network / advanced`；
 `config/tasks.json` 是队列快照。
@@ -266,7 +268,8 @@ ui（零依赖） ← preload ← apps/desktop
 | `scripts/build-desktop.mjs` | esbuild 打包主进程 + preload，拷贝 `packages/ui/src` 到 `apps/desktop/dist`。**改前端后必须先跑** |
 | `scripts/make-icon.mjs` | 生成四档 `icon.ico`；改图标后必须重跑并重新打包 |
 | `scripts/run-tests.mjs` | vitest 封装（`all --coverage` / `unit` / `contract` / `integration`） |
-| `scripts/run-e2e.mjs` | PNG + DOM 基线对比，含反例；`--case=<id>` / `--update-baselines` |
+| `scripts/run-e2e.mjs` | PNG + DOM 基线对比，含反例；`--case=<id>` / `--update-baselines`。D-105：浏览器路径由 `lib/find-browser.mjs` 自动发现，版本门槛可用 `YTVDLT_E2E_EXPECT_VERSION` / `YTVDLT_E2E_ALLOW_VERSION_MISMATCH` 配置 |
+| `scripts/lib/find-browser.mjs` | E2E 浏览器自动发现：env 覆盖 → `PLAYWRIGHT_BROWSERS_PATH` / ms-playwright 缓存 → 系统 Chrome → PATH；缺失时输出安装指引 |
 | `scripts/handoff-check.mjs` | 把文档数字与仓库现状对账 |
 | `scripts/acceptance.mjs` | 里程碑验收，产出 `reports/acceptance-report-m*.json` |
 | `scripts/l3-smoke.mjs` | 打包应用在线烟测（CDP 驱动真实 IPC） |
@@ -291,6 +294,9 @@ ui（零依赖） ← preload ← apps/desktop
 10. **设置页的滚动发生在内层 `.settings-scroll`**：目录要跟着高亮，就必须用内层 `scrollTop` 而不是文档滚动；并且**底部要留出 `max(140px, 60vh)` 的空白**，否则最后两个分区永远滚不到探针线，点「关于」会停在高亮「下载位置」的位置（D-99）。首帧 rect 不可信，`load` + `ResizeObserver` 各复测一次。
 11. **yt-dlp 不会覆盖同名文件**：第二次下载只会打印 `has already been downloaded` 并退出 0，应用随后拿到的是**旧文件**。要让用户「再存一份」，必须在 spawn 之前把 ` (n)` 插进 `-o` 模板（`TaskQueue.withCopySuffix()`），而不是事后改历史（D-101）。同理：这种情况**不能判 Error**，文件在盘上、校验也过了。
 
+12. **更新器缓存复用不等于「已校验」**（D-104）：大小 + `MZ` 只能证明文件像 exe，证明不了它是当初验证过的那份。复用与安装前都必须用 `CorePorts.hash.sha256File()` 重算；发布端可能不给 `digest`，所以首次下载要落 `.sha256` sidecar；两个基准都没有就拒绝复用、重新下载，绝不因为「没有哈希」而跳过校验。可疑文件只改名隔离，不永久删除。
+13. **截图基线的载体是 `chrome-headless-shell`**（D-105）：完整 Chrome 与 headless shell 的滚动条 / 字体光栅化不同，自动发现时 headless-shell 构建必须优先命中，否则会出现「版本字符串相同但像素全变」。版本门槛默认严格；换机器先用 env 指路，找不到浏览器要给安装命令而不是 ENOENT。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 ---
@@ -307,7 +313,6 @@ ui（零依赖） ← preload ← apps/desktop
 | 托盘菜单与 NSIS 安装向导未双语；托盘右键无「设置/关于」 | `apps/desktop/src/main/tray.ts` |
 | M3 弹窗里 JS 拼接的文案可能中英混排 | `ui/src/i18n/messages.js::PHRASES` |
 | 便携版不参与自更新（只认 `Setup` 资产，`-portable` 被打 0 分） | `core/src/app-update/release.ts::selectInstallerAsset` |
-| 缩略图缓存按 URL 哈希去重但从不清理 | `apps/desktop/src/main/thumbnail-cache.ts` |
 | 后处理（合并/转码）阶段没有速度与剩余时间（引擎不报 `speed`） | `ui/src/pages/queue/queue.js::progressText` |
 | 应用更新没有差量下载，每次整包（约 216 MiB） | `apps/desktop/src/main/adapters/http-download.ts` |
 | 删本地文件、只读目录安装的在线下载，仍待目标环境真机复测 | §4 分诊表对应行 |

@@ -15,13 +15,17 @@
  *
  * Invariants that must not be relaxed:
  *   - a failed check/download NEVER changes the running app (phase → `error`);
- *   - nothing becomes installable without a size + (when available) SHA-256
- *     match plus a PE header check — a truncated 220 MB exe is the classic
- *     silent failure;
- *   - the installer URL must be a GitHub host (see `isTrustedReleaseHost`);
- *   - `install()` is refused unless the file passed verification.
+ *   - nothing becomes installable without a size + SHA-256 + PE header check —
+ *     a truncated 220 MB exe is the classic silent failure;
+ *   - D-104: a REUSED cache file gets the SAME hash check as a fresh download.
+ *     The published `digest` is authoritative; when GitHub omits it, a
+ *     `.sha256` sidecar written at first download is the fallback. With neither
+ *     baseline the cache is refused and the installer is downloaded again;
+ *   - `install()` re-verifies all three on the bytes about to be launched, so
+ *     a file replaced between "ready" and "install" cannot be executed;
+ *   - the installer URL must be a GitHub host (see `isTrustedReleaseHost`).
  */
-import { rename } from 'node:fs/promises';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import type {
   AppRelease, AppReleaseAsset, AppUpdateAction, AppUpdateActionResult,
   AppUpdateState, CorePorts,
@@ -84,6 +88,34 @@ function safeFileName(name: string): string {
   return base === '' || base === '.' || base === '..' ? 'YTVDLT-Setup.exe' : base;
 }
 
+/**
+ * D-104 · a locally persisted hash baseline for releases whose GitHub asset
+ * has no `digest` field. Written atomically next to the installer after the
+ * first verified download; a cache file without one cannot be trusted.
+ */
+function sidecarPath(target: string): string { return `${target}.sha256`; }
+
+async function readSidecar(target: string): Promise<string | null> {
+  try {
+    const raw = (await readFile(sidecarPath(target), 'utf8')).trim().toLowerCase();
+    return /^[a-f0-9]{64}$/.test(raw) ? raw : null;
+  } catch { return null; }
+}
+
+async function writeSidecar(target: string, hex: string): Promise<void> {
+  const sidecar = sidecarPath(target);
+  const temp = `${sidecar}.tmp`;
+  await writeFile(temp, `${hex.toLowerCase()}\n`, 'utf8');
+  await rename(temp, sidecar);
+}
+
+/** Move a suspect installer aside (never delete): support can still inspect it. */
+async function isolateFile(target: string, tag: string): Promise<string> {
+  const isolated = `${target}.${tag}-${Date.now()}`;
+  await rename(target, isolated).catch(() => undefined);
+  return isolated;
+}
+
 export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateService {
   const { ports, logger, config } = deps;
 
@@ -93,6 +125,8 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
   let downloadedBytes = 0;
   let totalBytes: number | null = null;
   let installerPath: string | null = null;
+  /** Hash actually verified on the bytes now in `installerPath` (D-104). */
+  let verifiedSha256: string | null = null;
   let lastCheckedAt: string | null = null;
   let disposed = false;
 
@@ -162,6 +196,7 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       if (!isNewerVersion(release.version, deps.currentVersion)) {
         latest = null;
         installerPath = null;
+        verifiedSha256 = null;
         phase = 'idle';
         message = `已是最新版本（${deps.currentVersion}）`;
         return state();
@@ -169,6 +204,7 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
 
       latest = release;
       installerPath = null;
+      verifiedSha256 = null;
       downloadedBytes = 0;
       totalBytes = release.installer?.sizeBytes ?? null;
       phase = 'available';
@@ -184,14 +220,39 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
     }
   }
 
-  /** Reuse a previously verified file instead of re-downloading 220 MB. */
-  async function verifiedCachedFile(asset: AppReleaseAsset): Promise<string | null> {
+  /**
+   * D-104: reuse a previously verified file instead of re-downloading 220 MB —
+   * but ONLY after recomputing its SHA-256. Size + `MZ` alone cannot detect a
+   * corrupted or substituted cache file. The published `digest` wins; a local
+   * sidecar (written at first download) is the fallback when GitHub omits it;
+   * with neither, the cache is refused rather than silently trusted.
+   */
+  async function verifiedCachedFile(
+    asset: AppReleaseAsset,
+  ): Promise<{ path: string; sha256: string } | null> {
     const path = `${deps.updatesDir}/${safeFileName(asset.name)}`;
     const size = await fileSize(path);
     if (size <= 0) return null;
     if (asset.sizeBytes > 0 && size !== asset.sizeBytes) return null;
     if (!(await looksLikeExecutable(path).catch(() => false))) return null;
-    return path;
+
+    const baseline = asset.sha256 ?? await readSidecar(path);
+    if (baseline === null) return null; // fail-closed: no trustworthy baseline
+    const expected = baseline.toLowerCase();
+    const actual = await ports.hash.sha256File(path).catch(() => null);
+    if (actual === null || actual.toLowerCase() !== expected) {
+      const isolated = await isolateFile(path, 'checksum-mismatch');
+      await logger.warn('app-update', 'cached installer failed SHA-256; isolated and re-downloading', {
+        detail: isolated,
+      });
+      return null;
+    }
+    // Published digest is authoritative: keep the sidecar in sync for later
+    // launches where the API may no longer return a digest.
+    if (asset.sha256 !== null && (await readSidecar(path)) !== expected) {
+      await writeSidecar(path, expected).catch(() => undefined);
+    }
+    return { path, sha256: expected };
   }
 
   async function download(): Promise<AppUpdateState> {
@@ -213,10 +274,11 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
     try {
       const cached = await verifiedCachedFile(asset);
       if (cached !== null) {
-        installerPath = cached;
+        installerPath = cached.path;
+        verifiedSha256 = cached.sha256;
         downloadedBytes = asset.sizeBytes;
         phase = 'ready';
-        message = '安装包已就绪（复用上次下载）';
+        message = '安装包已就绪（复用上次下载，SHA-256 已复验）';
         return state();
       }
 
@@ -243,16 +305,24 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       if (!(await looksLikeExecutable(target))) problems.push('不是有效的 Windows 可执行文件');
 
       if (problems.length > 0) {
-        const rejected = `${target}.rejected`;
-        await rename(target, rejected).catch(() => undefined);
+        const rejected = await isolateFile(target, 'rejected');
         await logger.error('app-update', 'installer verification failed', { problems });
         installerPath = null;
+        verifiedSha256 = null;
         phase = 'error';
         message = `安装包校验失败：${problems.join('；')}（文件保留为 ${rejected}）`;
         return state();
       }
 
+      // D-104: persist the hash of the bytes we just verified, so a later
+      // launch can reuse this cache even when the API returns no digest.
+      await writeSidecar(target, result.sha256).catch(async (error: unknown) => {
+        await logger.warn('app-update', 'could not write checksum sidecar', {
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      });
       installerPath = target;
+      verifiedSha256 = result.sha256.toLowerCase();
       downloadedBytes = result.bytes;
       totalBytes = result.bytes;
       phase = 'ready';
@@ -273,8 +343,28 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       return result(false, 'install', '安装包尚未就绪');
     }
     const executable = installerPath;
-    if (!(await looksLikeExecutable(executable).catch(() => false))) {
-      return result(false, 'install', '安装包损坏，请重新下载');
+    // D-104: the file may have been swapped or damaged AFTER `ready`. Re-run
+    // all three checks on the exact bytes we are about to hand to the OS.
+    const asset = latest?.installer ?? null;
+    const baseline = verifiedSha256 ?? asset?.sha256 ?? await readSidecar(executable);
+    const expected = baseline === null || baseline === undefined ? null : baseline.toLowerCase();
+    const problems: string[] = [];
+    if (!(await looksLikeExecutable(executable).catch(() => false))) problems.push('PE 文件头无效');
+    const size = await fileSize(executable);
+    if (asset !== null && asset.sizeBytes > 0 && size !== asset.sizeBytes) {
+      problems.push(`大小不符（${size}/${asset.sizeBytes}）`);
+    }
+    const actual = expected === null ? null : await ports.hash.sha256File(executable).catch(() => null);
+    if (expected === null || actual === null || actual.toLowerCase() !== expected) {
+      problems.push('SHA-256 不匹配或缺少可信基准');
+    }
+    if (problems.length > 0) {
+      const isolated = await isolateFile(executable, 'install-rejected');
+      installerPath = null;
+      verifiedSha256 = null;
+      phase = 'error';
+      message = `安装前完整性校验失败：${problems.join('；')}（文件已隔离为 ${isolated}，请重新下载）`;
+      return result(false, 'install', message);
     }
     try {
       const error = await deps.openPath(executable);

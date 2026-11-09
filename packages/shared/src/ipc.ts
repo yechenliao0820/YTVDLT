@@ -45,6 +45,8 @@ export const IPC_CHANNELS = {
   COMPONENT_CHECK: 'ytvdlt:component:check',
   // 0.2.1 (append-only, D-98): pick / reset / open a download directory.
   PATH_ACTION: 'ytvdlt:path:action',
+  // D-103 (append-only): cover-cache occupancy / auto-clean switch / prune.
+  THUMBNAIL_CACHE: 'ytvdlt:thumbnail:cache',
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

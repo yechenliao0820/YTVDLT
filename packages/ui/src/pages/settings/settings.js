@@ -437,6 +437,161 @@
     });
   }
 
+  /* --- D-103: 封面缓存管理 ------------------------------------------------ */
+  /**
+   * All four actions go through ONE channel. The renderer never sends a path:
+   * `status` / `prune` / `set-auto` / `set-max-bytes` are main-process owned,
+   * and the delete primitive there is `shell.trashItem` (never a hard unlink).
+   */
+  var CACHE_CHANNEL = 'ytvdlt:thumbnail:cache';
+
+  function cacheNode(id) { return doc.getElementById(id); }
+
+  function cacheNote(text, state) {
+    var note = cacheNode('settings-cache-note');
+    if (note === null) return;
+    note.removeAttribute('data-i18n');
+    note.textContent = text;
+    note.setAttribute('data-cache-state', state);
+  }
+
+  function cacheControlsEnabled(enabled) {
+    ['settings-cache-auto', 'settings-cache-limit', 'settings-cache-prune'].forEach(function (id) {
+      var node = cacheNode(id);
+      if (node !== null) node.disabled = !enabled;
+    });
+  }
+
+  function paintCache(snapshot) {
+    if (snapshot === null || typeof snapshot !== 'object') return;
+    var bytes = cacheNode('settings-cache-bytes');
+    var files = cacheNode('settings-cache-files');
+    var reclaim = cacheNode('settings-cache-reclaim');
+    // A policy-only update carries no occupancy numbers — leave those alone.
+    if (bytes !== null && typeof snapshot.bytes === 'number') bytes.textContent = formatBytes(snapshot.bytes);
+    if (files !== null && typeof snapshot.files === 'number') {
+      files.textContent = t('settings.cache.filesUnit', { n: snapshot.files });
+    }
+    if (reclaim !== null && typeof snapshot.reclaimableBytes === 'number') {
+      reclaim.textContent = formatBytes(snapshot.reclaimableBytes);
+    }
+
+    var auto = cacheNode('settings-cache-auto');
+    if (auto !== null && typeof snapshot.enabled === 'boolean') auto.checked = snapshot.enabled;
+    var limit = cacheNode('settings-cache-limit');
+    if (limit !== null && typeof snapshot.maxBytes === 'number') {
+      var wanted = String(Number(snapshot.maxBytes) || 0);
+      var match = null;
+      for (var i = 0; i < limit.options.length; i += 1) {
+        if (limit.options[i].value === wanted) { match = limit.options[i]; break; }
+      }
+      if (match === null && wanted !== '0') {
+        // A config.json value outside the four presets must still be shown,
+        // otherwise the dropdown would silently disagree with the stored value.
+        var option = doc.createElement('option');
+        option.value = wanted;
+        option.textContent = formatBytes(Number(wanted));
+        limit.appendChild(option);
+      }
+      limit.value = wanted;
+    }
+  }
+
+  function refreshCache(keepNote) {
+    var pending = invokeBridge(CACHE_CHANNEL, { action: 'status' });
+    if (pending === null) {
+      cacheControlsEnabled(false);
+      cacheNote(t('settings.cache.offline'), 'error');
+      return;
+    }
+    Promise.resolve(pending).then(function (result) {
+      if (result === null || typeof result !== 'object' || result.ok !== true || result.status === undefined) {
+        cacheControlsEnabled(false);
+        cacheNote(t('settings.cache.unavailable'), 'error');
+        return;
+      }
+      cacheControlsEnabled(true);
+      paintCache(result.status);
+      if (keepNote !== true) cacheNote(t('settings.cache.hint'), 'idle');
+    }).catch(function (error) {
+      cacheControlsEnabled(false);
+      cacheNote(t('settings.cache.failed', { reason: String(error) }), 'error');
+    });
+  }
+
+  function updateCachePolicy(payload) {
+    var pending = invokeBridge(CACHE_CHANNEL, payload);
+    if (pending === null) { cacheNote(t('settings.cache.offline'), 'error'); return; }
+    Promise.resolve(pending).then(function (result) {
+      if (result !== null && typeof result === 'object' && result.policy !== undefined) {
+        paintCache({ maxBytes: result.policy.maxBytes });
+        var auto = cacheNode('settings-cache-auto');
+        if (auto !== null && typeof result.policy.enabled === 'boolean') auto.checked = result.policy.enabled;
+      }
+      refreshCache(false);
+    }).catch(function (error) {
+      cacheNote(t('settings.cache.failed', { reason: String(error) }), 'error');
+    });
+  }
+
+  function cleanCacheNow() {
+    var button = cacheNode('settings-cache-prune');
+    if (button !== null) {
+      button.disabled = true;
+      button.removeAttribute('data-i18n');
+      button.textContent = t('settings.cache.pruning');
+    }
+    cacheNote(t('settings.cache.pruning'), 'idle');
+    var pending = invokeBridge(CACHE_CHANNEL, { action: 'prune' });
+    if (pending === null) {
+      cacheNote(t('settings.cache.offline'), 'error');
+      if (button !== null) button.disabled = false;
+      return;
+    }
+    Promise.resolve(pending).then(function (result) {
+      var report = result && result.report ? result.report : null;
+      if (report === null || report.ok !== true) {
+        cacheNote(t('settings.cache.failed', { reason: (result && result.message) || 'unknown' }), 'error');
+        return;
+      }
+      // Explicit before -> after, so the reclaimed space is visible even when
+      // the numbers above already refreshed.
+      cacheNote(t('settings.cache.result', {
+        before: formatBytes(Number(report.bytesBefore) || 0),
+        after: formatBytes(Number(report.bytesAfter) || 0),
+        freed: formatBytes(Number(report.freedBytes) || 0),
+      }), 'ok');
+    }).catch(function (error) {
+      cacheNote(t('settings.cache.failed', { reason: String(error) }), 'error');
+    }).then(function () {
+      if (button !== null) {
+        button.removeAttribute('data-i18n');
+        button.textContent = t('settings.cache.prune');
+        button.disabled = false;
+      }
+      refreshCache(true);
+    });
+  }
+
+  function installCacheControls() {
+    var auto = cacheNode('settings-cache-auto');
+    if (auto !== null) {
+      auto.addEventListener('change', function () {
+        updateCachePolicy({ action: 'set-auto', enabled: auto.checked === true });
+      });
+    }
+    var limit = cacheNode('settings-cache-limit');
+    if (limit !== null) {
+      limit.addEventListener('change', function () {
+        var bytes = Number(limit.value);
+        if (isFinite(bytes) && bytes > 0) updateCachePolicy({ action: 'set-max-bytes', maxBytes: bytes });
+      });
+    }
+    var prune = cacheNode('settings-cache-prune');
+    if (prune !== null) prune.addEventListener('click', cleanCacheNow);
+    refreshCache(false);
+  }
+
   /* --- 0.2.2 (D-99): 目录侧边栏 + 滚动联动 ------------------------------ */
   /**
    * Two behaviours, no dependencies:
@@ -605,6 +760,7 @@
 
     refreshComponents();
     readAppState();
+    installCacheControls();
     installSectionNav();
     // The queue dialog polls the same state; here it only has to keep the card
     // honest while a download is in flight.

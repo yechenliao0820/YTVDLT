@@ -88,8 +88,8 @@ describe('m5 host · gateway composition', () => {
       expect(channels).toContain(channel);
     }
     for (const channel of built.channels) expect(channels).toContain(channel);
-    // 11 (M5) + the four 0.2.1 channels (D-93 / D-94 / D-98).
-    expect(built.channels).toHaveLength(15);
+    // 11 (M5) + the four 0.2.1 channels (D-93 / D-94 / D-98) + THUMBNAIL_CACHE (D-103).
+    expect(built.channels).toHaveLength(16);
     expect(new Set(channels).size).toBe(channels.length);
     built.dispose();
   });

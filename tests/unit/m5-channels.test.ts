@@ -90,9 +90,9 @@ async function harness(
 }
 
 describe('m5 ipc · channel inventory', () => {
-  // 11 (M5) + COMPONENT_CHECK / APP_UPDATE_STATUS / APP_UPDATE_ACTION / PATH_ACTION (0.2.1).
-  it('exposes exactly the fifteen M5 channels, all present in IPC_CHANNELS', () => {
-    expect(M5_CHANNELS).toHaveLength(15);
+  // 11 (M5) + the four 0.2.1 channels + THUMBNAIL_CACHE (D-103).
+  it('exposes exactly the sixteen M5 channels, all present in IPC_CHANNELS', () => {
+    expect(M5_CHANNELS).toHaveLength(16);
     const values = Object.values(IPC_CHANNELS);
     for (const channel of M5_CHANNELS) expect(values).toContain(channel);
     expect(new Set(M5_CHANNELS).size).toBe(M5_CHANNELS.length);

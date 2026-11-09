@@ -421,7 +421,7 @@ const M3_ASSERTIONS = [
   { id: 'A-M3-03', layer: 'L2', batch: 'B4', subject: '字幕弹窗三组 + 搜索 + 已选计数；回写 subtitle.languages 且 enabled=true', e2e: ['subtitle-ready'], tests: ['dialog-dto.contract', 'subtitle-planner'], needs: ['e2eAll', 'vitest'], evidence: ['reports/e2e-summary.json::subtitle-ready', 'tests/contract/dialog-dto.contract.test.ts'] },
   { id: 'A-M3-04', layer: 'L2', batch: 'B4', subject: '播放列表 DTO 驱动 + 计数/时长/路径预览 + 仅回写 selectedIds（不入队）', e2e: ['playlist-ready'], tests: ['dialog-dto.contract', 'playlist-fixture.contract'], needs: ['e2eAll', 'vitest'], evidence: ['reports/e2e-summary.json::playlist-ready', 'tests/e2e/baselines/playlist-ready.dom.html', 'tests/contract/playlist-fixture.contract.test.ts'] },
   { id: 'A-M3-05', layer: 'L2', batch: 'B4', subject: '三态门禁：错误态+重试 / 空态确认禁用 / Audio 置灰 / Command 禁用 / 非法表达式禁用', e2e: ['format-empty', 'format-error', 'format-disabled', 'format-badid', 'subtitle-empty', 'subtitle-disabled', 'subtitle-invalid-expression', 'playlist-empty', 'playlist-error'], needs: ['e2eAll'], evidence: ['reports/e2e-summary.json::9 state cases', 'tests/e2e/baselines/format-empty.dom.html', 'tests/e2e/baselines/subtitle-disabled.dom.html'] },
-  { id: 'A-M3-06', layer: 'L2', batch: 'B4', subject: '三弹窗截图回归：npm run test:e2e 全绿、固定窗口/字体、基线 + 反例复验', e2e: ['format-ready', 'subtitle-ready', 'playlist-ready'], needs: ['e2eAll', 'e2eMeta'], evidence: ['B4 载体：零新增依赖静态 HTML/CSS + 原生 DOM 状态机', 'exe=C:\\Users\\leolee\\AppData\\Local\\ms-playwright\\chromium_headless_shell-1234\\chrome-headless-shell-win64\\chrome-headless-shell.exe', 'exeVersion=Google Chrome for Testing 151.0.7922.34', 'window=1280x800 DPR=1 font=Arial/Helvetica/Liberation Sans/sans-serif disable-lcd-text', 'tests/e2e/baselines/*.png + *.dom.html', 'reports/e2e-summary.json::negativeChecks'] },
+  { id: 'A-M3-06', layer: 'L2', batch: 'B4', subject: '三弹窗截图回归：npm run test:e2e 全绿、固定窗口/字体、基线 + 反例复验', e2e: ['format-ready', 'subtitle-ready', 'playlist-ready'], needs: ['e2eAll', 'e2eMeta'], evidence: ['B4 载体：零新增依赖静态 HTML/CSS + 原生 DOM 状态机', 'exe=自动发现（YTVDLT_CHROME_EXE / PLAYWRIGHT_BROWSERS_PATH / ms-playwright 缓存 / 系统 Chrome）', 'exeVersion=以 reports/e2e-summary.json::exeVersion 为准，基线版本见 exeVersionExpected', 'window=1280x800 DPR=1 font=Arial/Helvetica/Liberation Sans/sans-serif disable-lcd-text', 'tests/e2e/baselines/*.png + *.dom.html', 'reports/e2e-summary.json::negativeChecks'] },
   { id: 'A-M3-07', layer: 'L0', batch: 'B2', subject: '9 类非法字符 + 控制字符 + 结尾点/空格净化，不抛异常', tests: ['path-resolver'], needs: ['vitest'], evidence: ['reports/vitest-results.json::path-resolver.test.ts', 'packages/core/src/path-resolver/path-resolver.ts'] },
   { id: 'A-M3-08', layer: 'L0', batch: 'B2', subject: '保留名大小写不敏感（CON.txt）/ 259·260·261 / %(title).200B / UNC 长路径前缀', tests: ['path-resolver'], needs: ['vitest'], evidence: ['reports/vitest-results.json::path-resolver.test.ts'] },
   { id: 'A-M3-09', layer: 'L0', batch: 'B2', subject: '3 内置模板 + 自定义模板渲染；4 组合路径预览；净化顺序固定', tests: ['path-resolver'], needs: ['vitest', 'deviation'], evidence: ['reports/vitest-results.json::path-resolver.test.ts', 'docs/DECISIONS.md::D-43'] },
@@ -525,6 +525,13 @@ const M3_TEST_FILE_MAP = {
   'copy-suffix.test.ts': ['A-4.2-11', 'A-4.4-27'],
   // 0.2.2 (D-101): repeated downloads get a numbered name instead of an error.
   'copy-suffix.test.ts': ['A-4.2-11', 'A-4.4-27'],
+  // D-103: cover-cache retention (Core policy / main adapter / IPC integration).
+  'thumbnail-cache-policy.test.ts': ['A-M5-00'],
+  'thumbnail-cache.test.ts': ['A-M5-00'],
+  'thumbnail-cache-local.test.ts': ['A-M5-00'],
+  // D-104: cached-installer integrity; D-105: portable E2E browser discovery.
+  'app-update-service-cache.test.ts': ['A-4.4-29'],
+  'browser-discovery.test.ts': ['A-M3-06'],
 };
 
 /** Honest, separately-listed deviations (never reported as PASS assertions). */
@@ -740,8 +747,12 @@ async function runM3() {
   const e2eAll = Boolean(e2e?.summary?.allPass === true
     && e2e.summary.negativePassed === e2e.summary.negativeTotal
     && Array.isArray(e2e.cases) && e2e.cases.length > 0);
-  const e2eMeta = Boolean(e2e?.exeVersion === 'Google Chrome for Testing 151.0.7922.34'
-    && typeof e2e.exePath === 'string' && e2e.exePath.includes('chrome-headless-shell.exe'));
+  // D-105: the carrier gate must not depend on one developer's browser path or
+  // build number. `run-e2e.mjs` owns the (strict by default) version check and
+  // records `exeVersionOk` / `exeVersionExpected` in reports/e2e-summary.json.
+  const e2eMeta = Boolean(e2e?.exeVersionOk === true
+    && typeof e2e.exeVersionExpected === 'string' && e2e.exeVersionExpected.length > 0
+    && typeof e2e.exePath === 'string' && /chrom(e|ium)/i.test(e2e.exePath));
   const b0Ok = Boolean(neg?.summary?.total === 5 && neg.summary.failed === 0
     && neg.summary.allPass === true
     && Array.isArray(neg.additionalChecks) && neg.additionalChecks.every((c) => c.status === 'PASS'));

@@ -2,8 +2,10 @@
 /**
  * run-e2e.mjs — `npm run test:e2e` entry point (F028 / PRD §5.5 / D-31).
  *
- * Drives the CACHED `chrome-headless-shell.exe` with spawnSync(absolutePath,
- * argv[], {shell:false, windowsHide:true}) — no shell strings, no npm deps.
+ * D-105: drives a DISCOVERED Chrome/Chromium (env override → Playwright cache
+ * → system install → PATH) with spawnSync(absolutePath, argv[], {shell:false,
+ * windowsHide:true}) — no shell strings, no npm deps, no developer-specific
+ * absolute path. `scripts/lib/find-browser.mjs` owns the discovery rules.
  * For each case it takes one `--screenshot` and one `--dump-dom`, then applies:
  *   main criterion ①  deterministic DOM snapshot + structural DOM assertions
  *   main criterion ②  pixel-tolerance RGBA diff (png-diff.mjs, tolerance 2 /
@@ -31,14 +33,13 @@ import {
   decodePng, comparePngBuffers, compareRgba, corruptRgba, sha256,
   DEFAULT_TOLERANCE, DEFAULT_MAX_RATIO,
 } from './lib/png-diff.mjs';
+import { resolveBrowserExecutable, resolveVersionPolicy } from './lib/find-browser.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const REPORTS = join(ROOT, 'reports');
 const BASELINES = join(ROOT, 'tests', 'e2e', 'baselines');
 const FIXTURE_DIR = join(ROOT, 'tests', 'e2e', 'fixtures');
 const TMP = join(REPORTS, 'e2e-tmp');
-const EXE = 'C:\\Users\\leolee\\AppData\\Local\\ms-playwright\\chromium_headless_shell-1234\\chrome-headless-shell-win64\\chrome-headless-shell.exe';
-const EXPECTED_VERSION = 'Google Chrome for Testing 151.0.7922.34';
 
 const argv = process.argv.slice(2);
 const updateBaselines = argv.includes('--update-baselines');
@@ -51,9 +52,9 @@ function normalize(text) {
   return String(text).replace(/\r\n/g, '\n').trimEnd();
 }
 
-/** Spawn the cached headless shell with an argv[] (never a shell string). */
-function runChrome(args) {
-  return spawnSync(EXE, args, {
+/** Spawn the discovered browser with an argv[] (never a shell string). */
+function runChrome(exe, args) {
+  return spawnSync(exe, args, {
     cwd: ROOT,
     shell: false,
     windowsHide: true,
@@ -268,10 +269,24 @@ async function main() {
   mkdirSync(BASELINES, { recursive: true });
   mkdirSync(TMP, { recursive: true });
 
-  const versionRun = runChrome(['--version']);
-  const version = (versionRun.stdout || '').trim();
-  const versionOk = versionRun.status === 0 && version === EXPECTED_VERSION;
+  // D-105: never hard-code a developer's username / cache directory / build.
+  const versionPolicy = resolveVersionPolicy();
+  const EXPECTED_VERSION = versionPolicy.expected;
+  const browser = resolveBrowserExecutable({ expectedVersion: EXPECTED_VERSION });
+  if (browser.path === null) {
+    console.error(browser.guidance);
+    process.exitCode = 1;
+    return;
+  }
+  const EXE = browser.path;
   const exeOk = existsSync(EXE);
+  const versionRun = runChrome(EXE, ['--version']);
+  const version = (versionRun.stdout || '').trim();
+  const versionMatched = versionRun.status === 0 && version === EXPECTED_VERSION;
+  const versionOk = versionRun.status === 0 && (versionMatched || versionPolicy.allowMismatch);
+  if (versionPolicy.allowMismatch && !versionMatched) {
+    console.error(`[e2e] WARN 浏览器版本与基线生成版本不一致：当前「${version}」，期望「${EXPECTED_VERSION}」；已按 YTVDLT_E2E_ALLOW_VERSION_MISMATCH=1 放行，像素基线可能整体不匹配。`);
+  }
 
   const fixtureValidation = validateFixtures();
   const cases = caseFilter ? E2E_CASES.filter((c) => c.id === caseFilter) : E2E_CASES;
@@ -296,8 +311,8 @@ async function main() {
     const shotArgv = [...RENDER_FLAGS, `--screenshot=${tempPng}`, url];
     const domArgv = [...RENDER_FLAGS, '--dump-dom', url];
 
-    const shot = runChrome(shotArgv);
-    const domRun = runChrome(domArgv);
+    const shot = runChrome(EXE, shotArgv);
+    const domRun = runChrome(EXE, domArgv);
     const dom = normalize(domRun.stdout || '');
     const pngBuffer = existsSync(tempPng) ? readFileSync(tempPng) : null;
 
@@ -393,8 +408,11 @@ async function main() {
     generatedAt: new Date().toISOString(),
     carrier: 'zero-dependency static HTML/CSS + native DOM (PRD-M3 §5.5 / D-31)',
     exePath: EXE,
+    exeSource: browser.source,
     exeVersion: version,
     exeVersionExpected: EXPECTED_VERSION,
+    exeVersionMatched: versionMatched,
+    exeVersionMismatchAllowed: versionPolicy.allowMismatch,
     exeVersionOk: versionOk,
     exeExists: exeOk,
     renderFlags: RENDER_FLAGS,
@@ -431,7 +449,7 @@ async function main() {
     for (const negative of negativeChecks) {
       console.log(`[e2e] negative ${negative.pass ? 'PASS' : 'FAIL'} ${negative.id}: expected ${negative.expected}, actual ${negative.actual}`);
     }
-    console.log(`[e2e] exe ${version} (ok=${versionOk})`);
+    console.log(`[e2e] exe ${version} (ok=${versionOk}, source=${browser.source})`);
     console.log(`[e2e] ${summary.summary.passed}/${summary.summary.total} cases PASS, ${summary.summary.negativePassed}/${summary.summary.negativeTotal} negative checks PASS, allPass=${allPass}`);
   }
   if (negativeChecksRequested && !negativeChecks.every((n) => n.pass)) {

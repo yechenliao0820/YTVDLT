@@ -65,6 +65,15 @@
   .swatch[data-accent="system"] { background: linear-gradient(135deg, #1d63b8 50%, #46c98a 50%); }
   .swatch[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 2px; }
   .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  /* D-103: cover-cache occupancy. Three compact read-only stats + controls. */
+  .cache-grid { display: flex; flex-wrap: wrap; gap: 10px; margin: 2px 0 10px; }
+  .cache-stat { min-width: 150px; flex: 1 1 150px; padding: 8px 10px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--bg); display: flex; flex-direction: column; gap: 2px; }
+  .cache-label { color: var(--muted); font-size: 11px; }
+  .cache-stat b { font-size: 15px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .cache-stat b.accent { color: var(--accent); }
+  #settings-cache-note[data-cache-state="ok"] { color: var(--ok); }
+  #settings-cache-note[data-cache-state="error"] { color: var(--danger); }
   /* 0.2.1 (D-93 / D-94): two independent update blocks in one card. */
   .update-block { border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 8px; }
   .update-block:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
@@ -114,6 +123,7 @@
       <a href="#section-appearance" data-nav-target="section-appearance" aria-current="true" data-i18n="settings.nav.appearance" data-fit="">主题与外观</a>
       <a href="#section-updates" data-nav-target="section-updates" aria-current="false" data-i18n="settings.nav.updates" data-fit="">更新</a>
       <a href="#section-paths" data-nav-target="section-paths" aria-current="false" data-i18n="settings.nav.paths" data-fit="">下载位置</a>
+      <a href="#section-cache" data-nav-target="section-cache" aria-current="false" data-i18n="settings.nav.cache" data-fit="">封面缓存</a>
       <a href="#section-about" data-nav-target="section-about" aria-current="false" data-i18n="settings.nav.about" data-fit="">关于</a>
     </nav>
 
@@ -224,6 +234,42 @@
         <button type="button" class="ghost" data-path-action="reset" data-path-kind="audio" data-i18n="settings.paths.reset" data-fit="">恢复默认</button>
       </div>
       <p class="note" id="settings-path-note" data-i18n="settings.paths.hint" data-path-state="idle">视频与音频可以存在不同文件夹；选择时会检查目录是否可写，不可写不会保存。</p>
+    </section>
+
+    <!-- D-103: cover-cache occupancy / auto-clean switch / manual prune.
+         All values come from the main process; the page never names a file. -->
+    <section class="section" id="section-cache">
+      <h2 data-i18n="settings.cache.title" data-fit="">封面缓存</h2>
+      <div class="cache-grid">
+        <div class="cache-stat">
+          <span class="cache-label" data-i18n="settings.cache.used" data-fit="">占用空间</span>
+          <b id="settings-cache-bytes">—</b>
+        </div>
+        <div class="cache-stat">
+          <span class="cache-label" data-i18n="settings.cache.files" data-fit="">缓存文件</span>
+          <b id="settings-cache-files">—</b>
+        </div>
+        <div class="cache-stat">
+          <span class="cache-label" data-i18n="settings.cache.reclaim" data-fit="">可清理</span>
+          <b class="accent" id="settings-cache-reclaim">—</b>
+        </div>
+      </div>
+      <div class="row">
+        <span class="label" data-i18n="settings.cache.auto" data-fit="">自动清理</span>
+        <label class="check"><input type="checkbox" id="settings-cache-auto" disabled=""><span data-i18n="settings.cache.autoHint" data-fit="">自动回收无引用的封面</span></label>
+      </div>
+      <div class="row">
+        <span class="label" data-i18n="settings.cache.limit" data-fit="">最大容量</span>
+        <select id="settings-cache-limit" data-i18n-aria-label="settings.cache.limit" aria-label="最大缓存容量" disabled="">
+          <option value="67108864">64 MB</option>
+          <option value="134217728">128 MB</option>
+          <option value="268435456">256 MB</option>
+          <option value="536870912">512 MB</option>
+        </select>
+        <span class="spacer"></span>
+        <button type="button" id="settings-cache-prune" data-i18n="settings.cache.prune" data-fit="" disabled="">立即清理</button>
+      </div>
+      <p class="note" id="settings-cache-note" data-cache-state="error">离线：未连接主进程，无法读取缓存</p>
     </section>
 
     <section class="section" id="section-about">

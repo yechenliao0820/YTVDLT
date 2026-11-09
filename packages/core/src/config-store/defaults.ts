@@ -78,6 +78,13 @@ export const DEFAULT_DOMAINS: Readonly<Record<ConfigDomainName, Record<string, u
     skippedAppVersion: '',
     lastAppUpdateCheckAt: '',
     lastEngineUpdateCheckAt: '',
+    // D-103 (append-only): cover-image cache retention. The cache lives next
+    // to the config (`<dataDir>/thumbs`); these are the shipped defaults and
+    // can be changed from Settings or by editing config.json.
+    autoCleanThumbnailCache: true,
+    thumbnailCacheMaxBytes: 128 * 1024 * 1024,
+    thumbnailCacheMaxFiles: 500,
+    thumbnailCacheMaxAgeDays: 30,
     // M3 B2 (append-only): advanced fields now consumed by resolveDownloadPlan.
     sponsorblockRemove: null,
     downloadSections: null,

@@ -25,6 +25,7 @@ import type {
   AccentChoice, CommandTemplateInput, CommandTemplateStore, IConfigStore,
   MotionMode, TaskDetailAction, TaskDetailResult, TaskTab, ThemeMode,
 } from '@ytvdlt/core';
+import type { ThumbnailCacheStatus, ThumbnailPruneReport } from './thumbnail-cache.js';
 
 /** Minimal slice of the queue this layer needs (tests inject a fake). */
 export interface TaskListPort {
@@ -65,6 +66,12 @@ export interface AppUpdatePortLike {
  */
 export interface ThumbnailPort {
   pathOf(taskId: string): string | null;
+  /** D-103: optional so older fakes / builds without the cache still compile. */
+  forget?(taskId: string): void;
+  status?(): Promise<ThumbnailCacheStatus>;
+  prune?(options?: { force?: boolean }): Promise<ThumbnailPruneReport>;
+  setAutoClean?(enabled: boolean): Promise<Record<string, unknown>>;
+  setMaxBytes?(bytes: number): Promise<Record<string, unknown>>;
 }
 
 /**
@@ -220,7 +227,15 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   [IPC_CHANNELS.APP_UPDATE_ACTION]: ['action'],
   [IPC_CHANNELS.PATH_ACTION]: ['action', 'kind'],
   [IPC_CHANNELS.DOWNLOAD_START]: ['url', 'kind', 'quality', 'audioQuality', 'audioFormat'],
+  // D-103: the renderer may read occupancy, ask for a manual prune, or change
+  // two policy values. It can NEVER pass a file path to this channel.
+  [IPC_CHANNELS.THUMBNAIL_CACHE]: ['action', 'enabled', 'maxBytes'],
 };
+
+/** D-103: the only cache actions the renderer may trigger. */
+const THUMBNAIL_CACHE_ACTIONS: readonly string[] = [
+  'status', 'prune', 'set-auto', 'set-max-bytes',
+];
 
 /** D-93: the only actions the renderer may trigger. */
 const APP_UPDATE_ACTIONS: readonly AppUpdateAction[] = [
@@ -402,7 +417,12 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
         };
       }
     }
-    return deps.taskDetail.perform(taskId, action as TaskDetailAction);
+    const result = await deps.taskDetail.perform(taskId, action as TaskDetailAction);
+    // D-103: dropping a task record drops its claim on the cover. The file is
+    // NOT deleted here — the prune pass checks whether another live task shares
+    // it, then moves it to the recycle bin.
+    if (action === 'remove' && result.ok === true) deps.thumbnails?.forget?.(taskId);
+    return result;
   });
 
   handlers.set(IPC_CHANNELS.TEMPLATE_LIST, async (payload) => {
@@ -586,6 +606,43 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     return { ok: true, action, kind, canceled: false, error: null, path: paths[key], paths };
   });
 
+  // D-103: cover-cache management. Every action is main-process owned; the
+  // renderer cannot name a file, a directory or a deletion primitive.
+  handlers.set(IPC_CHANNELS.THUMBNAIL_CACHE, async (payload): Promise<Record<string, unknown>> => {
+    const record = validateM5Payload(IPC_CHANNELS.THUMBNAIL_CACHE, payload);
+    const action = record['action'];
+    if (typeof action !== 'string' || !THUMBNAIL_CACHE_ACTIONS.includes(action)) {
+      throw new Error('[m5-ipc] unknown thumbnail cache action');
+    }
+    const cache = deps.thumbnails;
+    const unavailable = { ok: false, action, available: false, message: '封面缓存未启用' };
+    if (cache === undefined) return unavailable;
+
+    if (action === 'status') {
+      if (cache.status === undefined) return unavailable;
+      return { ok: true, action, available: true, status: await cache.status() };
+    }
+    if (action === 'prune') {
+      if (cache.prune === undefined) return unavailable;
+      // The button is an explicit user action: it works even when automatic
+      // cleaning is switched off, but still never touches a live cover.
+      return { ok: true, action, available: true, report: await cache.prune({ force: true }) };
+    }
+    if (action === 'set-auto') {
+      const enabled = record['enabled'];
+      if (typeof enabled !== 'boolean') throw new Error('[m5-ipc] enabled must be a boolean');
+      if (cache.setAutoClean === undefined) return unavailable;
+      return { ok: true, action, available: true, policy: await cache.setAutoClean(enabled) };
+    }
+    const maxBytes = record['maxBytes'];
+    if (typeof maxBytes !== 'number' || !Number.isInteger(maxBytes)
+      || maxBytes < 8 * 1024 * 1024 || maxBytes > 2 * 1024 * 1024 * 1024) {
+      throw new Error('[m5-ipc] invalid maxBytes');
+    }
+    if (cache.setMaxBytes === undefined) return unavailable;
+    return { ok: true, action, available: true, policy: await cache.setMaxBytes(maxBytes) };
+  });
+
   handlers.set(IPC_CHANNELS.SETTINGS_GET, async (payload) => {
     validateM5Payload(IPC_CHANNELS.SETTINGS_GET, payload);
     return readAppearance(deps);
@@ -660,4 +717,5 @@ export const M5_CHANNELS: readonly string[] = [
   IPC_CHANNELS.PATH_ACTION,
   IPC_CHANNELS.SETTINGS_SET,
   IPC_CHANNELS.DOWNLOAD_START,
+  IPC_CHANNELS.THUMBNAIL_CACHE,
 ];
