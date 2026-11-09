@@ -30,6 +30,30 @@ export const MIGRATIONS: readonly Migration[] = [
       };
     },
   },
+  {
+    from: 1,
+    to: 2,
+    /**
+     * D-110: retire the ASCII-only filename default.
+     *
+     * `paths.restrictFilenames` was `true` in the v1 defaults but never appeared
+     * in Settings, so every stored `true` came from the shipping default, not
+     * from a choice. Leaving it in place would keep feeding
+     * `--restrict-filenames` to yt-dlp, which turns a Chinese title into `_`.
+     * Only this one key is touched; every other value is preserved verbatim.
+     */
+    migrate(old: ConfigFile): ConfigFile {
+      const paths = old.domains['paths'] ?? {};
+      return {
+        schemaVersion: 2,
+        updatedAt: old.updatedAt,
+        domains: {
+          ...old.domains,
+          paths: { ...paths, restrictFilenames: false },
+        },
+      };
+    },
+  },
 ] as const;
 
 /** Pure: apply migrations in order until the document reaches the target version. */

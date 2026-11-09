@@ -271,6 +271,15 @@ export class YtDlpEngine implements DownloadEngine {
         const { events, rest } = parseProgressChunk(pending, taskId);
         pending = rest;
         for (const event of events) {
+          // D-112: an HLS/DASH manifest is a "download" too, so yt-dlp reports it
+          // as a completed 712-byte transfer before the real media starts. That
+          // painted 100% for one frame and then dropped back to 3% (measured on a
+          // 1496 s video). Anything that finishes below 64 KiB is metadata, not
+          // media: skip it so the bar only ever shows the real stream.
+          if (event.percent === 100 && event.downloadedBytes !== null
+            && event.downloadedBytes < 64 * 1024) {
+            continue;
+          }
           // Project ProgressEvent onto the frozen EngineEvent 'progress' shape.
           onEvent({
             type: 'progress',

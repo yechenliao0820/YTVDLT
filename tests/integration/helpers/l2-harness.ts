@@ -123,8 +123,13 @@ export async function createL2Context(caseName: string, expectedManifest: Expect
 
   return {
     dir, outDir, tempDir, ports, engine, queue, history, verifier, events,
-    // Best-effort: some environments gate bulk deletes; leftover scratch is harmless.
-    cleanup: async () => { try { await rm(dir, { recursive: true, force: true }); } catch { /* ignore */ } },
+    // Best-effort: some environments gate bulk deletes; leftover scratch is
+    // harmless. `YTVDLT_L2_KEEP_TMP=1` skips the delete entirely for hosts
+    // whose delete guard asks a human (the scratch tree is gitignored).
+    cleanup: async () => {
+      if (process.env['YTVDLT_L2_KEEP_TMP'] === '1') return;
+      try { await rm(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    },
   };
 }
 

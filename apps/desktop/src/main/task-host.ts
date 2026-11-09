@@ -12,7 +12,7 @@
  */
 import type { CorePorts, DownloadEngine } from '@ytvdlt/shared';
 import {
-  ConfigStore, HistoryStore, TaskQueue, TaskStore, normalizeConcurrency, restoreTasks,
+  ConfigStore, HistoryStore, MIGRATIONS, TaskQueue, TaskStore, normalizeConcurrency, restoreTasks,
   type IArtifactVerifier, type IHistoryStore,
 } from '@ytvdlt/core';
 
@@ -47,6 +47,10 @@ export async function createTaskHost(options: TaskHostOptions): Promise<TaskHost
   const config = new ConfigStore({
     ports,
     ...(options.configPath === undefined ? {} : { filePath: options.configPath }),
+    // D-110: the migration chain must actually run in production, otherwise a
+    // stored v1 document keeps its retired `paths.restrictFilenames: true` and
+    // every download keeps deleting the CJK characters from the file name.
+    migrations: MIGRATIONS,
   });
   await config.load();
 

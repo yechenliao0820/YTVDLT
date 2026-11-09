@@ -341,15 +341,21 @@ describe('B3 · M3 conditional segments + argv iron rules', () => {
     argv.slice(0, -1).forEach((element) => expect(element).not.toContain(' '));
   });
 
-  it('--restrict-filenames is conditional on sanitization, never constant', () => {
+  it('--restrict-filenames follows the config key only, never the template (D-110)', () => {
     const clean = buildDownload(req(), CTX);
-    const dirty = buildDownload(req({
+    // A space in the template is sanitized to `_`, which used to switch this
+    // flag on and delete every non-ASCII character from the file name.
+    const spaced = buildDownload(req({
       paths: paths({ outputTemplate: '%(title).200B [%(id)s].%(ext)s' }),
     }), CTX);
+    const asciiOnly = buildDownload(req({
+      paths: { ...paths(), restrictFilenames: true } as PathsDomain,
+    }), CTX);
     expect(clean).not.toContain('--restrict-filenames');
-    expect(dirty).toContain('--restrict-filenames');
-    assertInvariants(dirty);
-    expect(dirty[argv_indexOf(dirty, '-o') + 1]).toBe('%(title).200B_[%(id)s].%(ext)s');
+    expect(spaced).not.toContain('--restrict-filenames');
+    expect(asciiOnly).toContain('--restrict-filenames');
+    assertInvariants(spaced);
+    expect(spaced[argv_indexOf(spaced, '-o') + 1]).toBe('%(title).200B_[%(id)s].%(ext)s');
   });
 
   it('-P temp:<dir> appears only for post-processing requests', () => {

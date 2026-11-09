@@ -367,11 +367,20 @@ describe('B1 · network / advanced / path derivation', () => {
     expect(resolveDownloadPlan(req()).explicitTempDir).toBeNull();
   });
 
-  it('whitespace in the output template sets restrictFilenames and is sanitized', () => {
+  it('whitespace in the output template is sanitized but does NOT enable --restrict-filenames (D-110)', () => {
     const plan = resolveDownloadPlan(req({ paths: paths({ outputTemplate: '%(title).200B [%(id)s].%(ext)s' }) }));
-    expect(plan.restrictFilenames).toBe(true);
+    // The template's space still becomes `_` (argv safety), but that is a local
+    // rewrite; it must never turn into yt-dlp's "ASCII only" flag.
+    expect(plan.restrictFilenames).toBe(false);
     expect(/\s/.test(plan.outputTemplate)).toBe(false);
     expect(plan.outputTemplate).toBe('%(title).200B_[%(id)s].%(ext)s');
+  });
+
+  it('restrictFilenames comes from the config key, not from the template (D-110)', () => {
+    const plan = resolveDownloadPlan(req({
+      paths: { ...paths(), restrictFilenames: true } as PathsDomain,
+    }));
+    expect(plan.restrictFilenames).toBe(true);
   });
 
   it('subtitle flags map to plan fields incl. skipTranslated gating', () => {

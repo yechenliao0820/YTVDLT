@@ -218,7 +218,18 @@ export function resolveDownloadPlan(
   // ---- paths (Q-M3-09 / D-43 purification order) ----
   const rawTemplate = typeof paths.outputTemplate === 'string' ? paths.outputTemplate : '';
   const safeTemplate = sanitizeToken(rawTemplate);
-  const restrictFilenames = safeTemplate !== rawTemplate;
+  // D-110: `--restrict-filenames` is a USER setting, never a side effect of the
+  // template. Until 0.2.4 it was derived from `safeTemplate !== rawTemplate`,
+  // so the shipped default template (which contains one space between the title
+  // and `[id]`) permanently enabled "ASCII only" — every CJK title was rewritten
+  // to `_`, i.e. an unreadable file name for the exact users this app ships to.
+  // `sanitizeToken()` still runs (argv safety, unchanged); it just no longer
+  // implies a second, destructive rewrite inside yt-dlp.
+  //
+  // The flag lives in the config `paths` domain but is NOT part of the frozen
+  // `PathsDomain` (D-50), so it is read through a local widening: `buildRequest`
+  // spreads the config domain verbatim, which is what makes it reach here.
+  const restrictFilenames = (paths as unknown as Record<string, unknown>)['restrictFilenames'] === true;
   const outputTemplate = truncateWindowsPath(`${chapterPrefix}${safeTemplate}`);
   const outputDir = buildOutputDir(
     paths,

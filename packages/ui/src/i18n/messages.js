@@ -89,6 +89,9 @@
       // 「排队中 / 解析中 / 准备下载」必须各说各的阶段。
       'queue.card.parsing': '正在解析链接',
       'queue.card.preparing': '准备下载',
+      // D-112: 已经进入下载阶段、但引擎还没报出第一字节时用它。
+      // 「准备下载」在这个阶段是错的——徽章已经写着「下载中」，两行字自相矛盾。
+      'queue.card.connecting': '正在连接服务器',
       'queue.card.measuring': '正在获取下载进度',
       'queue.card.downloaded': '已下载 {done}',
       'queue.card.noProgress': '无进度信息',
@@ -413,6 +416,9 @@
       // D-107: one accurate label per real stage — unknown is not 0%.
       'queue.card.parsing': 'Reading link info',
       'queue.card.preparing': 'Preparing download',
+      // D-112: shown once the task is Running but the engine reported no bytes
+      // yet — "preparing" contradicts the 下载中 badge on the same card.
+      'queue.card.connecting': 'Connecting to the server',
       'queue.card.measuring': 'Reading download progress',
       'queue.card.downloaded': '{done} downloaded',
       'queue.card.noProgress': 'No progress info',

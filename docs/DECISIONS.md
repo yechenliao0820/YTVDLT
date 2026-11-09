@@ -1240,3 +1240,33 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 决策 | ① **位置**：只在上述 `.card-meta` 行里、错误码文本节点**之后**追加一个 `<span class="card-failure" data-failure-kind="…">`；不放页面顶部、不新建弹窗、不动设置页/详情页。纯行内文本：宽时同行，窄时自然换行，始终在进度条上方、错误按钮之上。刻意不用 `inline-block + overflow:hidden`——实测它会把行盒基线抬高 ~2px，连带把下面 5 张卡片整体下移（首轮 e2e 出现 91977 像素差异）；改成纯行内后差异只剩新增文案的 766 像素。② **样式**：`color:var(--ink); font-weight:700`（红色仍只由徽标表达，简报是「解释」不是第二个报警）；`.card-meta` 补 `overflow-wrap: anywhere` 兜住超长错误码/英文单词。深浅主题靠 `--ink` 自动适配。③ **分类**：新增纯函数 `core/src/failure-summary/`（`classifyFailure(code)` → `network / service / forbidden / save / unknown`），只吃**冻结的 17 个稳定错误码**，不读 yt-dlp 原文、不猜关键词、不产生任何语言文案。`NETWORK_TIMEOUT / DNS_FAILURE → network`；`HTTP_429 → service`（服务端限流，与本地网络错误分开）；`HTTP_403 → forbidden`；`DISK_FULL / PERMISSION_DENIED → save`；其余全部 `unknown`。**「视频不可用 / Video unavailable」刻意不实现**：`error-mapper/rules.ts` 没有对应规则，yt-dlp 的 `Video unavailable` 会落到 `UNKNOWN`；`UNSUPPORTED_SITE`（链接/站点不支持）与 `FORMAT_UNAVAILABLE`（所选格式不可用）都不是「视频没了」。没有可靠信号就必须用通用简报，不编造原因。④ **DTO**：`TaskListItemDto` append-only 增加 `failureKind`（稳定分类，`record.error === null ? null : classifyFailure(...)`）；`toTaskDetail()` 形状一字未改，完整错误码、原始错误、产物路径、日志入口照旧。**任务里存的仍是 `AppError.code`，不持久化任何语言文字**。⑤ **显示条件**：`queue.js::failureKeyOf()` 仅在 `state === 'Error'` 返回 `queue.failure.<kind>`；`Canceled / Idle / FetchingInfo / ReadyWithInfo / Running / Completed` 一律不显示，重试时状态回到 `ReadyWithInfo/Idle` 且 `restart()` 已清 error，简报随之消失。未知/缺失/伪造的 kind 白名单收口到 `unknown`，永不在卡片上打印原始 key 或注入串。⑥ **双语**：`messages.js` 同源新增 5 键 `queue.failure.network / service / forbidden / save / unknown`（中文 6 词内、英文对应）；`core/i18n/i18n.ts::requiredKeys()` 从 `FAILURE_KINDS` 推导这 5 个键，缺一种语言/少一个键 `i18n.test.ts` 直接红。渲染层只有 `t('queue.failure.' + kind)`，没有硬编码中文。⑦ **语言切换沿用既有机制**：`queue.js::switchLocale()` 存 `ytvdlt.locale` + 发 `SETTINGS_SET` + `location.replace(?lang=en)` **整页重载**，新页面在加载时重新解析目录，简报即换成新语言；本轮**没有**引入进程内动态重绘（那是既有架构，如实记录）。 |
 | 验证 | 新增 `tests/unit/failure-summary.test.ts` **24 例**（17 码全表逐条、表与 `ALL_ERROR_CODES` 完全对齐、network/service/forbidden 不混淆、save 两码、11 个通用码、null/空/大小写/未来码、`isFailureKind`、每类都有 i18n 键）；`tests/unit/queue-failure.test.ts` **39 例**（真实 `queue.js` + 真实文案 + 假 DOM：简报在红色徽标同一行且在错误码右侧、整行在进度条上方、错误码/详情/重试/删除按钮仍在；6 种非失败状态无简报、重试后消失；9 组分类逐条；无分类/无错误码/伪造 kind → 通用；URL/token/Cookie/本机路径/原始 stderr 均不出现在简报里；中英各 5 条；语言按钮按既有机制落盘 + 重载后英文生效；超长中英文标题/错误码与 CSS 溢出规则）；`m5-channels.test.ts` **+3 例**（DTO 只带稳定分类、wire 上无 URL/路径/中文句子、详情 DTO 仍保留完整错误）。抽出共享 `tests/unit/helpers/queue-page-harness.ts` 给两个 UI 套件复用，`queue-progress.test.ts` 13 例保持全绿。全量 `npm test` **74 文件 / 982 例**（覆盖率四维最低 85.01%）；`pnpm typecheck` 5/5；L2 离线集成 **10/10**；M3 验收 12/12 gates、allGreen。改 UI 后首轮 e2e：仅 **7 个 `queue-*`** case 差异且 `dom=true`（含 empty/error 的 DOM 变化来自内联 CSS 新增），其余 24 张 0 像素；逐元素 diff 确认差异**只有**新 CSS 规则与那一个 `<span class="card-failure">`；按 §7 逐 case 重建 7 张，全量复验 **31/31 + 反例 5/5**。另在 900×600（英文换行）、700×600（单列）与深色主题截图人工复核：简报完整可读、未遮挡进度条/按钮/标题、无横向溢出。 |
 | 未覆盖 | ① 「视频不可用」分类未实现（见决策③，需先给 `error-mapper` 增加可靠规则或新错误码；17 码枚举冻结，本轮不动）。② 语言切换是**整页重载**，没有进程内动态替换，这是既有 `switchLocale()` 行为；未打包，因此未在安装版 Electron 真机点击语言按钮复验（铁律 9）。③ 屏幕阅读器实际播报、RTL / 系统缩放 125%+ 未实测；简报是纯行内文本，未单独加 `aria-label`（徽标已表达失败状态，避免重复播报）。④ 窄窗口验证是 headless 截图人工复核（900/700 px），没有加入固定 1280×800 的 e2e 基线用例。⑤ 通知/托盘的「下载失败」标题沿用既有四类通知（`error` 与 `canceled` 分开），本轮未改、也未在真机复验。 |
+
+## D-110 · 2026-11-09 · 文件名回到视频标题：`--restrict-filenames` 不再是默认
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 下载完成后本地文件名不可读；中文标题的文件名尤其严重。 |
+| 根因（实测，非推断） | ① `DEFAULT_DOMAINS.paths.restrictFilenames = true`。② `resolveDownloadPlan()` 用 `safeTemplate !== rawTemplate` **推导**该标志：默认模板 `%(title).200B [%(id)s].%(ext)s` 中间有一个空格，`sanitizeToken()` 把它换成 `_`，两者必然不等 → 该标志**恒为 true** → argv 永远带 `--restrict-filenames`。③ 该标志在 yt-dlp 里的语义是「只保留 ASCII」，对 CJK 是**删除**而不是清洗。用随包 yt-dlp 2026.10.26 实测：带标志 → `_ [_].mp4`；去掉标志 → `蓝色浪潮席卷全美 共和党期中选举惨败 川普 全球大视野 [id].mp4`。 |
+| 决策 | ① 默认改为 `false`（`CONFIG_SCHEMA_VERSION` 1 → 2）。② 计划里改为**只读配置键**，不再从模板推导；`packages/shared/src/request.ts` 冻结（D-50）不动，`paths` 域在 `resolveDownloadPlan` 内做一次只读放宽（`buildDownloadRequest` 本就整域展开，键能到达）。③ 新增 v1→v2 迁移把存量 `true` 归零，并把 `MIGRATIONS` 真正接进 `ConfigStore`——**生产装配此前根本没传迁移链**，框架存在但从未执行。④ `sanitizeToken()` 保留（argv 安全），但不再意味着 ASCII-only；Windows 非法字符由 yt-dlp 自己换成全角字符（实测 `?`→`？`、`|`→`｜`），不会丢字。 |
+| 验证 | `download-plan.test.ts` / `argv-builder-m3.test.ts` 改为断言新规则（模板有空格 ≠ 开启标志；配置键为真才开）；`config-store.test.ts` 增 v1→v2 迁移用例；真机（`npx electron` 开发模式）产物：`Mark Zuckerberg wants AI walking around your home, do you？ ｜ BBC News_[MxvXe1t2QFk]_(1).webm`，日志 argv 无 `--restrict-filenames`，`config.json` 加载后为 `schemaVersion: 2` / `restrictFilenames: false`。 |
+| 未覆盖 | ① 已存在的历史文件不改名（改名属于用户的文件，不做静默批量重命名）。② `paths.restrictFilenames` 仍无设置页开关，只能手改 `config.json`。③ 未打包，因此未在安装版复验（铁律 9）。 |
+
+## D-111 · 2026-11-09 · 外置 aria2c 不再默认开启（它就是「进度条一直转圈」的元凶）
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 「下载中」状态下进度条一直是**不确定**动画、下面还写「准备下载」，然后几乎瞬间变成「已完成」。 |
+| 根因（A/B 实测） | ① `m4-host.ts::resolveAria2cPath(undefined, bundled)` 只要随包 `aria2c.exe` 存在就返回它 → 每条任务都带 `--downloader aria2c`。② 外置下载器下 yt-dlp 拿不到字节计数，`--progress-template` **一行都不输出**，引擎解析器自然拿不到任何 percent，队列只能停在不确动态。同一条 17.6 MB 视频实测：aria2c **0 条**进度行、原生 **6 条**；14 分 56 秒 1080p HLS 实测：aria2c 89 s、原生 24 s（**3.7 倍**）。 |
+| 决策 | 默认 `null`（用 yt-dlp 自带下载器，保留 `--concurrent-fragments 8` 并行分片）。三态保留：`''` = 显式关闭；`'bundled'` = 显式用随包 aria2c；其它字符串 = 用户自己的 exe。随包二进制与组件更新面不动，只是不再默认接管下载。 |
+| 验证 | 真机开发模式时间线：`Running` 后 0.4 s 内出现 `pct=2.5 → 9.2 → 14.2 → 16.6 …` 并带 `speed` / `eta`；日志 argv 无 `--downloader`、仍有 `--concurrent-fragments 8`。 |
+| 未覆盖 | 显式选择 `'bundled'` 时进度仍会缺失——这是 yt-dlp + aria2c 的固有行为，选择它即接受；未在安装版复验。 |
+
+## D-112 · 2026-11-09 · 「下载中」不许写「准备下载」，进度按真实节奏刷新
+
+| 项 | 内容 |
+|---|---|
+| 现象（业主反馈） | 截图显示徽章已是「下载中」，下一行却写「准备下载」；小文件几乎看不到进度，从「准备/下载中」直接跳到「已完成」。 |
+| 根因 | ① `queue.js::unknownProgressText()` 在 `Running` 且没有任何字节时用 `queue.card.preparing`（准备下载）——与同一张卡片上的「下载中」徽章自相矛盾。② 轮询是固定 1.2 s，几秒级的下载只能采到 1–2 帧，视觉上就是「闪一下」。③ HLS/DASH 的**清单文件**（实测 712 B）也会被 yt-dlp 当成一次完整传输，先报 100% 再回落，进度条会假跳。 |
+| 决策 | ① 新增 `queue.card.connecting`（中：正在连接服务器 / 英：Connecting to the server），`Running` 且无字节时用它；已有字节仍显示「正在获取下载进度」。② 轮询改自适应：有活动任务 400 ms、空闲回落 1200 ms（保持既有节奏，不给空闲场景加负载）；同时把 `paintKey`（DOM 形状）与 `progressKey`（数字）拆开——只有形状变化才整表重绘，数字变化走 `patchProgress()` 原位更新，避免 400 ms 重建 `<img>` 造成封面闪烁。③ 引擎丢弃「`percent === 100` 且 `downloadedBytes < 64 KiB`」的元数据传输。 |
+| 验证 | `queue-progress.test.ts` 更新文案断言并补沙箱定时器；新增契约用例（712 B 的 100% 行必须被跳过，percent 序列为 `[3, 50]`）；单测 `985` 例、L2 集成 `10` 例、e2e `31/31 + 反例 5/5`（0 像素，无需重建基线）；真机开发模式 100 ms 采样可见连续百分比。 |
+| 未覆盖 | ① 下载到 100% 之后的封装/校验空窗（实测 95 s → 130 s，约 35 s）仍在，属于「下载等待时间」范畴，业主明确本轮不处理。② 多流下载（先视频后音频）在流切换时百分比会回落，未做跨流加权。③ 未在安装版复验。 |

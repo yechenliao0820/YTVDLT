@@ -136,7 +136,8 @@ ui（零依赖） ← preload ← apps/desktop
 | 打包配置、图标、安装包 | `apps/desktop/electron-builder.yml`、`scripts/make-icon.mjs`、`apps/desktop/build/installer.nsh` |
 | **应用本体更新（检查 / 说明弹窗 / 下载校验 / 安装 / 忽略版本）** | `main/app-update-service.ts`、`main/github-releases.ts`、`main/adapters/http-download.ts`；纯规则在 `core/src/app-update/`；弹窗在 `ui/src/updates/update-dialog.js`。D-104：缓存复用与安装前都重算 SHA-256，基准为发布 `digest` 或 `<target>.sha256` sidecar，失败只隔离不删 |
 | **yt-dlp 组件更新（版本查询 / 换文件 / 自动检查）** | `main/component-updater.ts`（`feedUrl` / `versionApiUrl`）、`engine-ytdlp/src/self-updater.ts` |
-| **队列进度（总大小 / 速度 / 剩余时间 / 未知 vs 0%）** | `core/src/task-queue/task-queue.ts`（progress 分支）→ `main/m5-channels.ts::toTaskListItem`（`percent` 可为 `null`）→ `ui/src/pages/queue/queue.js::progressMode`（`value / unknown / none / waiting`）→ `progressText` / `waitBar`；`null` 一律不得写成 0（D-107） |
+| **队列进度（总大小 / 速度 / 剩余时间 / 未知 vs 0%）** | `core/src/task-queue/task-queue.ts`（progress 分支）→ `main/m5-channels.ts::toTaskListItem`（`percent` 可为 `null`）→ `ui/src/pages/queue/queue.js::progressMode`（`value / unknown / none / waiting`）→ `progressText` / `waitBar`；`null` 一律不得写成 0（D-107）。刷新节奏与整表重绘的分离见 `queue.js::paintKey` / `progressKey` / `patchProgress`（D-112） |
+| **进度行到底有没有数据（外置下载器）** | `main/m4-host.ts::resolveAria2cPath`（默认 `null` = 用 yt-dlp 自带下载器）；`engine-ytdlp/src/yt-dlp-engine.ts` 的 chunk 处理与 64 KiB 元数据过滤（D-111 / D-112） |
 | **队列封面缩略图** | `main/thumbnail-cache.ts`、`main/m5-channels.ts::ThumbnailPort`、`queue.js::thumbNode` |
 | **封面缓存清理（占用 / 自动清理 / 立即清理）** | `core/src/thumbnail-cache-policy/`（纯策略）→ `main/thumbnail-cache.ts`（`index.json` / `status()` / `prune()`）→ `main/m5-channels.ts::THUMBNAIL_CACHE` → `ui/src/pages/settings/settings.js::installCacheControls()`；配置在 `advanced.autoCleanThumbnailCache` / `thumbnailCacheMaxBytes` / `MaxFiles` / `MaxAgeDays` |
 | **下载位置（视频 / 音频目录）** | `ui/src/pages/settings/*`（`#section-paths`）→ `main/m5-channels.ts::PATH_ACTION` → `core/config-store/defaults.ts::DEFAULT_PATH_TOKENS`；原生对话框在 `main/adapters/path-picker.ts` |
@@ -165,6 +166,8 @@ ui（零依赖） ← preload ← apps/desktop
 | **e2e 全红** | ① 是否刚改了 UI（DOM/像素必然变）② 失败 case 的 `dom=true` 是否仍成立 ③ 是否只有预期 case 失败 | 基线是冻结快照，改 UI 不等于改坏 | 按 §6 逐 case 重建；**不要**改松断言或全量覆盖 |
 | **打包后界面还是旧的** | ① 是否先跑 `build-desktop.mjs` ② asar 内对应文件是否是新内容 ③ `package.json` 是否被构建改写未还原 | 顺序反了会把上一版前端塞进包 | 再查缓存、`dist/` 与输出目录、图标是否重生成 |
 | **改了代码没效果 / 行为异常** | ① `grep` 定位真实实现（别猜文件名）② 是否违反分层 ③ 是否改到了 fixture 分支 | 项目有多处同名的 M3/M4/M5 通道 | 再按 §1 优先级查日志与当场输出 |
+| **下载进度一直转圈、随后「秒完成」** | ① argv 里有没有 `--downloader aria2c`（外置下载器下 yt-dlp 不报字节，`--progress-template` 一行都不出）② `logs/app-*.jsonl` 的 `engine.download` argv 是否含 `--progress-template` ③ 用同一 URL 手工跑一次随包 yt-dlp，看 stdout 是否出现 `YTVDLT\|` 行 | 引擎只能解析它真的收到的字节；外置下载器让整条链路「安静地成功」 | 再查 `record.lastPercent` 是否被 `restart()` 清空、UI 的 `progressMode` 分支 |
+| **文件名不可读 / 中文标题变成下划线** | ① argv 里有没有 `--restrict-filenames`（语义是「只保留 ASCII」，CJK 会被删除）② `config.json` 的 `paths.restrictFilenames` ③ 模板里的空格被 `sanitizeToken` 换成 `_` 属正常 | 这两类各造成过一次业主可见的退化 | 再查 `paths.outputTemplate` 与 `withCopySuffix()` 的 `(1)` 插入位置 |
 | **主题只在设置页生效 / 重启回浅色** | ① 设置页是否还在走 `CONFIG_SET`（M3 fixture，不持久化）② `theme.js` 的 `ytvdlt.appearance` 本地缓存与 `SETTINGS_GET` 回读 ③ `<html>` 上的 `data-theme` | 真正的持久化只走 `SETTINGS_SET` → `general.theme` | 再查 `config.json` 是否被只读目录回落、`theme.css` 是否被覆盖 |
 | **全屏退不出去 / 各页面按钮不一致** | ① 是否同时用了 HTML Fullscreen API 与 `Window.setFullScreen()` ② 菜单 F11 是否还挂 `role:'togglefullscreen'` ③ `WINDOW_FULLSCREEN` handler 是否注册、`enter-full-screen` 是否推送 | D-106 把两套状态合并为主进程单一真相 | 再查 `shell/app-nav.js` 的 bridge 分支与静态预览降级 |
 | **「检查更新」没反应 / 一直提示失败** | ① `logs/app-*.jsonl` 里 `app-update` 与 `component-check` ② GitHub API 是否可达（`api.github.com/repos/yechenliao0820/YTVDLT/releases/latest`）③ `advanced.autoCheckAppUpdate` / `lastAppUpdateCheckAt` 是否把自动检查挡在节流窗口内 ④ 该版本是否已被「以后不再提示」写进 `advanced.skippedAppVersion` | 更新链路不碰 UI 状态，失败只写日志、不动正在运行的版本 | 再查 Release 资产名是否还能被 `selectInstallerAsset` 认出来（改名成非 `Setup` 且带 portable 字样会被打 0 分） |
@@ -305,6 +308,10 @@ ui（零依赖） ← preload ← apps/desktop
 
 14. **不要改 `styles/ytvdlt.css` 的固定 1280×800**：M3 冻结基线靠它。主窗口页面的响应式全部在 `styles/layout.css`，用 `--ui-step`（1280×800 时恒为 0）与高特异性选择器覆盖各页内联 `<style>`；改变量上限不会动冻结基线，改 `ytvdlt.css` 会一次毁掉 16 张。
 15. **全屏只有主进程一个真相**：渲染层按钮发 `WINDOW_FULLSCREEN`，菜单 F11 走同一个 `applyFullscreen()`；只有静态预览（无 preload bridge）才退化到 HTML Fullscreen API。任何「两套状态并存」的写法都会复现「退出全屏按钮点了没反应」。
+
+16. **外置下载器（`--downloader aria2c`）会整条吃掉进度链**：yt-dlp 的 `--progress-template` 取自它自己的下载循环，交给 aria2c 后 `progress.*` 字段大批为 `NA`，实测同一条 17.6 MB 视频 aria2c 输出 **0 行**、原生 **6 行**；14 分钟 1080p HLS 还慢 3.7 倍。任何「加速/多线程」开关上线前，必须先证明进度仍然可用，否则用户看到的是「转圈很久 → 突然完成」。
+
+17. **`--restrict-filenames` 不是「清理非法字符」**：它的语义是只保留 ASCII，CJK 会被直接删空（中文标题实测变成 `_ [_].mp4`）。Windows 非法字符交给 yt-dlp 默认行为即可（`?`→`？`、`|`→`｜`，是替换不是删除）。这个标志只能作为用户显式选择，绝不能从模板内容推导。
 
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 

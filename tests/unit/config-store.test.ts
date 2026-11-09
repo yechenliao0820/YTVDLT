@@ -14,7 +14,7 @@ const fixture = (name: string): string =>
 const CONFIG_PATH = 'C:/Users/test/AppData/Roaming/YTVDLT/config/config.json';
 
 describe('A-4.4-19 ConfigStore · 分域 / schemaVersion / 原子写', () => {
-  it('starts with 7 domains and CONFIG_SCHEMA_VERSION=1', async () => {
+  it('starts with 7 domains and the current CONFIG_SCHEMA_VERSION', async () => {
     const { ports } = createInMemoryPorts();
     const store = new ConfigStore({ ports });
     await store.load();
@@ -36,7 +36,7 @@ describe('A-4.4-19 ConfigStore · 分域 / schemaVersion / 原子写', () => {
     // tmp file is gone after the atomic rename.
     expect(state.files.has(`${CONFIG_PATH}.tmp`)).toBe(false);
     const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as Record<string, unknown>;
-    expect(persisted['schemaVersion']).toBe(1);
+    expect(persisted['schemaVersion']).toBe(CONFIG_SCHEMA_VERSION);
 
     const second = new ConfigStore({ ports });
     await second.load();
@@ -62,7 +62,25 @@ describe('A-4.4-19 ConfigStore · 分域 / schemaVersion / 原子写', () => {
     expect(store.get('general', 'theme')).toBe('light');
     expect(store.get('general', 'concurrency')).toBe(3);
     const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as Record<string, unknown>;
-    expect(persisted['schemaVersion']).toBe(1);
+    expect(persisted['schemaVersion']).toBe(CONFIG_SCHEMA_VERSION);
+  });
+
+  it('v1 -> v2 retires the ASCII-only filename default (D-110)', async () => {
+    const base = createDefaultConfig('2026-11-05T00:00:00.000Z');
+    const legacy = {
+      ...base,
+      schemaVersion: 1,
+      domains: { ...base.domains, paths: { ...base.domains['paths'], restrictFilenames: true } },
+    };
+    const { ports, state } = createInMemoryPorts();
+    state.files.set(CONFIG_PATH, JSON.stringify(legacy));
+    const store = new ConfigStore({ ports, migrations: MIGRATIONS });
+    await store.load();
+    expect(store.get('paths', 'restrictFilenames')).toBe(false);
+    // Everything else in the domain survives untouched.
+    expect(store.get('paths', 'outputTemplate')).toBe(legacy.domains['paths']?.['outputTemplate']);
+    const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as Record<string, unknown>;
+    expect(persisted['schemaVersion']).toBe(CONFIG_SCHEMA_VERSION);
   });
 
   it('downgrade (schemaVersion > 1) falls back to defaults and emits WARNING', async () => {

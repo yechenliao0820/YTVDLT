@@ -25,7 +25,8 @@ describe('D-107 · Running with an unknown percent keeps the wait animation', ()
     expect(bar.getAttribute('data-percent')).toBeNull();
     expect(bar.getAttribute('role')).toBe('progressbar');
     expect(bar.getAttribute('aria-label')).toBe('正在准备，进度未知');
-    expect(progressOf(card).textContent).toBe('准备下载');
+    // D-112: the badge already says 下载中, so this line must not say 准备下载.
+    expect(progressOf(card).textContent).toBe('正在连接服务器');
     expect(card.textContent).not.toContain('%');
   });
 
@@ -128,7 +129,7 @@ describe('D-107 · stage copy reflects the real phase', () => {
 
   it('English copy comes from the same catalogue', () => {
     const running = onlyCard(harness({ lang: 'en', items: [cardTask({ percent: null })] }));
-    expect(progressOf(running).textContent).toBe('Preparing download');
+    expect(progressOf(running).textContent).toBe('Connecting to the server');
     const fetching = onlyCard(harness({ lang: 'en', items: [cardTask({ state: 'FetchingInfo', percent: null })] }));
     expect(hintOf(fetching).textContent).toBe('Reading link info');
   });

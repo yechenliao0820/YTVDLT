@@ -1,7 +1,16 @@
 /** M1 config domain defaults + schema version. Pure data, no I/O. */
 import type { ConfigDomainName } from '../ports.js';
 
-export const CONFIG_SCHEMA_VERSION = 1;
+/**
+ * v2 (D-110): `paths.restrictFilenames` flipped to `false`.
+ *
+ * The v1 default shipped `true`, which made yt-dlp receive
+ * `--restrict-filenames`; that flag keeps ASCII only and deletes every
+ * non-ASCII character, so a Chinese title became a string of underscores
+ * (`_ [_].mp4`). The key was never exposed in Settings, so the stored `true`
+ * was never a user decision — v1 -> v2 retires it.
+ */
+export const CONFIG_SCHEMA_VERSION = 2;
 
 export const CONFIG_DOMAIN_NAMES: readonly ConfigDomainName[] = [
   'general', 'format', 'subtitle', 'paths', 'network', 'advanced', 'saved_links',
@@ -51,7 +60,11 @@ export const DEFAULT_DOMAINS: Readonly<Record<ConfigDomainName, Record<string, u
     outputTemplate: '%(title).200B [%(id)s].%(ext)s',
     subdirByExtractor: false,
     subdirByPlaylist: false,
-    restrictFilenames: true,
+    // D-110: OFF by default. `--restrict-filenames` means "ASCII only", and for
+    // a CJK title that is a destructive rewrite (every ideograph becomes `_`),
+    // not a cleanup. yt-dlp already replaces the Windows-illegal characters on
+    // its own, so a readable title needs no extra flag.
+    restrictFilenames: false,
     // M3 B2 (append-only, A-4.4-01 / 02): three directories + private mode +
     // explicit temp dir must survive a restart via ConfigStore.
     videoDir: DEFAULT_PATH_TOKENS.videoDir,

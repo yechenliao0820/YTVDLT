@@ -289,29 +289,102 @@
 
   /** 0.2.1 (D-96): a full re-render replaces every `<img>`; polling every 1.2 s
    *  would make the covers flicker. The queue is only repainted when something
-   *  the user can see actually changed. */
+   *  the user can see actually changed.
+   *  D-112: the key is now split in two — `paintKey` covers everything that
+   *  changes the DOM *shape* (a full re-render), `progressKey` covers only the
+   *  numbers inside an existing card (patched in place, see `patchProgress`).
+   *  Without the split, a 400 ms poll would rebuild every cover 2.5×/s. */
   var lastPaint = '';
+  var lastProgress = '';
 
   function paintKey(list) {
     var rows = list.map(function (task) {
       return [
-        task.id, task.state, task.percent, task.downloadedBytes,
-        task.totalBytes, task.speed, task.eta, task.thumbPath
+        task.id, task.state, task.thumbPath, task.errorCode,
+        task.failureKind, progressMode(task.state, hasPercent(task))
       ].join(',');
     }).join('~');
     return [model.tab, model.query, model.sort, list.length, rows].join('#');
   }
 
+  function progressKey(list) {
+    return list.map(function (task) {
+      return [task.id, task.percent, task.downloadedBytes, task.totalBytes, task.speed, task.eta].join(',');
+    }).join('~');
+  }
+
+  /** First descendant carrying `className` (depth-first, DOM or test fake). */
+  function findByClass(node, className) {
+    var kids = (node && node.children) || [];
+    for (var i = 0; i < kids.length; i += 1) {
+      var kid = kids[i];
+      var cls = ' ' + String(kid.className || '') + ' ';
+      if (cls.indexOf(' ' + className + ' ') !== -1) return kid;
+      var deeper = findByClass(kid, className);
+      if (deeper !== null) return deeper;
+    }
+    return null;
+  }
+
+  /** The rendered card for `taskId`, or null when it is filtered out. */
+  function cardOf(host, taskId) {
+    var kids = (host && host.children) || [];
+    for (var i = 0; i < kids.length; i += 1) {
+      var node = kids[i];
+      if (typeof node.getAttribute === 'function' && node.getAttribute('data-task-id') === String(taskId)) {
+        return node;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * D-112: refresh the numbers of already-rendered cards without touching their
+   * DOM structure. Only called when `paintKey` is unchanged, i.e. no card was
+   * added / removed / restated / switched between progress modes.
+   */
+  function patchProgress(list) {
+    var host = doc.getElementById('queue-cards');
+    if (host === null) return;
+    var visible = sortTasks(filterTasks(list, model.tab, model.query));
+    visible.forEach(function (task) {
+      var node = cardOf(host, task.id);
+      if (node === null) return;
+      var mode = progressMode(task.state, hasPercent(task));
+      if (mode !== 'value' && mode !== 'unknown') return;
+      var line = findByClass(node, 'card-progress');
+      if (line !== null) {
+        line.textContent = mode === 'value' ? progressText(task) : unknownProgressText(task);
+        line.setAttribute('data-progress', mode === 'value' ? String(task.percent) : mode);
+      }
+      if (mode === 'value') {
+        var bar = findByClass(node, 'bar');
+        var fill = bar !== null && bar.children.length > 0 ? bar.children[0] : null;
+        if (fill !== null) fill.style.width = Math.max(0, Math.min(100, task.percent)) + '%';
+      }
+    });
+    lastProgress = progressKey(list);
+  }
+
+  /** D-112: is anything still in flight? Drives the poll cadence. */
+  function hasActiveTask() {
+    if (!live.active || !Array.isArray(live.tasks)) return false;
+    return live.tasks.some(function (task) {
+      return task.state !== 'Completed' && task.state !== 'Canceled' && task.state !== 'Error';
+    });
+  }
+
   function refresh() {
-    if (!live.active) { render(); return; }
-    call('TASK_LIST', { tab: 'all' }).then(function (result) {
+    if (!live.active) { render(); return Promise.resolve(); }
+    return call('TASK_LIST', { tab: 'all' }).then(function (result) {
       if (!result || result.ok === false) { live.error = true; render(); return; }
       var wasError = live.error;
       live.error = false;
       live.tasks = (Array.isArray(result.items) ? result.items : []).map(toTask);
       // Recovering from an error must always repaint, even if the data matches.
-      if (!wasError && paintKey(live.tasks) === lastPaint) return;
-      render();
+      if (wasError || paintKey(live.tasks) !== lastPaint) { render(); return; }
+      if (progressKey(live.tasks) === lastProgress) return;
+      patchProgress(live.tasks);
     });
   }
 
@@ -589,11 +662,12 @@
    * D-107: the line under the wait animation while Running.
    *
    * Real bytes are shown when the engine reported them (never a made-up total
-   * or percent); otherwise the honest stage is "preparing the download".
+   * or percent); otherwise the honest stage is "connecting" — D-112: the card
+   * already says 下载中 in its badge, so "preparing" was contradicting itself.
    */
   function unknownProgressText(task) {
     var parts = transferParts(task);
-    parts.push(t(parts.length > 0 ? 'queue.card.measuring' : 'queue.card.preparing'));
+    parts.push(t(parts.length > 0 ? 'queue.card.measuring' : 'queue.card.connecting'));
     return parts.join(' · ');
   }
 
@@ -915,6 +989,7 @@
     if (footCount !== null) footCount.textContent = visible.length + ' / ' + list.length;
     refreshToolbar();
     lastPaint = paintKey(list);
+    lastProgress = progressKey(list);
     return { list: list, visible: visible, counts: perTab };
   }
 
@@ -1263,11 +1338,25 @@
   global.addEventListener('pagehide', saveView);
   var result = render();
   if (live.active) {
-    refresh();
-    setInterval(function () {
-      if (doc.visibilityState === 'hidden') return;
-      refresh();
-    }, 1200);
+    // D-112: a fixed 1.2 s tick shows at most one or two frames of a download
+    // that takes a few seconds, so the card appeared to jump from "connecting"
+    // straight to "completed". Poll fast while something is in flight, fall back
+    // when the queue is idle. The next delay is chosen AFTER the reply lands, so
+    // the cadence always reflects the list we just received. Numbers are patched
+    // in place (`patchProgress`), so the faster cadence does not rebuild covers.
+    var pollActiveMs = 400;
+    // Idle stays at the historical 1.2 s cadence — no extra load when nothing
+    // is running, and the existing 1.2 s poll test contract keeps working.
+    var pollIdleMs = 1200;
+    var loop = function () {
+      // A hidden page does not need to repaint; it refreshes again as soon as it
+      // is visible, on the next tick.
+      var step = doc.visibilityState === 'hidden' ? Promise.resolve() : refresh();
+      step.then(function () {
+        global.setTimeout(loop, hasActiveTask() ? pollActiveMs : pollIdleMs);
+      });
+    };
+    loop();
   }
 
   if (global.YTVDLT && global.YTVDLT.shell) {

@@ -73,6 +73,40 @@ describe('L1 download contract · FakeEngine and YtDlpEngine agree', () => {
     expect(kinds.at(-1)).toBe('completed');
   });
 
+  it('D-112: a manifest-sized “completed” transfer is not forwarded as 100%', async () => {
+    const { ports, state } = createInMemoryPorts();
+    const artifact = 'C:/out/fixture.mp4';
+    state.files.set(artifact, 'fixture-bytes');
+    const manifestPath = 'C:/temp/ytvdlt-artifacts-d112-1.txt';
+    state.streamScripts.set('yt-dlp.exe', {
+      chunks: [{
+        stream: 'stdout',
+        // Real capture: the 712-byte HLS manifest completes first, then the
+        // media stream restarts at ~3%. Forwarding both made the bar show 100%
+        // for one frame and drop back.
+        text: 'YTVDLT|712|712|NA|1000|0|0.1\n'
+          + 'YTVDLT|1736|NA|58028|4000|12|0.4\n'
+          + 'YTVDLT|29014|NA|58028|9000|3|1.0\n',
+      }],
+      exitCode: 0,
+      writeFiles: { [manifestPath]: `"${artifact}"\n` },
+    });
+    const logger = new Logger({ ports, appVersion: '0.1.0' });
+    const mapper = new ErrorMapper({ clock: ports.clock });
+    const engine = new YtDlpEngine({
+      ports, logger, mapper, enginePath: 'C:/runtime/yt-dlp.exe',
+      jsRuntimePath: 'C:/runtime/node.exe', appVersion: '0.1.0',
+    });
+    const percents: (number | null)[] = [];
+    await new Promise<void>((resolve) => {
+      engine.download(request('d112-1'), (event) => {
+        if (event.type === 'progress') percents.push(event.percent);
+        if (event.type === 'completed' || event.type === 'failed') resolve();
+      });
+    });
+    expect(percents).toEqual([3, 50]);
+  });
+
   it('both engines return a CancelHandle with cancel() and pid', () => {
     const { ports, state } = createInMemoryPorts();
     state.files.set(`${FIXTURES_DIR}/progress-basic.log`, fixture('progress-basic.log'));

@@ -142,6 +142,13 @@ export function harness(options: {
   };
   sandbox.addEventListener = () => undefined;
   sandbox.Promise = Promise;
+  // D-112: the page schedules its own poll cadence with setTimeout. Bind the
+  // host timers (vitest fake timers patch the globals) so `advanceTimersByTime`
+  // drives the real loop instead of throwing inside the page.
+  sandbox.setTimeout = globalThis.setTimeout.bind(globalThis);
+  sandbox.clearTimeout = globalThis.clearTimeout.bind(globalThis);
+  sandbox.setInterval = globalThis.setInterval.bind(globalThis);
+  sandbox.clearInterval = globalThis.clearInterval.bind(globalThis);
   sandbox.window = sandbox;
   if (options.live !== true) sandbox.__YTVDLT_TASKS__ = options.items ?? [];
 
