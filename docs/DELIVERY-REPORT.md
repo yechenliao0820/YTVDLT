@@ -1,3 +1,49 @@
+# YTVDLT 交付报告（0.2.9 · 最新）
+
+> 交付日期：2026-11-10 ｜ 交付人：Buddy ｜ 接收人：LeoLee
+> 本轮一件事：可编辑区域（如视频链接输入框）增加原生右键编辑菜单——中英双语剪切/复制/粘贴/全选，按编辑能力启用对应项；非编辑区域不弹出，保留任务卡片原有菜单（D-123）。本轮交付 NSIS 安装版并发布 GitHub Release **v0.2.9**（说明用英文，铁律 14）。
+
+## 一、交付物
+
+| 交付物 | 位置 | 大小 |
+|---|---|---|
+| 安装版（NSIS） | `dist-0.2.9\YTVDLT Setup 0.2.9.exe` | 226,309,433 B（215.8 MiB） |
+| 差分清单 | `dist-0.2.9\YTVDLT Setup 0.2.9.exe.blockmap` | 237,710 B |
+| 更新清单 | `dist-0.2.9\latest.yml` | 341 B |
+| 免安装目录 | `dist-0.2.9\win-unpacked\` | 真机 CDP 验证用 |
+
+按铁律 9 只打 NSIS 安装版（未打便携版）。两个 `package.json` 打包前同步升到 0.2.9，打包后根 `package.json` 仅 version 一行差异（本轮预期改动），未被 electron-builder 改写 scripts / devDependencies；仓库版本基准 0.2.9。安装包 SHA-256 `952ec7d8…2e58`，`latest.yml` 的 sha512 / size 与本地 exe 逐项一致。
+
+## 二、逐项落地
+
+| # | 诉求 | 落地 |
+|---|---|---|
+| 1 | 视频链接输入框支持 Ctrl+V 但右键没有粘贴菜单，空输入框容易让人以为无法粘贴 | 主进程为可编辑区域注册 `context-menu` 处理器（D-123）：显示原生剪切/复制/粘贴/全选，按 Electron `editFlags` 启用对应项；中英文按 `menuLocale` 切换；非编辑区域不弹出，不覆盖任务卡片原有菜单；不读取或自动提交剪贴板内容。bootstrap 单元测试覆盖中英文、空输入框可粘贴、非编辑区域不弹菜单三种场景。 |
+
+## 三、验收结果
+
+| 门禁 | 结果 |
+|---|---|
+| `pnpm typecheck` | 5/5 successful |
+| 全量单测（不带覆盖率） | 88 文件 1154/1154 通过（较 0.2.8 净增 2 例，即 D-123 的 bootstrap 回归） |
+| `run-e2e.mjs` | 31/31 case + 反例 5/5 全绿；本轮未动 UI，基线零重建、像素差 0 px |
+| `build-desktop.mjs` | 成功（main 286.3 KB / preload 3.7 KB / renderer 已拷贝） |
+| 打包产物自检 | asar 内 `version=0.2.9`、入口 `apps/desktop/dist/main/main.cjs`；`context-menu` 处理器与「剪切/复制/粘贴/全选」标签在包内 main.cjs 命中；`resources/app-update.yml` 已生成；打包版 CDP 9222 启动正常，页面 `?v=0.2.9` |
+| `handoff-check.mjs` | 已跑，决策编号 D-01…D-123（下一棒 D-124） |
+
+## 四、已知边界
+
+1. 右键菜单只做了打包版启动烟测与单元测试，**未在真实窗口人工验证**右键弹出的位置、系统剪贴板行为与输入法共存表现。
+2. 首次 electron-builder 运行在 portable 目标阶段被中断，原样重跑仅 NSIS 目标补齐 `latest.yml` 后继续；Setup 为完整重建产物。
+3. `latest.yml` 的 `url` / `path` 已按点号资产名 `YTVDLT.Setup.0.2.9.exe` 改写后再上传（GitHub 会把上传名里的空格转成点，不改写会让按清单取包的客户端 404，§9 坑 18）；Release 说明为英文（铁律 14）。
+4. 安装包未签名，SmartScreen 会拦一次。
+5. 未走完「应用内下载整包 → 安装 → 重启」自更新闭环（历版同项）。
+6. 下一决策编号从 D-124 起。
+
+---
+
+## 以下为 0.2.8 历史交付报告（原文存档，未改动）
+
 # YTVDLT 交付报告（0.2.8 · 最新）
 
 > 交付日期：2026-11-10 ｜ 交付人：Buddy ｜ 接收人：LeoLee
