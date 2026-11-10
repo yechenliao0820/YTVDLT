@@ -1360,3 +1360,13 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 决策 | ① 标题改为「许可与授权 / Licence & components」，删除「开源」措辞。② 新增三列表格：本软件本体 = YTVDLT Non-Commercial License 1.0（注明 source-available、非 OSI 开源、非 MIT）；yt-dlp Unlicense、FFmpeg/ffprobe LGPL-3.0、aria2c GPL-2.0-or-later、Electron MIT、Node.js MIT，各带使用方式；明确「每个组件遵循其自身许可证，不受本软件许可约束」。③ 把根 `LICENSE` 的**英文部分逐字**内嵌到 `<details>` 折叠块的 `<pre id="about-licence-text">`（前言 + 全部 6 条），灰底等宽、`max-height: 320px` 可滚动；默认收起，不撑破设置页布局。④ 第三方全文指向真实存在的 `docs/THIRD_PARTY_NOTICES.md` 与随包 `FFMPEG-LICENSE.txt` / `ARIA2-COPYING.txt`。⑤ 关于弹窗保持紧凑，只加一行指向「设置 → 关于」。⑥ 新增 16 个中英对照键。⑦ 不新增依赖、不改打包配置、不改 `LICENSE` 正文、`README.md` / `README.zh-CN.md` 的许可章节本就准确故不动。 |
 | 验证 | 新增 `about-licence.test.ts`（11 例）：内嵌全文与 `LICENSE` 英文部分**逐字相等**、6 条条款齐全、不含中文/Notes、折叠与滚动样式、5 个组件许可逐项、标题不含「开源」、16 个新键双语非空且已翻译、About 区块所有 `data-i18n` 键在双语字典可解析、弹窗指向全文。全量 `1152` 例通过、`pnpm typecheck` 5/5、`build-desktop` 成功。E2E：改 UI 后先跑确认**仅** `settings-appearance` / `settings-en-dark` 两个 case 的 DOM 快照失败（`dom=true`、像素差 `0 px`），按 §7 逐 case `--update-baselines` 重建——**只改这两个 `.dom.html`，PNG 未动，未全量覆盖**——最后全量复验 `31/31` + 反例 `5/5` 全绿。 |
 | 未覆盖 | ① 未在打包后的安装版里真人点开折叠块检查排版（本机无真机安装版复验）；② 未内嵌中文许可全文（业主明确要英文版；提示里已写明中英同效、冲突以简体中文为准）；③ 未发版、未推送仓库或发布 Release（铁律 9 / 12）。 |
+
+## D-122 · 2026-11-10 · 下载位置未加载时不显示虚构路径
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 设置页首帧或离线预览显示 Downloads 下的硬编码路径，与实际配置可能不一致。 |
+| 根因 | 默认下载位置调整后，HTML 中的视频和音频静态文本仍保留旧路径；真实配置要等待主进程返回后才覆盖。 |
+| 决策 | 两处初始值改为 `—`，沿用已有的未知值显示；真实路径仍由主进程配置回填，不更改默认目录和已有用户配置。 |
+| 验证 | 首次全量 E2E 仅 settings-appearance、settings-en-dark 两例因预期 DOM 与像素变化失败，按案例分别更新两组 PNG 和 DOM 基线；全量复验 31/31、反例 5/5 通过。单案例更新时 DOM 反例失败，全量复验通过。 |
+| 未覆盖 | 未打包或验证真实安装版；build-desktop 脚本会递归永久删除 dist，与手册删除规定冲突，未执行；handoff-check 报既有 M5 验收证据过期，未重新执行验收。 |
