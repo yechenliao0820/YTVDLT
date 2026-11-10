@@ -31,6 +31,7 @@ interface Harness {
     destroyed: number;
     trayDestroyed: number;
     appMenu: unknown;
+    contextMenus: MenuItemLike[][];
   };
 }
 
@@ -38,7 +39,7 @@ function fakeElectron(options: { lock?: boolean; theme?: 'dark' | 'light' } = {}
   const log: Harness['log'] = {
     quit: 0, handlers: [], windows: [], urls: [], trayToolTip: [], trayMenus: [],
     appEvents: new Map(), windowEvents: new Map(), shown: 0, focused: 0, destroyed: 0, trayDestroyed: 0,
-    appMenu: null,
+    appMenu: null, contextMenus: [],
   };
 
   class FakeWindow implements BrowserWindowLike {
@@ -88,7 +89,9 @@ function fakeElectron(options: { lock?: boolean; theme?: 'dark' | 'light' } = {}
     },
     Tray: FakeTray as unknown as ElectronLike['Tray'],
     Menu: {
-      buildFromTemplate: (template: readonly MenuItemLike[]) => template,
+      buildFromTemplate: (template: readonly MenuItemLike[]) => Object.assign([...template], {
+        popup: () => { log.contextMenus.push([...template]); },
+      }),
       setApplicationMenu: (menu: unknown) => { log.appMenu = menu; },
     },
     clipboard: { readText: () => '' },
@@ -153,6 +156,30 @@ describe('bootstrap · launch guards', () => {
       webSecurity: true,
     });
     expect(handle?.registeredChannels).toHaveLength(4);
+    handle?.dispose();
+  });
+});
+
+describe('bootstrap · editable context menu', () => {
+  it.each(['zh-CN', 'en'] as const)('shows localized edit actions only for editable fields (%s)', async (language) => {
+    const { electron, log } = fakeElectron();
+    const { host } = fakeHost();
+    const localizedHost = { ...host, appearance: async () => ({ language }) } as unknown as M5Host;
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => localizedHost });
+    const contextMenu = log.windowEvents.get('wc:context-menu') as unknown as (
+      event: unknown, params: { isEditable: boolean; editFlags: Record<string, boolean> },
+    ) => void;
+    const editFlags = { canCut: false, canCopy: false, canPaste: true, canSelectAll: false };
+    contextMenu({}, { isEditable: false, editFlags });
+    expect(log.contextMenus).toHaveLength(0);
+    contextMenu({}, { isEditable: true, editFlags });
+    expect(log.contextMenus[0]).toEqual([
+      { label: language === 'en' ? 'Cut' : '剪切', role: 'cut', enabled: false },
+      { label: language === 'en' ? 'Copy' : '复制', role: 'copy', enabled: false },
+      { label: language === 'en' ? 'Paste' : '粘贴', role: 'paste', enabled: true },
+      { type: 'separator' },
+      { label: language === 'en' ? 'Select all' : '全选', role: 'selectAll', enabled: false },
+    ]);
     handle?.dispose();
   });
 });

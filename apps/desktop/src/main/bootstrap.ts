@@ -227,6 +227,24 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
     },
   });
 
+  window.webContents.on('context-menu', ((_event: unknown, params: {
+    isEditable: boolean;
+    editFlags: { canCut: boolean; canCopy: boolean; canPaste: boolean; canSelectAll: boolean };
+  }) => {
+    if (!params.isEditable) return;
+    const labels: readonly [string, string, string, string] = menuLocale === 'en'
+      ? ['Cut', 'Copy', 'Paste', 'Select all']
+      : ['剪切', '复制', '粘贴', '全选'];
+    const menu = Menu.buildFromTemplate([
+      { label: labels[0], role: 'cut', enabled: params.editFlags.canCut },
+      { label: labels[1], role: 'copy', enabled: params.editFlags.canCopy },
+      { label: labels[2], role: 'paste', enabled: params.editFlags.canPaste },
+      { type: 'separator' },
+      { label: labels[3], role: 'selectAll', enabled: params.editFlags.canSelectAll },
+    ]) as { popup(options: { window: BrowserWindowLike }): void };
+    menu.popup({ window });
+  }) as () => void);
+
   // D-106: ONE fullscreen authority. Every renderer page and the 视图 menu
   // ask this handler; enter/leave events push the resulting state back so the
   // visible button always says the truth (and can always exit).
