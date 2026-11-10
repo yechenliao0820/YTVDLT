@@ -124,7 +124,10 @@
 
     box.appendChild(el('p', 'font-size:12px;line-height:1.6;color:var(--muted,#5c6b7a);margin:0 0 14px;', t('about.runtime')));
     box.appendChild(el('h3', 'font-size:13px;margin:0 0 6px;', t('about.license.title')));
-    box.appendChild(el('p', 'font-size:12px;line-height:1.7;color:var(--muted,#5c6b7a);margin:0 0 18px;', t('about.license.body')));
+    box.appendChild(el('p', 'font-size:12px;line-height:1.7;color:var(--muted,#5c6b7a);margin:0 0 6px;', t('about.license.body')));
+    // D-121: the dialog stays compact; the verbatim English licence and the
+    // per-component table live in Settings > About.
+    box.appendChild(el('p', 'font-size:11px;line-height:1.6;color:var(--muted,#5c6b7a);margin:0 0 18px;', t('about.license.fullWhere')));
 
     var foot = el('div', 'display:flex;align-items:center;gap:10px;');
     foot.appendChild(el('span', 'font-size:11px;color:var(--muted,#5c6b7a);flex:1 1 auto;', t('about.footer')));

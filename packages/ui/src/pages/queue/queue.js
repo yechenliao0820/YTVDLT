@@ -263,7 +263,12 @@
       // D-109: the main process sends a STABLE bucket, never a sentence. `null`
       // when the record carries no error; the copy is resolved at paint time so
       // a language switch repaints in the new language without a new request.
-      failureKind: isFailureKind(item.failureKind) ? item.failureKind : null
+      failureKind: isFailureKind(item.failureKind) ? item.failureKind : null,
+      // D-120: the main process' observation of the recorded artifact path.
+      // `null` = no probe (old build / running task / static preview) → paint
+      // nothing. It NEVER changes `state`: the download succeeded in the past.
+      fileStatus: isFileStatus(item.fileStatus) ? item.fileStatus : null,
+      dirStatus: isFileStatus(item.dirStatus) ? item.dirStatus : null
     };
   }
 
@@ -284,6 +289,25 @@
 
   function isFailureKind(value) {
     return typeof value === 'string' && FAILURE_KINDS.indexOf(value) !== -1;
+  }
+
+  /** D-120: mirror of main's `LocalFileStatus`. Unknown values paint nothing. */
+  var FILE_STATUSES = ['present', 'missing', 'inaccessible', 'unavailable', 'invalid'];
+
+  function isFileStatus(value) {
+    return typeof value === 'string' && FILE_STATUSES.indexOf(value) !== -1;
+  }
+
+  /**
+   * D-120: a lightweight, non-destructive hint on the CARD (not the checkbox,
+   * not the whole page). Only `Completed` tasks are probed by main, and only a
+   * genuinely bad observation produces copy — "present" keeps the original
+   * finished look exactly as before.
+   */
+  function fileStateKey(task) {
+    if (task.state !== 'Completed') return null;
+    if (!isFileStatus(task.fileStatus) || task.fileStatus === 'present') return null;
+    return 'queue.file.' + task.fileStatus;
   }
 
   /**
@@ -315,7 +339,9 @@
     var rows = list.map(function (task) {
       return [
         task.id, task.state, task.thumbPath, task.errorCode,
-        task.failureKind, progressMode(task.state, hasPercent(task), task.stage)
+        task.failureKind, progressMode(task.state, hasPercent(task), task.stage),
+        // D-120: a state change repaints ONE card once, not on every poll.
+        task.fileStatus
       ].join(',');
     }).join('~');
     return [model.tab, model.query, model.sort, list.length, rows].join('#');
@@ -403,9 +429,18 @@
     });
   }
 
-  function refresh() {
+  /** D-120: first load and every re-entry ask main for one fresh stat. Normal
+   *  polls reuse its short-TTL cache, so no filesystem work per repaint. */
+  var statusRefreshDue = true;
+
+  function refresh(forceStatus) {
     if (!live.active) { render(); return Promise.resolve(); }
-    return call('TASK_LIST', { tab: 'all' }).then(function (result) {
+    var listPayload = { tab: 'all' };
+    if (forceStatus === true || statusRefreshDue) {
+      listPayload.refreshFileStatus = true;
+      statusRefreshDue = false;
+    }
+    return call('TASK_LIST', listPayload).then(function (result) {
       if (!result || result.ok === false) { live.error = true; render(); return; }
       var wasError = live.error;
       live.error = false;
@@ -423,6 +458,35 @@
     return result.message || result.code || t('queue.notify.ipc');
   }
 
+  /** D-120: stable codes from main -> shipped copy in the ACTIVE language. */
+  var OPEN_FILE_CODES = {
+    FILE_MISSING: 'queue.open.fileMissing',
+    FILE_INACCESSIBLE: 'queue.open.fileInaccessible',
+    FILE_UNAVAILABLE: 'queue.open.fileUnavailable',
+    NO_ARTIFACT: 'queue.open.fileInvalid'
+  };
+  var OPEN_FOLDER_CODES = {
+    FOLDER_MISSING: 'queue.open.folderMissing',
+    FOLDER_INACCESSIBLE: 'queue.open.folderInaccessible',
+    FOLDER_UNAVAILABLE: 'queue.open.folderUnavailable',
+    NO_ARTIFACT: 'queue.open.fileInvalid'
+  };
+
+  /** `null` = fall back to the generic action notice. */
+  function openActionMessage(action, result) {
+    if (!result) return null;
+    if (result.ok === true) {
+      // Folder opened successfully although the video itself is gone.
+      if (action === 'folder' && (result.fileStatus === 'missing' || result.fileMissing === true)) {
+        return t('queue.open.folderOpenedMissing');
+      }
+      return null;
+    }
+    var table = action === 'folder' ? OPEN_FOLDER_CODES : OPEN_FILE_CODES;
+    var key = table[result.code];
+    return key === undefined ? null : t(key);
+  }
+
   /** Real execution in live mode; the JSON contract otherwise. */
   function act(action, task) {
     if (!live.active) { emit(action, task); return; }
@@ -437,12 +501,20 @@
       global.location.href = '../task-detail/index.html?taskId=' + encodeURIComponent(task.id) + suffix;
       return;
     }
-    var mapped = action === 'retry' ? 'retry' : action === 'folder' ? 'open-folder' : 'cancel';
+    var mapped = action === 'retry' ? 'retry'
+      : action === 'folder' ? 'open-folder'
+      : action === 'file' ? 'open-file'
+      : 'cancel';
     call('TASK_ACTION', { taskId: task.id, action: mapped }).then(function (result) {
-      var problem = actionCode(result);
-      if (problem !== null) notify(t('queue.notify.actionFailed', { action: mapped, reason: problem }));
-      else notify(t('queue.notify.actionDone', { action: mapped }));
-      refresh();
+      var openCopy = openActionMessage(action, result);
+      if (openCopy !== null) notify(openCopy);
+      else {
+        var problem = actionCode(result);
+        if (problem !== null) notify(t('queue.notify.actionFailed', { action: mapped, reason: problem }));
+        else notify(t('queue.notify.actionDone', { action: mapped }));
+      }
+      // D-120: main just re-stat'ed this path; repaint the affected card(s).
+      refresh(true);
     });
   }
 
@@ -608,6 +680,10 @@
       return {
         cancel: task.state === 'Running' || task.state === 'Queued',
         retry: retryable,
+        // D-120: live builds expose "open file" on the card so the freshness
+        // check is reachable where the user sees the finished task. Injected
+        // ONLY in live mode -> file:// screenshot baselines keep their DOM.
+        file: task.state === 'Completed',
         folder: task.state === 'Completed',
         remove: !running,
         detail: true
@@ -887,6 +963,16 @@
       failure.setAttribute('data-failure-kind', isFailureKind(task.failureKind) ? task.failureKind : 'unknown');
       meta.appendChild(failure);
     }
+    // D-120: one small hint in the SAME meta row. It never hides the card,
+    // replaces the "已完成" badge, touches the cover/title/progress bar or
+    // deletes history. Static previews have no `fileStatus` -> no DOM change.
+    var fileKey = fileStateKey(task);
+    if (fileKey !== null) {
+      meta.appendChild(doc.createTextNode(' · '));
+      var fileState = el('span', 'card-file-state', t(fileKey));
+      fileState.setAttribute('data-file-status', task.fileStatus);
+      meta.appendChild(fileState);
+    }
     main.appendChild(meta);
 
     if (mode === 'value') {
@@ -941,6 +1027,7 @@
     };
     addButton('cancel', 'queue.action.cancel');
     addButton('retry', 'queue.action.retry');
+    addButton('file', 'detail.openFile');
     addButton('folder', 'queue.action.open-folder');
     addButton('remove', 'queue.action.remove');
     foot.appendChild(el('span', 'spacer'));
@@ -1260,26 +1347,49 @@
   function performRemoval(ids, withFiles) {
     var done = 0;
     var failed = 0;
+    var filesMissing = 0;
+    var filesTrashed = 0;
+    var sharedKept = 0;
+    var failureReason = '';
     var chain = Promise.resolve();
     ids.forEach(function (id) {
       chain = chain.then(function () {
         var payload = { taskId: id, action: 'remove' };
         if (withFiles) payload.withFiles = true;
         return call('TASK_ACTION', payload).then(function (result) {
-          if (result && result.ok !== false) done += 1;
-          else failed += 1;
+          if (result && result.ok !== false) {
+            done += 1;
+            if (typeof result.filesMissing === 'number') filesMissing += result.filesMissing;
+            if (typeof result.filesTrashed === 'number') filesTrashed += result.filesTrashed;
+            if (typeof result.sharedSkipped === 'number') sharedKept += result.sharedSkipped;
+          } else {
+            failed += 1;
+            if (failureReason === '') {
+              failureReason = (result && (result.reason || result.message || result.code)) || t('queue.notify.ipc');
+            }
+          }
         });
       });
     });
     chain.then(function () {
       pending.ids.forEach(function (id) { delete model.selected[id]; });
       closeModal();
-      if (failed > 0) notify(t('queue.status.failed', { reason: failed + ' / ' + ids.length }));
-      else if (withFiles) notify(t('queue.status.filesRemoved', { n: done }));
+      var count = failed + ' / ' + ids.length;
+      if (failed > 0) {
+        // D-120: a REAL filesystem failure says why and how to fall back to
+        // "history only". A missing file is not a failure and never lands here.
+        notify(withFiles
+          ? t('queue.delete.filesFailed', { reason: failureReason || count })
+          : t('queue.status.failed', { reason: failureReason || count }));
+      } else if (sharedKept > 0) {
+        notify(t('queue.delete.filesShared'));
+      } else if (withFiles && filesMissing > 0 && filesTrashed === 0) {
+        notify(t('queue.delete.filesAlreadyGone'));
+      } else if (withFiles) notify(t('queue.status.filesRemoved', { n: done }));
       else if (pending.mode === 'clear') notify(t('queue.status.cleared'));
       else notify(t('queue.status.removed', { n: done }));
       pending.mode = 'delete';
-      refresh();
+      refresh(true);
     });
   }
 
@@ -1455,6 +1565,15 @@
     global.YTVDLTNav.onLeave(saveView);
   }
   global.addEventListener('pagehide', saveView);
+  // D-120: the user may delete/move a video in Explorer while the window is
+  // hidden or another page is open. Re-entry must re-stat the recorded paths
+  // instead of trusting a stale cache; the next poll then picks it up.
+  var markStatusStale = function () { if (live.active) statusRefreshDue = true; };
+  global.addEventListener('pageshow', markStatusStale);
+  global.addEventListener('focus', markStatusStale);
+  doc.addEventListener('visibilitychange', function () {
+    if (doc.visibilityState !== 'hidden') markStatusStale();
+  });
   var result = render();
   if (live.active) {
     // D-112: a fixed 1.2 s tick shows at most one or two frames of a download

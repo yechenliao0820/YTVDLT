@@ -1,3 +1,52 @@
+# YTVDLT 交付报告（0.2.8 · 最新）
+
+> 交付日期：2026-11-10 ｜ 交付人：Buddy ｜ 接收人：LeoLee
+> 本轮三件事：① 修「本地文件已被外部删除时，勾选『同时删除本地文件』导致任务历史删不掉」（D-120）；② 任务卡片增加本地文件状态检测与打开文件/打开文件夹的准确反馈（D-120）；③ 设置 → 关于改为「本软件主许可 + 各组件各自许可」分层，并逐字内嵌完整英文许可证全文（D-121）。**本轮仅本地打包，GitHub Release 未发布**，等业主明确指令。
+
+## 一、交付物
+
+| 交付物 | 位置 | 大小 |
+|---|---|---|
+| 安装版（NSIS） | `dist-0.2.8\YTVDLT Setup 0.2.8.exe` | 226,309,350 B（215.8 MiB） |
+| 差分清单 | `dist-0.2.8\YTVDLT Setup 0.2.8.exe.blockmap` | 233 KB |
+| 更新清单 | `dist-0.2.8\latest.yml` | 341 B |
+| 免安装目录 | `dist-0.2.8\win-unpacked\` | 真机 CDP 验证用 |
+
+按铁律 9 只打 NSIS 安装版（未打便携版）。两个 `package.json` 打包前同步升到 0.2.8，打包后根 `package.json` 未被 electron-builder 改写（与备份逐行比对，仅 version 一行差异）；仓库版本基准 0.2.8。安装包 SHA-256 `e5ba021a…1db2`，`latest.yml` 的 sha512 / size 与本地 exe 逐项一致。
+
+## 二、逐项落地
+
+| # | 诉求 | 落地 |
+|---|---|---|
+| 1 | 视频被手动删除后，勾选「同时删除本地文件」→ 整个删除失败、历史记录删不掉 | 根因在 `TASK_ACTION`：`shell.trashItem` 对不存在文件抛 `ENOENT`，旧实现把它算作「部分失败」并在 `taskDetail.perform('remove')` **之前** return。改为逐路径 `trashed/missing/error` 结构化结果，先 `stat` 判存在；`ENOENT` 幂等视为已完成，`EACCES/EBUSY/EIO` 才保留记录并回报真实原因；被其它在册任务引用的同一物理文件跳过回收。（D-120） |
+| 2 | 卡片在文件已被外部删除后仍显示「已完成」、点打开无反馈 | 新增主进程 `local-file-status.ts`（按需 `stat`、errno 五分类、1.5 s TTL、用户操作时强制重查），复用 `TASK_LIST`/`TASK_ACTION` 两个现有通道，不新增 IPC；卡片 meta 行加轻量状态标识，live 模式注入「打开文件」按钮；`open-folder` 改为只依赖原目录存在。（D-120） |
+| 3 | 设置 → 关于放完整英文许可证，注明本软件与各组件各自遵循什么许可 | 标题「开源许可声明」→「许可与授权」（本软件是 source-available 非商业许可，非 OSI 开源、非 MIT）；三列表格：YTVDLT Non-Commercial License 1.0 + yt-dlp Unlicense / FFmpeg LGPL-3.0 / aria2c GPL-2.0-or-later / Electron MIT / Node.js MIT；折叠块逐字内嵌根 `LICENSE` 英文部分 71 行。（D-121） |
+
+## 三、验收结果
+
+| 门禁 | 结果 |
+|---|---|
+| `pnpm typecheck` | 5/5 successful |
+| 全量单测（不带覆盖率） | 88 文件 1152/1152 通过（含 D-120 新增 77 例、D-121 新增 11 例） |
+| `run-e2e.mjs` | 31/31 case + 反例 5/5 全绿；D-121 改 UI 后按 §7 逐 case 重建 `settings-appearance` / `settings-en-dark` 两个 DOM 基线，PNG 未动、像素差 0 px |
+| `check-layering` / `frozen-gate` | 0 violations / 通过 |
+| `build-desktop.mjs` | 成功（main 285.6 KB / preload 3.7 KB / renderer 已拷贝） |
+| 打包产物自检 | asar 内 `version=0.2.8`、`main=apps/desktop/dist/main/main.cjs`；D-120/D-121 关键串（`about-licence-text`、`card-file-state`、`FILE_DELETE_FAILED`、许可证英文全文）均在包内；`icon.ico` 四档 DIB 载荷在 `YTVDLT.exe` 内命中 4 次；`resources/runtime/` 含 yt-dlp / ffmpeg / node / aria2c 与许可全文；`app-update.yml` 已生成 |
+| `handoff-check.mjs` | 已跑，决策编号 D-01…D-121（下一棒 D-122） |
+
+## 四、已知边界
+
+1. **未在已安装的真机环境点过本轮三个改动**：打包产物只做了静态自检，未跑 CDP 9222 真机 UI 驱动。
+2. 文件被其它进程占用、权限不足、网络盘掉线这三类错误由 OS errno 语义 + 假端口覆盖，未在本机真实构造。
+3. GitHub Release 未发布（铁律 12）。**若之后发布**：`latest.yml` 的 `url` / `path` 目前是带空格的 `YTVDLT Setup 0.2.8.exe`，GitHub 上传时会把空格改成点，必须同步改写清单再上传，否则按清单取包会 404（§9 坑 18）；Release 说明须用英文（铁律 14）。
+4. 安装包未签名，SmartScreen 会拦一次。
+5. 未走完「应用内下载整包 → 安装 → 重启」自更新闭环（历版同项）。
+6. 下一决策编号从 D-122 起。
+
+---
+
+## 以下为 0.2.7 历史交付报告（原文存档，未改动）
+
 # YTVDLT 交付报告（0.2.7 · 最新）
 
 > 交付日期：2026-11-09 ｜ 交付人：Buddy（AI） ｜ 接收人：LeoLee

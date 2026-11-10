@@ -120,7 +120,7 @@ ui（零依赖） ← preload ← apps/desktop
 |---|---|
 | 队列页：渲染、轮询、按钮、语言切换、任务管理、全屏 | `packages/ui/src/pages/queue/queue.js` + 同目录 `index.html`（版式与内联 CSS） |
 | 所有界面文案（中/英） | `packages/ui/src/i18n/messages.js`（双语键集合必须一致）、`i18n/i18n.js` |
-| 版本号 / 关于弹窗 / 开源声明 | `apps/desktop/src/main/main.ts`（首帧 `?v=` 提示）、`packages/ui/src/shell/app-version.js`（**唯一真相链**：`?v=` 提示 → `APP_INFO` 覆盖 → 无值显示 `v—`）、`packages/ui/src/about/about.js` |
+| 版本号 / 关于弹窗 / 许可声明 | `apps/desktop/src/main/main.ts`（首帧 `?v=` 提示）、`packages/ui/src/shell/app-version.js`（**唯一真相链**：`?v=` 提示 → `APP_INFO` 覆盖 → 无值显示 `v—`）、`packages/ui/src/about/about.js`（紧凑弹窗）、`packages/ui/src/pages/settings/index.html`（`#section-about`：主许可 + 组件许可表 + 根 `LICENSE` 英文部分**逐字内嵌**）、`LICENSE`（主许可唯一真相，改它必须同步内嵌副本，`about-licence.test.ts` 会拦）；**本软件是 source-available 非商业许可，不是开源、不是 MIT，文案不得写成「开源许可」** |
 | 主题、强调色、动效 | `packages/ui/src/theme/theme.js`、`styles/theme.css`；共享基线样式 `styles/ytvdlt.css` |
 | 应用菜单（文件/编辑/视图/窗口/设置） | `apps/desktop/src/main/app-menu.ts`（纯数据）→ `bootstrap.ts` 安装与重建 |
 | 窗口、托盘、单实例、菜单跳转、关闭清理 | `apps/desktop/src/main/bootstrap.ts` |
@@ -149,6 +149,7 @@ ui（零依赖） ← preload ← apps/desktop
 | **全局导航 / 返回下载队列 / 队列视图状态** | `packages/ui/src/shell/app-nav.js`（导航条注入、`saveView/restoreView`）、`pages/queue/queue.js::saveView/restoreView` |
 | **全屏唯一真相（菜单 / 按钮 / 所有页面）** | `apps/desktop/src/main/bootstrap.ts`（`WINDOW_FULLSCREEN` handler + 事件推送）、`main/app-menu.ts`（F11 click）、`ui/src/shell/app-nav.js`（按钮与 Esc） |
 | **主题 / 强调色 / 动效全局状态与持久化** | `packages/ui/src/theme/theme.js`（`set/sync/listen/state`）、`pages/settings/settings.js`、`main/m5-channels.ts::SETTINGS_GET/SET` |
+| **本地文件状态探测 / 删除任务时文件已不存在 / 打开文件与打开文件夹反馈** | `apps/desktop/src/main/local-file-status.ts`（errno 分类 + 短 TTL 缓存 + force 重查）、`apps/desktop/src/main/adapters/local-file-status-port.ts`（真实 `stat` + 幂等回收）、`main/m5-channels.ts::TASK_ACTION` / `TASK_LIST`、`core/src/task-detail/task-detail.ts::open`、`ui/src/pages/queue/queue.js::fileStateKey` / `openActionMessage` / `performRemoval`；卡片「打开文件」按钮**只在 live 模式注入**（静态预览不注入，保住冻结基线）；原理见 §9 坑 22 |
 | **响应式布局（视口宽高驱动）** | `packages/ui/src/styles/layout.css`（`--ui-step` + 高特异性覆盖）；`ytvdlt.css` 仍是 M3 固定画幅，**不要改它** |
 
 ---
@@ -174,6 +175,7 @@ ui（零依赖） ← preload ← apps/desktop
 | **主题只在设置页生效 / 重启回浅色** | ① 设置页是否还在走 `CONFIG_SET`（M3 fixture，不持久化）② `theme.js` 的 `ytvdlt.appearance` 本地缓存与 `SETTINGS_GET` 回读 ③ `<html>` 上的 `data-theme` | 真正的持久化只走 `SETTINGS_SET` → `general.theme` | 再查 `config.json` 是否被只读目录回落、`theme.css` 是否被覆盖 |
 | **全屏退不出去 / 各页面按钮不一致** | ① 是否同时用了 HTML Fullscreen API 与 `Window.setFullScreen()` ② 菜单 F11 是否还挂 `role:'togglefullscreen'` ③ `WINDOW_FULLSCREEN` handler 是否注册、`enter-full-screen` 是否推送 | D-106 把两套状态合并为主进程单一真相 | 再查 `shell/app-nav.js` 的 bridge 分支与静态预览降级 |
 | **「检查更新」没反应 / 一直提示失败** | ① `logs/app-*.jsonl` 里 `app-update` 与 `component-check` ② GitHub API 是否可达（`api.github.com/repos/yechenliao0820/YTVDLT/releases/latest`）③ `advanced.autoCheckAppUpdate` / `lastAppUpdateCheckAt` 是否把自动检查挡在节流窗口内 ④ 该版本是否已被「以后不再提示」写进 `advanced.skippedAppVersion` | 更新链路不碰 UI 状态，失败只写日志、不动正在运行的版本 | 再查 Release 资产名是否还能被 `selectInstallerAsset` 认出来（改名成非 `Setup` 且带 portable 字样会被打 0 分） |
+| **勾选「同时删除本地文件」后记录删不掉 / 卡片仍显示已完成但文件早已被外部删除** | ① 产物路径是不是已被用户在资源管理器删掉（`ENOENT` 是幂等完成，不是失败）② `TASK_ACTION` 是否在 `taskDetail.perform('remove')` 之前就 return ③ `EACCES` / `EBUSY` 有没有被误判成 `ENOENT` ④ `fileStatus` 是否来自过期缓存、重进页面有没有带 `refreshFileStatus` | 记录删除与文件清理必须解耦；只有真实文件系统错误才保留记录（原理见 §9 坑 22） | 再查共享物理文件的引用计数、`shell.trashItem` 的真实 errno、以及 `open-folder` 走的是目录检查而不是文件检查 |
 
 ---
 
@@ -199,6 +201,8 @@ ui（零依赖） ← preload ← apps/desktop
 8. **`PATH_ACTION` 不接受路径字符串**（D-98）：渲染层只能发 `{action: pick|reset|open, kind: video|audio}`，能写进 `paths.*` 的只有主进程对话框选出来的目录。改这条等于给渲染层开一个"任意写配置路径"的口子。
 9. **`THUMBNAIL_CACHE` 不接受路径**（D-103）：渲染层只能发 `{action: status|prune|set-auto|set-max-bytes, enabled?, maxBytes?}`。删除只在主进程发生，且必须经 `isSafeCacheName()` + 目录前缀校验后走 `shell.trashItem`；把路径或删除原语带进这个通道等于给渲染层开一个"任意删文件"的口子。
 10. **`APP_INFO` 只读、零参数**（D-114）：主进程回 `app.getVersion()`。**页面上的版本号只能来自它**（`?v=` 仅作首帧提示，不得作为唯一来源，更不得在渲染层写死版本字符串——那正是 0.2.2 存活四个版本的机制）。
+11. **`TASK_LIST` 的 `fileStatus` / `dirStatus` 只是文件系统观察值，不是下载状态**（D-120）：主进程只对 `Completed` 任务按记录里的产物路径 `stat`，枚举固定 `present|missing|inaccessible|unavailable|invalid`；`refreshFileStatus: true` 只请求一次强制重查，**不接受任何路径**。渲染层绝不能因 `missing` 删除历史记录或把「已完成」改成「失败」。
+12. **`TASK_ACTION` 的 `withFiles` 是幂等清理**（D-120）：`TrashFilesPort` 逐路径返回 `trashed|missing|error`；只有 `error` 才保留记录并回 `FILE_DELETE_FAILED` + 真实原因，`missing` 一律继续删记录。被其它在册任务引用的同一物理文件跳过回收，删除范围不得扩大。`open-file` / `open-folder` 在操作前强制重查；`open-folder` 只看目录状态，文件缺失不阻止打开原目录。
 
 ---
 
@@ -326,6 +330,8 @@ ui（零依赖） ← preload ← apps/desktop
 20. **`_MEI<pid>` 跟随 `TEMP`，不跟随 `-P`**：yt-dlp 是 PyInstaller onefile，每次启动把约 29 MB / 142 个文件解包到 `%TEMP%\_MEI<pid>`，**正常退出会自己删**，被 `taskkill` 打断则残留。它曾经出现在用户的视频目录里（D-89 把子进程 TEMP 钉在输出目录），这就是"下载目录里为什么有一堆 `_MEI`"的答案。结论：**cwd 可以钉，TEMP 不要钉**；`-P temp:` 只影响 `.part` / `.ytdl`。别按名字去删 `_MEI*`——判断不了哪个属于正在跑的进程。
 
 21. **`child.kill()` 杀不掉 yt-dlp**：onefile 的 bootloader 会再起一个子进程，`child.kill()` 只终结父进程，下载继续跑（实测：kill 后仍完整下载完，`.part` 都没出现）。取消必须走 `taskkill /PID <pid> /T /F`（`adapters/process-streaming.ts` 已实现）。写任何"中断"测试时同理，否则测的是假中断。
+
+22. **`shell.trashItem` 对不存在的文件抛 `ENOENT`，那不是删除失败**（D-120）：把它计入「部分失败」会让任务历史永远删不掉。清理必须幂等——先 `stat` 判存在，存在才回收；`ENOENT`/`ENOTDIR` 视为已完成；`EACCES`/`EPERM`/`EBUSY`/`EIO`/卷不可用才保留记录并回报真实原因。`stat` 到 `trashItem` 之间文件仍可能被外部删掉，catch 里要按 errno 再兜一次，别吞掉所有异常。同理：队列里的 `Completed` 说的是「当初下载成功」，不是「文件现在还在」，两者别互相覆盖。
 
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 

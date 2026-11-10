@@ -93,6 +93,12 @@ export function harness(options: {
    * the modal has to supply its nodes.
    */
   elements?: Record<string, FakeNode>;
+  /**
+   * D-120: per-channel reply override. Return `undefined` to fall back to
+   * the default fake reply. Lets a suite prove what the page does with a
+   * `FILE_MISSING` / `filesMissing` result without touching the bridge shape.
+   */
+  onInvoke?: (channel: string, payload: unknown) => unknown;
 } = {}): QueuePageHarness {
   const sandbox: Record<string, any> = {};
   new Function('window', sources.messages)(sandbox);
@@ -175,6 +181,8 @@ export function harness(options: {
     sandbox.ytvdltBridge = {
       invoke(channel: string, payload: unknown) {
         calls.push({ channel, payload });
+        const custom = options.onInvoke?.(channel, payload);
+        if (custom !== undefined) return Promise.resolve(custom);
         return Promise.resolve(channel === 'ytvdlt:task:list' ? { ok: true, items: replies.items } : { ok: true });
       },
     };
@@ -228,6 +236,9 @@ export function dto(overrides: Record<string, unknown> = {}): Record<string, unk
     // D-115: the wire field the queue reads; omitted only when the caller did
     // not set one, so the "no information" path stays testable.
     ...(task['stage'] === null ? {} : { stage: task['stage'] }),
+    // D-120: absent by default -> the static preview paints NO file hint.
+    ...(typeof task['fileStatus'] === 'string' ? { fileStatus: task['fileStatus'] } : {}),
+    ...(typeof task['dirStatus'] === 'string' ? { dirStatus: task['dirStatus'] } : {}),
   };
 }
 

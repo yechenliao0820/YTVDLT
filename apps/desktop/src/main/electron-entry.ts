@@ -21,6 +21,7 @@ import { createEngine } from '@ytvdlt/engine-ytdlp';
 import { createNodePorts } from './adapters/node-ports.js';
 import { createElectronShellPort } from './adapters/electron-shell-port.js';
 import { createPathPicker } from './adapters/path-picker.js';
+import { createLocalFileStatusPort, createTrashFilesPort } from './adapters/local-file-status-port.js';
 import { resolveFixtureDir, resolveRuntimeDir } from './runtime-paths.js';
 import { createNodeProbePort, resolveDataDir } from './data-dir.js';
 import { createQueueIntakeGate } from './adapters/queue-intake-gate.js';
@@ -279,19 +280,15 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
         prefersReducedMotion: () => false,
         accent: () => null,
       },
-      // D-87: `shell.trashItem` is the ONLY deletion primitive. Files go to the
-      // Windows Recycle Bin (never removed permanently) and a partial failure
-      // keeps the task record so the user can retry.
-      trashFiles: {
-        trash: async (paths) => {
-          const done: string[] = [];
-          for (const path of paths) {
-            try { await shell.trashItem(path); done.push(path); }
-            catch { /* keep the record on partial failure */ }
-          }
-          return done;
-        },
-      },
+      // D-87 / D-120: `shell.trashItem` is STILL the only deletion primitive
+      // (Windows Recycle Bin, never a permanent unlink). The adapter now returns
+      // one outcome per path so ENOENT counts as "already clean" while a real
+      // OS error keeps the record and reports its actual reason. See
+      // `adapters/local-file-status-port.ts`.
+      trashFiles: createTrashFilesPort((path) => shell.trashItem(path)),
+      // D-120: on-demand `stat` of recorded artifact paths only. No directory
+      // scan, no renderer filesystem access; short TTL + forced re-checks.
+      fileStatus: createLocalFileStatusPort(),
     });
     hostRef = host;
     configRef = host.m4.task.config;

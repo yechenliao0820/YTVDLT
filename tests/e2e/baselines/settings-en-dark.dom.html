@@ -108,6 +108,24 @@
   select { height: 30px; font-family: inherit; font-size: 13px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--ink); }
   .about-line { display: flex; gap: 8px; font-size: 12px; color: var(--muted); padding: 4px 0; }
   .about-line b { color: var(--ink); font-weight: 700; }
+  /* D-121: own licence first, bundled components second, full English text
+     third. Grey monospace block = code/link highlighting used across the app. */
+  .about-licence { margin: 8px 0 10px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .about-licence-row { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(180px, 1.25fr) minmax(150px, 1.15fr); gap: 8px; padding: 6px 10px; font-size: 12px; border-bottom: 1px solid var(--line); }
+  .about-licence-row:last-child { border-bottom: 0; }
+  .about-licence-row.head { background: var(--accent-soft); color: var(--ink); font-weight: 700; }
+  .about-licence-row span { color: var(--muted); overflow-wrap: anywhere; }
+  .about-licence-row .lic-id { color: var(--ink); font-weight: 700; }
+  .about-licence-row.own { background: var(--accent-soft); }
+  .about-licence-row.own .lic-id { color: var(--accent); }
+  .about-licence-full { margin: 8px 0 10px; border: 1px solid var(--line); border-radius: 6px; }
+  .about-licence-full summary { cursor: pointer; padding: 8px 10px; font-size: 12px; font-weight: 700; color: var(--ink); }
+  .about-licence-full pre { margin: 0; padding: 10px 12px; border-top: 1px solid var(--line);
+    background: #f3f4f6; color: var(--ink); font-size: 11px; line-height: 1.55;
+    max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    font-family: Consolas, "Courier New", monospace; }
+  .about-licence-full .note { padding: 6px 10px 8px; margin: 0; }
+  html[data-theme="dark"] .about-licence-full pre { background: #0a1119; color: #cfe3f7; }
   #ytvdlt-output { background: #f3f4f6; padding: 8px 10px; border-radius: 6px; font-size: 12px; max-height: 90px; overflow: auto; }
   html[data-theme="dark"] #ytvdlt-output { background: #0a1119; color: #cfe3f7; }
   [hidden="true"] { display: none !important; }
@@ -279,9 +297,122 @@
       <div class="about-line"><b data-i18n="about.version" data-fit="">Version</b><span id="about-version">v—</span></div>
       <div class="about-line"><b data-i18n="about.author" data-fit="">Author</b><span data-i18n="about.author.name">Yechen Liao</span></div>
       <div class="about-line" data-i18n="about.runtime">Runtime: yt-dlp / node / ffmpeg (bundled, never inside asar)</div>
-      <div class="about-line"><b data-i18n="about.license.title" data-fit="">Open source licences</b></div>
-      <p class="note" data-i18n="about.license.body">Bundled components: yt-dlp (Unlicense), FFmpeg (LGPL-3.0), Electron (MIT) and Node.js (MIT). Full licence texts are in THIRD_PARTY_NOTICES; source is available under each component's licence.</p>
-      <div class="about-line" data-i18n="about.license">FFmpeg is LGPL-3.0; see THIRD_PARTY_NOTICES for sources and the full licence.</div>
+      <div class="about-line"><b data-i18n="about.license.title" data-fit="">Licence &amp; components</b></div>
+      <p class="note" data-i18n="about.license.body" data-fit="">This software and the bundled components are licensed separately: YTVDLT itself is under the YTVDLT Non-Commercial License 1.0; each component keeps its own licence and is not governed by ours.</p>
+
+      <!-- D-121: "this software" and "bundled components" are two different
+           legal objects. The old heading said "open source", which the LICENSE
+           explicitly denies (source-available / non-commercial, not MIT). -->
+      <div class="about-licence">
+        <div class="about-licence-row head">
+          <span data-i18n="about.license.col.component" data-fit="">Subject</span>
+          <span data-i18n="about.license.col.licence" data-fit="">Licence</span>
+          <span data-i18n="about.license.col.use" data-fit="">Notes / how it is used</span>
+        </div>
+        <div class="about-licence-row own">
+          <span data-i18n="about.license.own" data-fit="">YTVDLT itself</span>
+          <span class="lic-id">YTVDLT Non-Commercial License 1.0</span>
+          <span data-i18n="about.license.ownNote" data-fit="">Free for non-commercial use; source-available, not OSI open source, not MIT</span>
+        </div>
+        <div class="about-licence-row">
+          <span>yt-dlp</span><span class="lic-id">Unlicense</span>
+          <span data-i18n="about.license.use.ytdlp" data-fit="">separate process, replaceable</span>
+        </div>
+        <div class="about-licence-row">
+          <span>FFmpeg / ffprobe</span><span class="lic-id">LGPL-3.0</span>
+          <span data-i18n="about.license.use.ffmpeg" data-fit="">dynamically linked shared build, replaceable DLLs</span>
+        </div>
+        <div class="about-licence-row">
+          <span>aria2c</span><span class="lic-id">GPL-2.0-or-later</span>
+          <span data-i18n="about.license.use.aria2c" data-fit="">separate process, optional segment downloader</span>
+        </div>
+        <div class="about-licence-row">
+          <span>Electron</span><span class="lic-id">MIT</span>
+          <span data-i18n="about.license.use.electron" data-fit="">application shell</span>
+        </div>
+        <div class="about-licence-row">
+          <span>Node.js</span><span class="lic-id">MIT</span>
+          <span data-i18n="about.license.use.node" data-fit="">bundled runtime</span>
+        </div>
+      </div>
+
+      <details class="about-licence-full" id="about-licence-full">
+        <summary data-i18n="about.license.full" data-fit="">Full English licence text (YTVDLT Non-Commercial License 1.0)</summary>
+        <pre id="about-licence-text">YTVDLT Non-Commercial License 1.0
+
+Copyright (c) 2026 LeoLee. All rights reserved.
+
+This license is published in English and Simplified Chinese. Both texts are
+equally authentic and together form the license. In case of any conflict or
+ambiguity, the Simplified Chinese text prevails.
+
+---
+
+## English
+
+### 1. Grant of Rights
+
+Subject to all terms below, you are granted, **free of charge**:
+
+1. **Use** — to run this software for any **non-commercial purpose**, including
+   personal study, research, teaching, and charitable use.
+2. **Modify** — to read and modify the source code, and to use modified versions
+   non-commercially.
+3. **Distribute** — to provide this software, modified or not, in source or
+   binary form, provided that you:
+   - include this license in full, unmodified;
+   - retain the original author's copyright notice and attribution;
+   - **prominently mark** modified versions as changed and different from the
+     original.
+
+### 2. Prohibited Conduct
+
+1. **Commercial use** — you may not use this software (including modified
+   versions, derivatives and binaries) for any commercial purpose, including but
+   not limited to: selling it, bundling it with a paid product, offering it as
+   part of a paid service, using it in paid client deliverables, or productive
+   use inside a commercial organization.
+2. **Removing notices** — you may not remove or obscure this license, the
+   copyright notice, or the author's attribution.
+3. **Implied endorsement** — you may not imply that the original author endorses
+   you or your version.
+
+### 3. Commercial Licensing
+
+Commercial use requires **prior written permission from the author** (paid or
+free, at the author's discretion). Until such permission is granted, Section 2.1
+applies.
+
+### 4. Termination
+
+Any violation of these terms **automatically terminates** all rights granted to
+you. Continued use after termination constitutes infringement.
+
+### 5. Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHOR BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+### 6. Third-Party Components
+
+Bundled third-party components keep their own licenses and are **not** governed
+by this license — see [`docs/THIRD_PARTY_NOTICES.md`](docs/THIRD_PARTY_NOTICES.md):
+
+- FFmpeg / ffprobe — LGPL-3.0 (dynamically linked)
+- aria2c — GPL-2.0-or-later (separate process)
+- yt-dlp — Unlicense
+- Node.js — MIT
+- Electron — MIT
+
+This license does not alter those terms and does not restrict your rights to
+use, modify or replace those components under their own licenses.</pre>
+        <p class="note" data-i18n="about.license.fullHint" data-fit="">Verbatim copy of the English part of the repository LICENSE; both language texts are equally authentic, and the Simplified Chinese text prevails on conflict.</p>
+      </details>
+
+      <div class="about-line" data-i18n="about.license.thirdParty" data-fit="">Full component licence texts and source locations: docs/THIRD_PARTY_NOTICES.md. FFmpeg is LGPL-3.0; FFMPEG-LICENSE.txt and ARIA2-COPYING.txt ship with the binaries.</div>
       <div class="about-line" data-i18n="about.haptics">Haptics: no equivalent hardware on desktop, explicitly omitted.</div>
       <div class="about-line" data-i18n="about.transitions">Transitions are limited to state changes and dialogs, and respect reduce-motion.</div>
     </section>

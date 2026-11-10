@@ -66,6 +66,20 @@ html[data-theme="dark"] input,
 html[data-theme="dark"] select { background: var(--panel); color: var(--ink); border-color: var(--line); }
 html[data-theme="dark"] pre#ytvdlt-output { background: #0a1119; color: #cfe3f7; }
 
+/* ---------- D-120: local-file state hint on a completed task card ----------
+ * One quiet span inside the existing meta row. It is an observation of the
+ * file on disk, NOT a download result: the "已完成" badge, cover, title and
+ * progress bar are untouched. External CSS keeps the frozen DOM baselines
+ * byte-identical (the <link> tag is all the snapshot ever contains). */
+.card-file-state {
+  color: var(--danger);
+  font-weight: 700;
+  white-space: nowrap;
+}
+html[data-theme="dark"] .card-file-state { color: #ff8a99; }
+.card-file-state[data-file-status="unavailable"],
+.card-file-state[data-file-status="invalid"] { color: var(--muted); }
+
 /* ---------- reduced motion (system setting or ?motion=reduced) ---------- */
 html[data-motion="reduced"] *,
 html[data-motion="reduced"] *::before,

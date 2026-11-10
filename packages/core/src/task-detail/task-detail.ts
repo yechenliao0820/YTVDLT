@@ -30,6 +30,7 @@ export type TaskDetailCode =
   | 'OK'
   | 'TASK_MISSING'
   | 'FILE_MISSING'
+  | 'FOLDER_MISSING'
   | 'NO_ARTIFACT'
   | 'SHELL_UNAVAILABLE'
   | 'CLIPBOARD_UNAVAILABLE'
@@ -43,6 +44,19 @@ export interface TaskDetailResult {
   readonly code: TaskDetailCode;
   readonly message: string;
   readonly clipboardText?: string;
+  /** D-120: `open-folder` succeeded by opening the DIRECTORY, not the file. */
+  readonly fileMissing?: boolean;
+}
+
+/**
+ * Pure string parent — `core` must never import `node:path` (layering gate).
+ * Handles Windows drive letters, UNC and POSIX roots alike.
+ */
+export function parentDirOf(path: string): string {
+  const normalized = path.replace(/\\/g, '/');
+  const index = normalized.lastIndexOf('/');
+  if (index < 0) return '';
+  return index === 0 ? '/' : normalized.slice(0, index);
 }
 
 export interface ClipboardPort {
@@ -98,11 +112,26 @@ export class TaskDetailService {
   private async open(task: TaskRecord, action: 'open-file' | 'open-folder'): Promise<TaskDetailResult> {
     const target = task.artifacts[0];
     if (target === undefined) return this.result(action, false, 'NO_ARTIFACT', '任务没有产物路径');
-    if (!(await this.deps.ports.fs.exists(target))) {
-      return this.result(action, false, 'FILE_MISSING', `产物不存在: ${target}`);
-    }
     const shell = this.deps.shell;
     if (shell === undefined) return this.result(action, false, 'SHELL_UNAVAILABLE', '当前环境未注入 shell 端口');
+    const present = await this.deps.ports.fs.exists(target);
+    if (!present) {
+      // A download that succeeded once is still a valid record. The USER may
+      // have moved/deleted the file externally; that must not stop them from
+      // opening the folder it used to live in. Only `open-folder` gets this
+      // fallback — `open-file` has nothing to open and stays a clean refusal.
+      if (action === 'open-file') return this.result(action, false, 'FILE_MISSING', `产物不存在: ${target}`);
+      const dir = parentDirOf(target);
+      if (dir === '' || !(await this.deps.ports.fs.exists(dir))) {
+        return this.result(action, false, 'FOLDER_MISSING', `原下载目录不存在: ${dir}`);
+      }
+      try {
+        await shell.openPath(dir);
+        return { action, ok: true, code: 'OK', message: dir, fileMissing: true };
+      } catch (error) {
+        return this.result(action, false, 'ERROR', String(error));
+      }
+    }
     try {
       if (action === 'open-file') await shell.openPath(target);
       else await shell.showItemInFolder(target);

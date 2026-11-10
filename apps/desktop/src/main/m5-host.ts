@@ -20,6 +20,7 @@ import {
   type ThumbnailPort, type TrashFilesPort,
 } from './m5-channels.js';
 import type { IpcGateway, IpcHandler } from './ipc-gateway.js';
+import type { LocalFileStatusPort } from './local-file-status.js';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
 
 export interface M5HostOptions extends M4HostOptions {
@@ -43,6 +44,8 @@ export interface M5HostOptions extends M4HostOptions {
   readonly pathPicker?: PathPickerPort;
   /** D-87: recycle-bin adapter for "also delete local files". */
   readonly trashFiles?: TrashFilesPort;
+  /** D-120: local artifact state probe; absent keeps the old (no field) DTO. */
+  readonly fileStatus?: LocalFileStatusPort;
 }
 
 /**
@@ -124,6 +127,7 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     ...(options.expandPath === undefined ? {} : { expandPath: options.expandPath }),
     ...(options.pathPicker === undefined ? {} : { pathPicker: options.pathPicker }),
     ...(options.trashFiles === undefined ? {} : { trashFiles: options.trashFiles }),
+    ...(options.fileStatus === undefined ? {} : { fileStatus: options.fileStatus }),
     // D-114: the authoritative build identity. Sourced from the same
     // `app.getVersion()` the package metadata carries, never from a literal.
     appInfo: {

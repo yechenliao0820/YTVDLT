@@ -26,6 +26,9 @@ import type {
   FailureKind, MotionMode, TaskDetailAction, TaskDetailResult, TaskTab, ThemeMode,
 } from '@ytvdlt/core';
 import type { ThumbnailCacheStatus, ThumbnailPruneReport } from './thumbnail-cache.js';
+import type {
+  LocalFileState, LocalFileStatusPort, LocalFileStatus as FileStatusBucket,
+} from './local-file-status.js';
 
 /** Minimal slice of the queue this layer needs (tests inject a fake). */
 export interface TaskListPort {
@@ -75,13 +78,41 @@ export interface ThumbnailPort {
 }
 
 /**
- * D-87: moving a task's artifacts to the OS recycle bin is a main-process job.
- * Injected (never imported from `electron`) so the channel layer stays L0-testable.
- * Returns the paths that were actually trashed; a short list means a partial
- * failure and the record is deliberately kept so the user can retry.
+ * D-120: one answer per requested path, so "already gone" can never be
+ * mistaken for "could not be deleted".
+ *
+ *   trashed — existed and was moved to the OS recycle bin
+ *   missing — ENOENT/ENOTDIR: local cleanup is already complete (idempotent)
+ *   error   — a real failure (locked, no permission, volume unavailable…)
+ *
+ * Legacy adapters may still return plain path strings; those count as
+ * `trashed`, preserving the D-87 contract and every existing fake port.
  */
+export type TrashFileStatus = 'trashed' | 'missing' | 'error';
+
+export interface TrashFileOutcome {
+  readonly path: string;
+  readonly status: TrashFileStatus;
+  /** The real OS reason; only present for `error`, never a guessed cause. */
+  readonly reason?: string;
+}
+
 export interface TrashFilesPort {
-  trash(paths: readonly string[]): Promise<readonly string[]>;
+  trash(paths: readonly string[]): Promise<readonly (string | TrashFileOutcome)[]>;
+}
+
+/** Normalise D-87 string replies and D-120 structured replies into one shape. */
+export function normalizeTrashOutcomes(
+  results: readonly (string | TrashFileOutcome)[],
+): readonly TrashFileOutcome[] {
+  return results.map((entry) => (typeof entry === 'string'
+    ? { path: entry, status: 'trashed' as const }
+    : entry));
+}
+
+/** Windows path equality: case-insensitive, slash-insensitive. */
+export function samePathKey(path: string): string {
+  return path.replace(/\\/g, '/').toLowerCase();
 }
 
 /**
@@ -139,6 +170,11 @@ export interface M5ChannelDeps {
   readonly enqueueSingle?: (input: SingleDownloadInput) => Promise<readonly string[]>;
   /** D-87: absent = "also delete local files" is refused instead of deleting anything. */
   readonly trashFiles?: TrashFilesPort;
+  /**
+   * D-120: absent = old behaviour (no `fileStatus` on the list DTO, open
+   * actions go straight to core). Production always injects this.
+   */
+  readonly fileStatus?: LocalFileStatusPort;
   /** D-93: absent = the settings page shows "此构建不含更新器". */
   readonly appUpdate?: AppUpdatePortLike;
   /** D-96: absent = every card falls back to the letter badge. */
@@ -195,6 +231,14 @@ export interface TaskListItemDto {
   readonly stage?: string | null;
   /** 0.2.1 (D-96): absolute local cover path, or null for the letter badge. */
   readonly thumbPath: string | null;
+  /**
+   * D-120: stable bucket, never a sentence. Absent when the build has no
+   * probe or the task is not `Completed` — the renderer then paints nothing.
+   * It is a FILE-system observation and must never change the download state.
+   */
+  readonly fileStatus?: FileStatusBucket | null;
+  /** D-120: same buckets for the containing directory (open-folder branch). */
+  readonly dirStatus?: FileStatusBucket | null;
 }
 
 export interface TaskDetailDto {
@@ -236,7 +280,9 @@ const MAX_TEMPLATE_ARGS = 32;
 const MAX_ARG_LENGTH = 400;
 
 const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
-  [IPC_CHANNELS.TASK_LIST]: ['tab', 'query'],
+  // D-120: `refreshFileStatus` only asks for a fresh stat; it grants no path
+  // access and cannot widen any deletion.
+  [IPC_CHANNELS.TASK_LIST]: ['tab', 'query', 'refreshFileStatus'],
   [IPC_CHANNELS.TASK_DETAIL]: ['taskId'],
   // D-87: `withFiles: true` asks the host to recycle the task's artifacts
   // before removing the record. Only valid together with `action: 'remove'`.
@@ -296,7 +342,11 @@ export function validateM5Payload(channel: string, payload: unknown): Record<str
 }
 
 /** URL-free projection: the list never needs a link to render a card. */
-export function toTaskListItem(record: TaskRecord, thumbnailPath: string | null = null): TaskListItemDto {
+export function toTaskListItem(
+  record: TaskRecord,
+  thumbnailPath: string | null = null,
+  fileState?: LocalFileState,
+): TaskListItemDto {
   return {
     id: record.id,
     state: record.state,
@@ -318,6 +368,9 @@ export function toTaskListItem(record: TaskRecord, thumbnailPath: string | null 
     // infer a phase from `percent === 100` (two streams each reach 100%).
     stage: record.lastStage ?? null,
     thumbPath: thumbnailPath,
+    // D-120: only a real observation is sent. `undefined` keeps old snapshots
+    // byte-identical (no invented "all present" state for unprobed builds).
+    ...(fileState === undefined ? {} : { fileStatus: fileState.status, dirStatus: fileState.dirStatus }),
   };
 }
 
@@ -376,6 +429,30 @@ function assertTaskId(value: unknown): string {
   return value;
 }
 
+/** D-120: stable buckets -> stable codes; the renderer owns the sentence. */
+const FILE_CODE_OF: Readonly<Record<string, string>> = {
+  missing: 'FILE_MISSING',
+  inaccessible: 'FILE_INACCESSIBLE',
+  unavailable: 'FILE_UNAVAILABLE',
+  invalid: 'NO_ARTIFACT',
+};
+const FOLDER_CODE_OF: Readonly<Record<string, string>> = {
+  missing: 'FOLDER_MISSING',
+  inaccessible: 'FOLDER_INACCESSIBLE',
+  unavailable: 'FOLDER_UNAVAILABLE',
+  invalid: 'NO_ARTIFACT',
+};
+/** Fallback copy for the detail page, which prints `result.message` verbatim. */
+const OPEN_MESSAGE_OF: Readonly<Record<string, string>> = {
+  FILE_MISSING: '无法打开文件：该视频文件已不存在于原保存位置，可能已被手动删除或移动。',
+  FILE_INACCESSIBLE: '无法打开文件：没有访问权限，或文件正被其他程序占用。',
+  FILE_UNAVAILABLE: '暂时无法确认文件状态，磁盘或网络位置可能不可用，请稍后重试。',
+  FOLDER_MISSING: '原下载文件夹已不存在或无法访问。',
+  FOLDER_INACCESSIBLE: '原下载文件夹无法访问。',
+  FOLDER_UNAVAILABLE: '暂时无法确认原下载文件夹状态，请稍后重试。',
+  NO_ARTIFACT: '任务记录中没有有效的本地文件路径。',
+};
+
 function assertTemplateInput(record: Record<string, unknown>): CommandTemplateInput {
   const name = record['name'];
   if (typeof name !== 'string' || name.trim().length === 0 || name.length > 80) {
@@ -404,10 +481,21 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       throw new Error('[m5-ipc] invalid tab');
     }
     if (query !== undefined && typeof query !== 'string') throw new Error('[m5-ipc] query must be a string');
-    const snapshot = buildTaskListSnapshot(deps.queue.list(), {
+    const refresh = record['refreshFileStatus'];
+    if (refresh !== undefined && typeof refresh !== 'boolean') {
+      throw new Error('[m5-ipc] refreshFileStatus must be a boolean');
+    }
+    const records = deps.queue.list();
+    const snapshot = buildTaskListSnapshot(records, {
       ...(tab === undefined ? {} : { tab: tab as TaskTab }),
       ...(query === undefined ? {} : { query: query as string }),
     });
+    // D-120: one batch probe per list request, short-TTL cached in the port.
+    // The renderer asks for a fresh stat only on load / re-entry / user action,
+    // never on every repaint. Missing port => no field at all (old contract).
+    const states = deps.fileStatus === undefined
+      ? {}
+      : await deps.fileStatus.probe(records, refresh === true);
     return {
       tab: snapshot.tab,
       counts: snapshot.counts,
@@ -415,6 +503,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       items: snapshot.visible.map((record) => toTaskListItem(
         record,
         deps.thumbnails === undefined ? null : deps.thumbnails.pathOf(record.id),
+        states[record.id],
       )),
     };
   });
@@ -438,6 +527,34 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     if (rawWithFiles !== undefined && typeof rawWithFiles !== 'boolean') {
       throw new Error('[m5-ipc] withFiles must be a boolean');
     }
+    // ---- D-120: a fresh, honest observation before ANY open action ----------
+    // The result is a stable code, never a sentence: the renderer resolves it
+    // in the active locale. A transient error is never reported as "deleted".
+    const isOpenAction = action === 'open-file' || action === 'open-folder';
+    let observed: LocalFileState | undefined;
+    if (deps.fileStatus !== undefined && isOpenAction) {
+      const task = deps.queue.get(taskId);
+      if (task === undefined) {
+        return { action, ok: false, code: 'TASK_MISSING', message: `unknown task: ${taskId}` };
+      }
+      observed = await deps.fileStatus.probeTask(task);
+      if (observed.status === 'invalid') {
+        return { action, ok: false, code: 'NO_ARTIFACT', message: OPEN_MESSAGE_OF['NO_ARTIFACT'] as string };
+      }
+      if (action === 'open-folder') {
+        // A missing FILE must not block the folder: the directory is what the
+        // user asked to see. Only a missing/unreadable directory is a failure.
+        if (observed.dirStatus !== 'present') {
+          const code = FOLDER_CODE_OF[observed.dirStatus] ?? 'ERROR';
+          return { action, ok: false, code, message: OPEN_MESSAGE_OF[code] ?? `原下载目录不可打开（${observed.dirStatus}）` };
+        }
+      } else if (observed.status !== 'present') {
+        const code = FILE_CODE_OF[observed.status] ?? 'ERROR';
+        return { action, ok: false, code, message: OPEN_MESSAGE_OF[code] ?? `本地文件不可打开（${observed.status}）` };
+      }
+    }
+
+    // ---- D-120: local cleanup is idempotent and NEVER gates the record -----
     if (rawWithFiles === true) {
       if (action !== 'remove') throw new Error('[m5-ipc] withFiles requires action=remove');
       if (deps.trashFiles === undefined) {
@@ -446,19 +563,59 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       // Only the paths the engine itself recorded for THIS task are eligible.
       // The renderer never sends a path, so it cannot aim this at arbitrary files.
       const artifacts = deps.queue.get(taskId)?.artifacts ?? [];
-      const trashed = await deps.trashFiles.trash(artifacts);
-      if (trashed.length !== artifacts.length) {
+      // A second live record may quote the same physical file. Deleting it for
+      // this record would silently destroy the other record's artifact, so the
+      // shared paths are skipped (the record is still removed). In a batch the
+      // last record of the group then finds no other claim and recycles it.
+      const claimedElsewhere = new Set<string>();
+      for (const other of deps.queue.list()) {
+        if (other.id === taskId) continue;
+        for (const artifact of other.artifacts) claimedElsewhere.add(samePathKey(artifact));
+      }
+      const eligible = artifacts.filter((path) => !claimedElsewhere.has(samePathKey(path)));
+      const sharedSkipped = artifacts.length - eligible.length;
+      const outcomes = normalizeTrashOutcomes(await deps.trashFiles.trash(eligible));
+      // A D-87 adapter replies with only the paths it handled. A short reply is
+      // a partial failure and must keep the record (existing contract).
+      if (outcomes.length < eligible.length) {
         return {
-          action: 'remove', ok: false, code: 'ERROR',
-          message: `本地文件未全部移入回收站（${trashed.length}/${artifacts.length}），记录已保留`,
+          action: 'remove', ok: false, code: 'ERROR', failureKind: 'file-cleanup',
+          message: `本地文件未全部移入回收站（${outcomes.length}/${eligible.length}），记录已保留`,
         };
       }
+      const failed = outcomes.filter((entry) => entry.status === 'error');
+      if (failed.length > 0) {
+        // Real filesystem failure: keep the record, report the real reason,
+        // and never mark the operation as successful.
+        return {
+          action: 'remove', ok: false, code: 'FILE_DELETE_FAILED', failureKind: 'file-cleanup',
+          reason: failed[0]?.reason ?? '未知错误',
+          message: `本地文件清理失败：${failed[0]?.reason ?? '未知错误'}；任务记录已保留`,
+          failedCount: failed.length,
+        };
+      }
+      const filesMissing = outcomes.filter((entry) => entry.status === 'missing').length;
+      const filesTrashed = outcomes.filter((entry) => entry.status === 'trashed').length;
+      deps.fileStatus?.forget(taskId);
+      const removal = await deps.taskDetail.perform(taskId, 'remove');
+      if (removal.ok === true) deps.thumbnails?.forget?.(taskId);
+      return { ...removal, filesMissing, filesTrashed, sharedSkipped };
     }
+
     const result = await deps.taskDetail.perform(taskId, action as TaskDetailAction);
     // D-103: dropping a task record drops its claim on the cover. The file is
     // NOT deleted here — the prune pass checks whether another live task shares
     // it, then moves it to the recycle bin.
-    if (action === 'remove' && result.ok === true) deps.thumbnails?.forget?.(taskId);
+    if (action === 'remove') {
+      if (result.ok === true) {
+        deps.thumbnails?.forget?.(taskId);
+        deps.fileStatus?.forget(taskId);
+      }
+    } else if (isOpenAction && observed !== undefined) {
+      // Let the renderer say "文件已不存在，已为你打开原保存文件夹" without
+      // another IPC round trip.
+      return { ...result, fileStatus: observed.status, dirStatus: observed.dirStatus };
+    }
     return result;
   });
 
