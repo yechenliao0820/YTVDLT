@@ -19,11 +19,15 @@ export * from './runtime-check.js';
 // M2 additions (append-only).
 export {
   buildDownload, ArgvBuilderDownload, DOWNLOAD_ARGV_FROZEN_ORDER,
-  DOWNLOAD_ARGV_M3_SEGMENTS, type M3Segment, type DownloadContext,
+  DOWNLOAD_ARGV_M3_SEGMENTS, SUBTITLE_PRINT_TEMPLATE,
+  type M3Segment, type DownloadContext,
 } from './argv-builder-download.js';
 export * from './progress-template.js';
 export * from './progress-parser.js';
 export * from './artifact-manifest.js';
+// Stage 4 (append-only): parse yt-dlp's subtitle path list and resolve the
+// final location of each file (temp dir → media dir).
+export * from './subtitle-manifest.js';
 // D-115 (append-only): post-process markers yt-dlp prints on stderr.
 export * from './postprocess-parser.js';
 // M3 additions (append-only): compliance whitelist + forbidden-option guard.

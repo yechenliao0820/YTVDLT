@@ -15,7 +15,7 @@
  */
 import type {
   CorePorts, DownloadEngine, DownloadKind, DownloadRequest, FormatDomain, SubtitleDomain,
-  PathsDomain, NetworkDomain, AdvancedDomain, PlaylistInfo, TaskRecord,
+  PathsDomain, NetworkDomain, AdvancedDomain, PlaylistInfo, TaskRecord, MediaInfo,
 } from '@ytvdlt/shared';
 import {
   CommandTemplateStore, NotificationCenter, TaskDetailService,
@@ -103,6 +103,21 @@ export interface SingleEnqueueInput {
   readonly quality?: FormatDomain['quality'];
   readonly audioQuality?: FormatDomain['audioQuality'];
   readonly audioFormat?: 'auto' | 'mp3' | 'm4a';
+  /**
+   * Stage 3: the subtitle domain patch produced by `mergeSubtitleChoice()`.
+   *
+   * Already validated against a consumed preview — this layer only merges it
+   * over the config defaults; it never re-derives availability and never writes
+   * a global setting.
+   */
+  readonly subtitlePatch?: Partial<SubtitleDomain>;
+  /**
+   * Stage 3: `MediaInfo` obtained from a consumed preview ticket.
+   *
+   * Prefilling `TaskRecord.mediaInfo` is the ONLY thing that makes `TaskQueue`
+   * skip its own probe (`task-queue.ts`: `if (record.mediaInfo === null)`).
+   */
+  readonly mediaInfo?: MediaInfo;
 }
 
 function readDefaults(
@@ -335,11 +350,17 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
     input: SingleEnqueueInput,
   ): Promise<readonly string[]> => {
     const defaults = readDefaults(task.config, options.bundledAria2cPath, options.expandPath);
+    // Stage 3: the per-task subtitle choice is a PATCH over the config defaults.
+    // It is applied here (not written back to ConfigStore) so two concurrent
+    // downloads cannot see each other's language choice.
+    const subtitle: Partial<SubtitleDomain> = input.subtitlePatch === undefined
+      ? defaults.subtitle
+      : { ...defaults.subtitle, ...input.subtitlePatch };
     const base = buildDownloadRequest({
       taskId: 'single-template',
       url: input.url,
       kind: input.kind,
-      defaults: { ...defaults, format: applyFormatChoice(defaults.format, input) },
+      defaults: { ...defaults, format: applyFormatChoice(defaults.format, input), subtitle },
     });
     const now = ports.clock.nowIso();
     const taskId = `single-${now.replace(/[^0-9]/g, '')}-${++singleSeq}`;
@@ -361,7 +382,8 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
       state: 'Idle',
       createdAt: now,
       updatedAt: now,
-      mediaInfo: null,
+      // Stage 3: a consumed preview fills this and the queue skips its probe.
+      mediaInfo: input.mediaInfo ?? null,
       request,
       artifacts: [],
       lastPercent: null,

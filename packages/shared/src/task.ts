@@ -3,6 +3,7 @@ import type { AppError } from './errors.js';
 import type { MediaInfo } from './media.js';
 import type { DownloadRequest } from './request.js';
 import type { EngineEvent, EngineStage } from './events.js';
+import type { SubtitleFileLink, SubtitleOutcome } from './subtitle-artifact.js';
 
 /** 7 states, aligned with Seal `Task.kt`. `Completed` is terminal. */
 export type TaskState =
@@ -54,6 +55,18 @@ export interface TaskRecord {
   privateMode: boolean;
   /** Whether post-processing happened (decides C2 vs C8). */
   postprocessed: boolean;
+  /**
+   * Stage 4: subtitle files this run produced, each linked to its media.
+   * Optional so every pre-existing `tasks.json` / test fixture stays valid; the
+   * queue only fills it after a successful verification. `restart()` clears it
+   * — a retry is a NEW run and must not inherit the previous attempt's list.
+   */
+  subtitleFiles?: readonly SubtitleFileLink[];
+  /**
+   * Stage 4: requested-vs-produced reconciliation. `none` = no subtitles were
+   * asked for; absent = older record that predates this field.
+   */
+  subtitleOutcome?: SubtitleOutcome;
 }
 
 export interface TaskSnapshot {

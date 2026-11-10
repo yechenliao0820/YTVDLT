@@ -15,6 +15,7 @@
 import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeTheme, shell, Tray } from 'electron';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import type { CorePorts, EngineUpdateSource } from '@ytvdlt/shared';
 import { ArtifactVerifier, ErrorMapper, Logger, expandEnvVars, type IConfigStore } from '@ytvdlt/core';
 import { createEngine } from '@ytvdlt/engine-ytdlp';
@@ -27,11 +28,13 @@ import { createNodeProbePort, resolveDataDir } from './data-dir.js';
 import { createQueueIntakeGate } from './adapters/queue-intake-gate.js';
 import { LocalDirUpdateSource } from './adapters/local-dir-update-source.js';
 import { createAppUpdateService, type AppUpdateService } from './app-update-service.js';
+import { cleanupCompletedUpdate, createUpdateCleanupFiles } from './app-update-cleanup.js';
 import { createThumbnailCache, type ThumbnailCache } from './thumbnail-cache.js';
 import {
   createComponentUpdater, type ComponentUpdatePort,
 } from './component-updater.js';
 import { createM5Host, type M5Host } from './m5-host.js';
+import { createSubtitlePreviewService, type SubtitlePreviewService } from './subtitle-preview-service.js';
 import { bootstrap, type BootstrapHandle, type ElectronLike } from './bootstrap.js';
 import type { AppUpdatePortLike } from './m5-channels.js';
 
@@ -110,6 +113,12 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
   // the dependency direction one-way (same pattern as `hostRef`).
   let configRef: IConfigStore | null = null;
   let thumbnailsRef: ThumbnailCache | null = null;
+  /**
+   * Subtitle preview (stage 2): holds probe results keyed by an opaque ticket,
+   * so a user who never opens the subtitle picker never triggers a probe. The
+   * tickets die with the process — `before-quit` clears them explicitly.
+   */
+  let subtitlePreviewRef: SubtitlePreviewService | null = null;
 
   /** Clear history only when `general.privateMode` is on; never touches files. */
   const clearPrivateHistory = async (): Promise<void> => {
@@ -136,6 +145,9 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     if (cleanupStarted) return;
     cleanupStarted = true;
     event.preventDefault();
+    // Subtitle preview (stage 2): tickets are pure main-process memory; drop
+    // them synchronously so an expired/abandoned id can never survive a quit.
+    subtitlePreviewRef?.dispose();
     void Promise.race([
       clearPrivateHistory(),
       new Promise<void>((resolve) => { setTimeout(resolve, 3000); }),
@@ -175,6 +187,27 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       ...(updateSource === null ? {} : { updateSource }),
       intakeGate,
     });
+
+    /**
+     * Subtitle preview (stage 2).
+     *
+     * Constructing this service costs nothing: no probe runs until the renderer
+     * explicitly asks for one, so a user who never opens the picker pays no
+     * extra network call. It reuses `engine.probe` (the frozen five-method
+     * contract stays five methods) and keeps the resulting `MediaInfo` in the
+     * ticket cache, which is what lets the enqueue path skip the queue's own
+     * probe later.
+     */
+    const subtitlePreview = createSubtitlePreviewService({
+      probe: (url: string) => engine.probe(url, {
+        jsRuntimePath: join(runtimeDir, 'node.exe'),
+        noPlaylist: true,
+      }),
+      clock: ports.clock,
+      newId: () => randomUUID(),
+      logger,
+    });
+    subtitlePreviewRef = subtitlePreview;
 
     // D-67: the updater needs the host's ConfigStore, the host needs the
     // updater for its IPC surface — a mutable holder breaks the cycle, exactly
@@ -289,6 +322,9 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       // D-120: on-demand `stat` of recorded artifact paths only. No directory
       // scan, no renderer filesystem access; short TTL + forced re-checks.
       fileStatus: createLocalFileStatusPort(),
+      // Subtitle preview (stage 2): live probe behind an opaque, short-lived,
+      // single-use ticket bound to the target URL.
+      subtitlePreview,
     });
     hostRef = host;
     configRef = host.m4.task.config;
@@ -354,6 +390,7 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       updatesDir: join(dataDir.dataDir, 'updates'),
       openExternal: async (url: string) => { await shell.openExternal(url); },
       openPath: async (path: string) => shell.openPath(path),
+      trashPartial: async (path: string) => shell.trashItem(path),
       quit: () => { app.quit(); },
     });
 
@@ -392,7 +429,7 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     return host;
   };
 
-  return bootstrap(electronSurface(), {
+  const handle = await bootstrap(electronSurface(), {
     pageUrl: options.pageUrl,
     preloadPath: options.preloadPath,
     trayIconPath: options.trayIconPath,
@@ -402,6 +439,17 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     onWindowClose: clearPrivateHistory,
     platform: process.platform,
   });
+  if (handle !== null && packaged) {
+    const cleanupFiles = createUpdateCleanupFiles(async (path) => {
+      const { createHash } = await import('node:crypto');
+      const { createReadStream } = await import('node:fs');
+      const hash = createHash('sha256');
+      for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+      return hash.digest('hex');
+    });
+    void cleanupCompletedUpdate(cleanupFiles, join(appDataDir, 'updates'), appVersion);
+  }
+  return handle;
 }
 
 /**

@@ -33,7 +33,8 @@ import type {
 import type { IConfigStore, ILogger } from '@ytvdlt/core';
 import { isNewerVersion } from '@ytvdlt/core';
 import { fetchLatestRelease, isTrustedReleaseHost, type ReleaseSource } from './github-releases.js';
-import { downloadToFile, fileSize, looksLikeExecutable } from './adapters/http-download.js';
+import { downloadToFile, fileSize, looksLikeExecutable, PartialCleanupError } from './adapters/http-download.js';
+import { createUpdateCleanupFiles, rememberPendingUpdate } from './app-update-cleanup.js';
 
 /** Where the update settings live (advanced domain, same place as D-67). */
 export const APP_UPDATE_CONFIG = Object.freeze({
@@ -60,6 +61,7 @@ export interface AppUpdateServiceDeps {
   readonly openPath: (path: string) => Promise<string>;
   /** Quit after the installer process is launched. */
   readonly quit: () => void;
+  readonly trashPartial?: (path: string) => Promise<void>;
 }
 
 export interface AppUpdateService {
@@ -129,6 +131,8 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
   let verifiedSha256: string | null = null;
   let lastCheckedAt: string | null = null;
   let disposed = false;
+  let downloadController: AbortController | null = null;
+  let downloadFinished: Promise<void> | null = null;
 
   const skippedVersion = (): string => {
     const value = config.get<string>(APP_UPDATE_CONFIG.domain, APP_UPDATE_CONFIG.skippedKey);
@@ -267,12 +271,17 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       return fail('安装包地址不在 GitHub 域名下，已拒绝下载');
     }
 
+    const controller = new AbortController();
+    downloadController = controller;
+    let finishDownload: () => void = () => {};
+    downloadFinished = new Promise<void>((resolve) => { finishDownload = resolve; });
     phase = 'downloading';
     message = `正在下载 ${asset.name}`;
     downloadedBytes = 0;
     totalBytes = asset.sizeBytes > 0 ? asset.sizeBytes : null;
     try {
       const cached = await verifiedCachedFile(asset);
+      controller.signal.throwIfAborted();
       if (cached !== null) {
         installerPath = cached.path;
         verifiedSha256 = cached.sha256;
@@ -287,12 +296,15 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
         url: asset.url,
         targetPath: target,
         expectedBytes: asset.sizeBytes > 0 ? asset.sizeBytes : null,
+        signal: controller.signal,
+        ...(deps.trashPartial === undefined ? {} : { trashPartial: deps.trashPartial }),
         onProgress: (progress) => {
           downloadedBytes = progress.downloadedBytes;
           if (progress.totalBytes !== null) totalBytes = progress.totalBytes;
         },
       });
 
+      controller.signal.throwIfAborted();
       // Verification order matters: size, hash, then the PE header. A failure
       // renames the file instead of deleting it, so support can inspect it.
       const problems: string[] = [];
@@ -304,6 +316,7 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       }
       if (!(await looksLikeExecutable(target))) problems.push('不是有效的 Windows 可执行文件');
 
+      controller.signal.throwIfAborted();
       if (problems.length > 0) {
         const rejected = await isolateFile(target, 'rejected');
         await logger.error('app-update', 'installer verification failed', { problems });
@@ -321,6 +334,7 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
           detail: error instanceof Error ? error.message : String(error),
         });
       });
+      controller.signal.throwIfAborted();
       installerPath = target;
       verifiedSha256 = result.sha256.toLowerCase();
       downloadedBytes = result.bytes;
@@ -332,10 +346,30 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       });
       return state();
     } catch (error) {
+      if (controller.signal.aborted && !(error instanceof PartialCleanupError)) {
+        phase = 'available';
+        message = '已取消下载，可以重新下载';
+        downloadedBytes = 0;
+        return state();
+      }
       const detail = messageOf(error);
       await logger.warn('app-update', 'installer download failed', { detail });
       return fail(`下载失败：${detail}`);
+    } finally {
+      downloadController = null;
+      downloadFinished = null;
+      finishDownload();
     }
+  }
+
+  async function cancelDownload(): Promise<AppUpdateActionResult> {
+    const pending = downloadFinished;
+    if (pending === null || downloadController === null) {
+      return result(false, 'cancel-download', '当前没有正在下载的更新');
+    }
+    downloadController.abort();
+    await pending;
+    return result(phase === 'available', 'cancel-download', message);
   }
 
   async function install(): Promise<AppUpdateActionResult> {
@@ -367,6 +401,14 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       return result(false, 'install', message);
     }
     try {
+      if (latest !== null && expected !== null) {
+        await rememberPendingUpdate(
+          createUpdateCleanupFiles((path) => ports.hash.sha256File(path)), deps.updatesDir,
+          deps.currentVersion, latest.version, executable, expected,
+        ).catch(async (error: unknown) => {
+          await logger.warn('app-update', 'could not record installer cleanup', { detail: messageOf(error) });
+        });
+      }
       const error = await deps.openPath(executable);
       if (typeof error === 'string' && error !== '') {
         return result(false, 'install', `无法启动安装程序：${error}`);
@@ -408,7 +450,7 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
   }
 
   function dismiss(): AppUpdateState {
-    phase = latest === null ? 'idle' : 'available';
+    if (phase !== 'downloading') phase = latest === null ? 'idle' : 'available';
     return state();
   }
 
@@ -433,6 +475,8 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
         const next = await download();
         return { ok: next.phase === 'ready', action, message: next.message, state: next };
       }
+      case 'cancel-download':
+        return cancelDownload();
       case 'install':
         return install();
       case 'open-page':

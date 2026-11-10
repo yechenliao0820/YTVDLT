@@ -39,7 +39,7 @@ describe('cancel-local · L2 cancellation kills the process tree', () => {
       expect(await ctx.ports.process.isAlive(pid as number)).toBe(false);
 
       // ③ the `.part` file must still exist (yt-dlp does not delete it).
-      await waitFor(async () => (await filesIn(ctx.outDir, (n) => n.endsWith('.part'))).length > 0,
+      await waitFor(async () => (await filesIn(ctx.tempDir, (n) => n.endsWith('.part'))).length > 0,
         10_000, '.part retained');
     } finally {
       await server.close();

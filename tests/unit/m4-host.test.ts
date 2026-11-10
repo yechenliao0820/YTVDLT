@@ -312,3 +312,42 @@ describe('M4 host · per-task temp dir (D-118)', () => {
     host.dispose();
   });
 });
+
+describe('M4 host · subtitle patch + pre-probed MediaInfo (stage 3)', () => {
+  it('merges the per-task subtitle patch into the request and skips the probe', async () => {
+    const { host, counter } = await setup();
+    const probesBefore = counter.probes;
+    const ids = await host.enqueueSingle({
+      url: 'https://example.org/watch?v=sub',
+      kind: 'video',
+      subtitlePatch: {
+        enabled: true, languages: 'zh-Hans', autoCaptions: true, convertTo: 'srt', embed: false,
+      },
+      mediaInfo: mediaInfo(),
+    });
+    const record = host.task.queue.get(ids[0] as string);
+
+    // The subtitle choice lives in THIS request only — no global config write.
+    expect(record?.request?.subtitle).toMatchObject({
+      enabled: true, languages: 'zh-Hans', autoCaptions: true, convertTo: 'srt', embed: false,
+    });
+    expect(record?.request?.subtitle.skipTranslated).toBe(true); // config default kept
+    expect(record?.mediaInfo?.id).toBe('fixture');
+
+    await waitFor(() => host.task.queue.get(ids[0] as string)?.state === 'Completed');
+    // Requirement 13: a consumed preview means the queue never probes again.
+    expect(counter.probes).toBe(probesBefore);
+    host.dispose();
+  });
+
+  it('still probes when no MediaInfo is supplied (old behaviour)', async () => {
+    const { host, counter } = await setup();
+    const probesBefore = counter.probes;
+    const ids = await host.enqueueSingle({ url: 'https://example.org/watch?v=plain', kind: 'video' });
+
+    await waitFor(() => host.task.queue.get(ids[0] as string)?.state === 'Completed');
+    expect(counter.probes).toBe(probesBefore + 1);
+    expect(host.task.queue.get(ids[0] as string)?.request?.subtitle.enabled).toBe(false);
+    host.dispose();
+  });
+});

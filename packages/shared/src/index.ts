@@ -26,3 +26,9 @@ export * from './dialog-dto.js';
 export * from './update.js';
 // 0.2.1 (append-only): GitHub-release app update + component version lookup.
 export * from './app-update.js';
+// Subtitle preview (append-only, separate from the frozen `request.ts`): the
+// whitelisted DTO the renderer may see, and the ticket failure buckets.
+export * from './subtitle-preview.js';
+// Stage 4 (append-only): subtitle artifacts produced by a task, their link to
+// the media, and the requested-vs-produced outcome.
+export * from './subtitle-artifact.js';

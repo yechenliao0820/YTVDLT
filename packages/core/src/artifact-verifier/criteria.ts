@@ -13,9 +13,10 @@
  */
 import type {
   ArtifactVerification, ExpectedArtifactManifest, HistoryEntry, MediaInfo,
-  CorePorts, DownloadKind,
+  CorePorts, DownloadKind, SubtitleDomain,
 } from '@ytvdlt/shared';
 import { detectPostprocessed } from '../download-flags.js';
+import { classifyArtifact, extOf, primaryMediaArtifact } from '../artifact-classify/kinds.js';
 
 export interface CheckContext {
   taskId: string;
@@ -25,29 +26,33 @@ export interface CheckContext {
   expectedManifest?: ExpectedArtifactManifest | null;
   historyEntry?: HistoryEntry | null;
   kind?: DownloadKind;
+  /**
+   * Stage 4 (append-only): the subtitle domain of the request that produced
+   * these artifacts. Used ONLY by the advisory attachment probes (does the
+   * container really carry the subtitle stream we embedded?). It never changes
+   * C1–C12: a subtitle problem must not be reported as a broken video (D-127).
+   */
+  subtitleRequest?: SubtitleDomain | null;
   ports: CorePorts;
   ffprobePath: string;
   ffmpegPath: string;
 }
 
-const VIDEO_EXTS = new Set(['mp4', 'mkv', 'webm', 'mov', 'avi', 'flv', 'ts', 'm4v']);
-const AUDIO_EXTS = new Set(['m4a', 'mp3', 'opus', 'ogg', 'flac', 'wav', 'aac']);
-const SUBTITLE_EXTS = new Set(['vtt', 'srt', 'ass', 'lrc']);
-const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'webp']);
 const TRANSIENT = /\.(part|ytdl|temp)$/i;
 
-export function extOf(path: string): string {
-  const match = /\.([A-Za-z0-9]+)$/.exec(path);
-  return (match?.[1] ?? '').toLowerCase();
-}
+export { extOf };
 
-/** The main media artifact: first video/audio file, else first artifact. */
+/**
+ * The main media artifact of a task.
+ *
+ * Stage 4 change: this used to fall back to `artifacts[0]`, which is a `.jpg`
+ * whenever `--write-thumbnail` fires and a `.srt` whenever the subtitle is
+ * written before the merge. C3–C8 then probed a subtitle and the user was told
+ * the download was corrupt. Now: first video/audio file, or `null`.
+ * `null` is a REAL failure ("the task produced no media"), reported as such.
+ */
 export function primaryArtifact(artifacts: readonly string[]): string | null {
-  for (const path of artifacts) {
-    const ext = extOf(path);
-    if (VIDEO_EXTS.has(ext) || AUDIO_EXTS.has(ext)) return path;
-  }
-  return artifacts[0] ?? null;
+  return primaryMediaArtifact(artifacts);
 }
 
 interface FfprobeOutcome {
@@ -313,11 +318,20 @@ export async function checkC8(ctx: CheckContext): Promise<ArtifactVerification> 
     : fail('C8', 'frame hashes differ from the golden reference', { map: streamMap, framemd5Length: out.stdout.length });
 }
 
-/** C9 — attached artifacts (subtitles / thumbnail / info.json) exist. */
+/**
+ * C9 — attached artifacts (subtitles / thumbnail / info.json) exist and are
+ * non-empty.
+ *
+ * Stage 4: the attachment list now comes from the shared extension table, so a
+ * `.srv3` / `.ttml` / `.json3` subtitle is checked as an attachment instead of
+ * being mistaken for media. Attachment CONTENTS are not judged here — that is
+ * the advisory probe in `attachments.ts` (D-127), because a subtitle the site
+ * filled with an HTML error page is a subtitle problem, not a broken video.
+ */
 export async function checkC9(ctx: CheckContext): Promise<ArtifactVerification> {
   const attached = ctx.artifacts.filter((path) => {
-    const ext = extOf(path);
-    return SUBTITLE_EXTS.has(ext) || IMAGE_EXTS.has(ext) || ext === 'json';
+    const kind = classifyArtifact(path);
+    return kind === 'subtitle' || kind === 'thumbnail' || kind === 'infojson';
   });
   if (attached.length === 0) {
     return pass('C9', 'no attached artifacts declared for this task');

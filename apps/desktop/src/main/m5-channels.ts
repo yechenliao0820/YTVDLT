@@ -16,10 +16,14 @@
 import { IPC_CHANNELS } from '@ytvdlt/shared';
 import type {
   AppUpdateAction, AppUpdateActionResult, AppUpdateState, DownloadKind, FormatDomain, TaskRecord,
+  MediaInfo, SubtitleDomain, SubtitlePreviewConsumeResult, SubtitlePreviewResult,
+  SubtitleArtifactSource, SubtitleOutcome,
 } from '@ytvdlt/shared';
 import {
-  ACCENT_PRESETS, DEFAULT_PATH_TOKENS, buildTaskListSnapshot, classifyFailure, maskUrlSecrets,
-  normalizeHexColor, normalizeThemeMode, normalizeMotionMode, parseAccent,
+  ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES, buildTaskListSnapshot,
+  classifyFailure, maskUrlSecrets, mergeSubtitleChoice, normalizeHexColor, normalizeLanguageCode,
+  normalizeThemeMode, normalizeMotionMode, parseAccent,
+  type SubtitleChoice,
 } from '@ytvdlt/core';
 import type {
   AccentChoice, CommandTemplateInput, CommandTemplateStore, IConfigStore,
@@ -75,6 +79,24 @@ export interface ThumbnailPort {
   prune?(options?: { force?: boolean }): Promise<ThumbnailPruneReport>;
   setAutoClean?(enabled: boolean): Promise<Record<string, unknown>>;
   setMaxBytes?(bytes: number): Promise<Record<string, unknown>>;
+}
+
+/**
+ * Subtitle preview (stage 2): the live, on-demand probe port.
+ *
+ * Absent means "this build ships no preview service" and the channel answers
+ * `PREVIEW_UNAVAILABLE` — it must never fall back to the recorded fixture,
+ * because a fixture that pretends to be a real probe is how the old picker
+ * looked functional while every choice was fake.
+ */
+export interface SubtitlePreviewPortLike {
+  preview(url: unknown): Promise<SubtitlePreviewResult>;
+  cancel(previewId: string): Promise<boolean>;
+  /**
+   * Stage 3: spend the ticket. The result carries the full `MediaInfo` and must
+   * stay inside the main process — it is never an IPC payload.
+   */
+  consume(previewId: string, url: unknown): SubtitlePreviewConsumeResult;
 }
 
 /**
@@ -154,6 +176,31 @@ export interface SingleDownloadInput {
   readonly audioQuality?: AudioQualityChoice;
   /** Audio only: `auto` keeps the source codec, mp3/m4a transcode. */
   readonly audioFormat?: AudioFormatChoice;
+  /**
+   * Stage 3: the subtitle ticket from `SUBTITLE_PREVIEW`.
+   *
+   * A ticket is REQUIRED before any subtitle choice is accepted — languages are
+   * validated against the probe result the main process still holds, never
+   * against whatever the page claims. Sending a ticket WITHOUT a subtitle
+   * choice is legitimate: it lets enqueue reuse the probe and skip its own.
+   */
+  readonly previewId?: string;
+  /** Exact language codes from the preview (`en`, `zh-Hans`), max 12. */
+  readonly subtitleLanguages?: readonly string[];
+  readonly subtitleAutoCaptions?: boolean;
+  readonly subtitleConvertTo?: SubtitleDomain['convertTo'];
+  readonly subtitleEmbed?: boolean;
+  readonly subtitleKeepFile?: boolean;
+}
+
+/**
+ * What this layer hands to `enqueueSingle`: the renderer payload plus two
+ * MAIN-PROCESS-ONLY fields. Neither can come from IPC — `mediaInfo` is the
+ * consumed probe result and `subtitlePatch` is produced by the pure merge.
+ */
+export interface SingleEnqueueRequest extends SingleDownloadInput {
+  readonly subtitlePatch?: Partial<SubtitleDomain>;
+  readonly mediaInfo?: MediaInfo;
 }
 
 export interface M5ChannelDeps {
@@ -167,7 +214,7 @@ export interface M5ChannelDeps {
   /** D-67: absent means the build ships no updater (button stays disabled). */
   readonly componentUpdate?: ComponentUpdatePortLike;
   /** D-69: real single-video enqueue; absent = DOWNLOAD_START reports disabled. */
-  readonly enqueueSingle?: (input: SingleDownloadInput) => Promise<readonly string[]>;
+  readonly enqueueSingle?: (input: SingleEnqueueRequest) => Promise<readonly string[]>;
   /** D-87: absent = "also delete local files" is refused instead of deleting anything. */
   readonly trashFiles?: TrashFilesPort;
   /**
@@ -192,6 +239,12 @@ export interface M5ChannelDeps {
    * releases in the footer.
    */
   readonly appInfo?: AppInfoDto;
+  /**
+   * Subtitle preview (stage 2): absent = the picker reports "not available in
+   * this build". The port owns the probe, the TTL and the single-use ticket;
+   * this layer only validates the wire input and forwards it.
+   */
+  readonly subtitlePreview?: SubtitlePreviewPortLike;
 }
 
 /** D-114: what `APP_INFO` answers. `version` is `''` when it is unknown. */
@@ -239,6 +292,15 @@ export interface TaskListItemDto {
   readonly fileStatus?: FileStatusBucket | null;
   /** D-120: same buckets for the containing directory (open-folder branch). */
   readonly dirStatus?: FileStatusBucket | null;
+  /**
+   * Stage 4: how many subtitle files this run produced. Additive; absent on
+   * records that predate subtitle artifacts.
+   */
+  readonly subtitleCount?: number;
+  /** Stage 4: requested-vs-produced verdict (`none|ok|partial|missing`). */
+  readonly subtitleOutcome?: SubtitleOutcome;
+  /** Stage 4: language tags actually produced, in artifact order, de-duplicated. */
+  readonly subtitleLanguages?: readonly string[];
 }
 
 export interface TaskDetailDto {
@@ -252,6 +314,18 @@ export interface TaskDetailDto {
   readonly percent: number | null;
   readonly errorCode: string | null;
   readonly errorMessage: string | null;
+  /**
+   * Stage 4: subtitle files with their language / format / source. Paths are
+   * already exposed through `artifacts`, so this adds no new exposure — it adds
+   * the classification the renderer must not try to derive from a file name.
+   */
+  readonly subtitleFiles?: readonly {
+    readonly path: string;
+    readonly language: string;
+    readonly ext: string;
+    readonly source: SubtitleArtifactSource;
+  }[];
+  readonly subtitleOutcome?: SubtitleOutcome;
 }
 
 export interface AppearanceDto {
@@ -301,12 +375,25 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   [IPC_CHANNELS.APP_UPDATE_STATUS]: [],
   [IPC_CHANNELS.APP_UPDATE_ACTION]: ['action'],
   [IPC_CHANNELS.PATH_ACTION]: ['action', 'kind'],
-  [IPC_CHANNELS.DOWNLOAD_START]: ['url', 'kind', 'quality', 'audioQuality', 'audioFormat'],
+  [IPC_CHANNELS.DOWNLOAD_START]: [
+    'url', 'kind', 'quality', 'audioQuality', 'audioFormat',
+    // Stage 3: the subtitle ticket + the per-task subtitle intent. Flat keys on
+    // purpose — `validateM5Payload` only sees the top level, so a nested
+    // `subtitle: {...}` object would smuggle unvalidated fields past it.
+    'previewId', 'subtitleLanguages', 'subtitleAutoCaptions',
+    'subtitleConvertTo', 'subtitleEmbed', 'subtitleKeepFile',
+  ],
   // D-103: the renderer may read occupancy, ask for a manual prune, or change
   // two policy values. It can NEVER pass a file path to this channel.
   [IPC_CHANNELS.THUMBNAIL_CACHE]: ['action', 'enabled', 'maxBytes'],
   // D-114: read-only identity; no input at all.
   [IPC_CHANNELS.APP_INFO]: [],
+  // Subtitle preview (stage 2): a link, plus the ticket it replaces (optional).
+  // Deliberately NOT accepted: mediaInfo, tracks, formats, paths, argv — the
+  // renderer proposes a URL, the main process decides what may be known about
+  // it. `previousPreviewId` only releases the superseded ticket.
+  [IPC_CHANNELS.SUBTITLE_PREVIEW]: ['url', 'previousPreviewId'],
+  [IPC_CHANNELS.SUBTITLE_PREVIEW_CANCEL]: ['previewId'],
 };
 
 /** D-103: the only cache actions the renderer may trigger. */
@@ -316,7 +403,7 @@ const THUMBNAIL_CACHE_ACTIONS: readonly string[] = [
 
 /** D-93: the only actions the renderer may trigger. */
 const APP_UPDATE_ACTIONS: readonly AppUpdateAction[] = [
-  'check', 'download', 'install', 'open-page', 'skip-version', 'dismiss',
+  'check', 'download', 'cancel-download', 'install', 'open-page', 'skip-version', 'dismiss',
 ];
 
 /** D-98: paths are user input; keep them short and printable. */
@@ -327,6 +414,78 @@ const PATH_ACTIONS: readonly string[] = ['pick', 'reset', 'open'];
 const VIDEO_QUALITY_VALUES: readonly string[] = ['best', '2160p', '1440p', '1080p', '720p', '480p', '360p', 'lowest'];
 const AUDIO_QUALITY_VALUES: readonly string[] = ['best', '192', '128', '64', '32', 'lowest'];
 const AUDIO_FORMAT_VALUES: readonly string[] = ['auto', 'mp3', 'm4a'];
+
+/** Stage 3: the only conversion targets the bundled yt-dlp accepts. */
+const SUBTITLE_CONVERT_VALUES: readonly string[] = ['none', 'ass', 'srt', 'vtt', 'lrc'];
+
+/**
+ * Stage 3: why an enqueue was refused. Stable codes only — the renderer owns
+ * the sentence (same rule as D-109); `reason` is a fallback for old UIs.
+ */
+const SUBTITLE_REJECT_REASONS: Readonly<Record<string, string>> = {
+  PREVIEW_REQUIRED: '选择字幕前需要先获取字幕列表',
+  PREVIEW_UNAVAILABLE: '当前构建未启用字幕预览',
+  PREVIEW_EXPIRED: '字幕预览已过期，请重新获取',
+  PREVIEW_CONSUMED: '字幕预览已被使用，请重新获取',
+  PREVIEW_URL_MISMATCH: '字幕预览与当前链接不匹配',
+  PREVIEW_UNKNOWN: '字幕预览不存在或已取消',
+  SUBTITLE_NO_MANUAL_TRACK: '所选语言含仅自动字幕，请启用自动字幕或移除这些语言',
+  SUBTITLE_LANGUAGE_UNKNOWN: '所选字幕语言不在该视频的字幕列表中',
+  SUBTITLE_EMBED_UNSUPPORTED: '音频任务不能内嵌字幕',
+};
+
+/** Config defaults for the subtitle domain (partial: missing keys stay default). */
+function readSubtitleDefaults(deps: Pick<M5ChannelDeps, 'config'>): Partial<SubtitleDomain> {
+  return deps.config.getDomain('subtitle') as unknown as Partial<SubtitleDomain>;
+}
+
+/**
+ * Stage 3: read the per-task subtitle intent from the validated payload.
+ *
+ * Shape errors (a string where an array belongs, an unknown conversion target,
+ * 13 languages) are protocol failures and throw, exactly like the existing
+ * quality enums. Cross-field rules that a user can actually hit (embedding in
+ * audio mode, unknown language) are handled by the caller as business refusals.
+ */
+function readSubtitleChoice(record: Record<string, unknown>): SubtitleChoice | null {
+  const keys = [
+    'subtitleLanguages', 'subtitleAutoCaptions', 'subtitleConvertTo',
+    'subtitleEmbed', 'subtitleKeepFile',
+  ];
+  if (!keys.some((key) => record[key] !== undefined)) return null;
+
+  const raw = record['subtitleLanguages'];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error('[m5-ipc] subtitleLanguages must be a non-empty array');
+  }
+  if (raw.length > MAX_SUBTITLE_LANGUAGES) {
+    throw new Error(`[m5-ipc] subtitleLanguages exceeds ${MAX_SUBTITLE_LANGUAGES} entries`);
+  }
+  const languages: string[] = [];
+  for (const item of raw) {
+    // Same rule as the projection: a real yt-dlp code, not a glob and not junk.
+    const code = normalizeLanguageCode(item);
+    if (code === null) throw new Error('[m5-ipc] invalid subtitle language code');
+    languages.push(code);
+  }
+  const convertTo = record['subtitleConvertTo'] ?? 'none';
+  if (!SUBTITLE_CONVERT_VALUES.includes(String(convertTo))) {
+    throw new Error('[m5-ipc] invalid subtitleConvertTo');
+  }
+  const flag = (key: string): boolean => {
+    const value = record[key];
+    if (value === undefined) return false;
+    if (typeof value !== 'boolean') throw new Error(`[m5-ipc] ${key} must be a boolean`);
+    return value;
+  };
+  return {
+    languages,
+    includeAutomatic: flag('subtitleAutoCaptions'),
+    convertTo: convertTo as SubtitleDomain['convertTo'],
+    embed: flag('subtitleEmbed'),
+    keepSubtitleFile: flag('subtitleKeepFile'),
+  };
+}
 
 export function validateM5Payload(channel: string, payload: unknown): Record<string, unknown> {
   const allowed = PAYLOAD_KEYS[channel];
@@ -371,6 +530,18 @@ export function toTaskListItem(
     // D-120: only a real observation is sent. `undefined` keeps old snapshots
     // byte-identical (no invented "all present" state for unprobed builds).
     ...(fileState === undefined ? {} : { fileStatus: fileState.status, dirStatus: fileState.dirStatus }),
+    // Stage 4: subtitle bookkeeping is derived from the task's own manifest;
+    // absent (not `0`) when the record predates it, so old snapshots keep
+    // painting exactly what they painted before.
+    ...(record.subtitleFiles === undefined
+      ? {}
+      : {
+        subtitleCount: record.subtitleFiles.length,
+        subtitleLanguages: [...new Set(record.subtitleFiles
+          .map((file) => file.language)
+          .filter((language) => language !== ''))],
+        ...(record.subtitleOutcome === undefined ? {} : { subtitleOutcome: record.subtitleOutcome }),
+      }),
   };
 }
 
@@ -386,6 +557,17 @@ export function toTaskDetail(record: TaskRecord): TaskDetailDto {
     percent: record.lastPercent,
     errorCode: record.error?.code ?? null,
     errorMessage: record.error?.message ?? null,
+    ...(record.subtitleFiles === undefined
+      ? {}
+      : {
+        subtitleFiles: record.subtitleFiles.map((file) => ({
+          path: file.path,
+          language: file.language,
+          ext: file.ext,
+          source: file.source,
+        })),
+      }),
+    ...(record.subtitleOutcome === undefined ? {} : { subtitleOutcome: record.subtitleOutcome }),
   };
 }
 
@@ -425,6 +607,41 @@ function readAppearance(deps: M5ChannelDeps): AppearanceDto {
 function assertTaskId(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 200) {
     throw new Error('[m5-ipc] taskId must be a non-empty string');
+  }
+  return value;
+}
+
+/** Longest URL the preview endpoint will look at (matches the service). */
+const MAX_PREVIEW_URL_LENGTH = 2048;
+/**
+ * Opaque ticket shape. `crypto.randomUUID()` is 36 chars of `[0-9a-f-]`, and
+ * the classes stay open enough for a future id scheme while still refusing
+ * paths, dots, slashes and anything a caller could mistake for a filename.
+ */
+const PREVIEW_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
+/**
+ * Subtitle preview URL: http(s), trimmed, bounded, printable.
+ *
+ * This is the transport guard only — the service re-validates with the engine's
+ * own whitelist (credentials, host, scheme) before anything is spawned.
+ */
+function assertPreviewUrl(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('[m5-ipc] subtitle preview requires a string url');
+  const url = value.trim();
+  if (url.length === 0 || url.length > MAX_PREVIEW_URL_LENGTH || /[\u0000-\u001f\u007f]/.test(url)) {
+    throw new Error('[m5-ipc] invalid subtitle preview url');
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error('[m5-ipc] subtitle preview requires an http(s) url');
+  }
+  return url;
+}
+
+/** `''` is accepted by the caller as "no previous ticket", never as an id. */
+function assertPreviewId(value: unknown): string {
+  if (typeof value !== 'string' || !PREVIEW_ID_RE.test(value)) {
+    throw new Error('[m5-ipc] invalid previewId');
   }
   return value;
 }
@@ -720,9 +937,54 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     if (rawAudioFormat !== undefined && !AUDIO_FORMAT_VALUES.includes(String(rawAudioFormat))) {
       throw new Error('[m5-ipc] invalid audioFormat');
     }
+    const rawPreviewId = record['previewId'];
+    const previewId = rawPreviewId === undefined ? null : assertPreviewId(rawPreviewId);
+    const choice = readSubtitleChoice(record);
+
+    const reject = (code: string): Record<string, unknown> => ({
+      accepted: false,
+      enqueued: false,
+      taskIds: [],
+      code,
+      reason: SUBTITLE_REJECT_REASONS[code] ?? '字幕选择未被接受',
+    });
+
+    // R3: audio mode can never embed — refuse before spending the ticket so the
+    // user can fix the choice and retry with the same preview.
+    if (choice !== null && choice.embed && kind === 'audio') return reject('SUBTITLE_EMBED_UNSUPPORTED');
     if (deps.enqueueSingle === undefined) {
       return { accepted: false, enqueued: false, taskIds: [], reason: '当前构建未启用单视频下载' };
     }
+
+    // ---- Stage 3: spend the preview ticket exactly once ---------------------
+    // The ticket is OPTIONAL for a plain download (it only saves the queue's own
+    // probe). It is MANDATORY for a subtitle choice: the languages must be
+    // checked against a probe the main process actually ran, never against what
+    // the page claims. `consume()` is single-use and URL-bound, so a stale or
+    // borrowed id cannot describe another video.
+    const consumed = previewId !== null && deps.subtitlePreview !== undefined
+      ? deps.subtitlePreview.consume(previewId, url)
+      : null;
+    if (choice !== null) {
+      if (deps.subtitlePreview === undefined) return reject('PREVIEW_UNAVAILABLE');
+      if (consumed === null || !consumed.ok) {
+        return reject(consumed === null ? 'PREVIEW_REQUIRED' : consumed.code);
+      }
+    }
+    const consumption = consumed !== null && consumed.ok ? consumed.consumption : null;
+    let subtitlePatch: Partial<SubtitleDomain> | undefined;
+    if (choice !== null && consumption !== null) {
+      const merged = mergeSubtitleChoice({
+        choice,
+        available: consumption.tracks,
+        current: readSubtitleDefaults(deps),
+        mode: kind === 'audio' ? 'audio' : 'video',
+      });
+      if (!merged.usable) return reject(merged.warnings.some((warning) => warning.code === 'SUBTITLE_NO_MANUAL_TRACK')
+        ? 'SUBTITLE_NO_MANUAL_TRACK' : 'SUBTITLE_LANGUAGE_UNKNOWN');
+      subtitlePatch = merged.patch;
+    }
+
     const taskIds = await deps.enqueueSingle({
       url,
       kind,
@@ -734,8 +996,37 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
         ? { audioQuality: rawAudioQuality as AudioQualityChoice } : {}),
       ...(kind === 'audio' && rawAudioFormat !== undefined
         ? { audioFormat: rawAudioFormat as AudioFormatChoice } : {}),
+      ...(subtitlePatch === undefined ? {} : { subtitlePatch }),
+      // Requirement 13 (phase 2): the already-probed MediaInfo travels with the
+      // enqueue, so TaskQueue does NOT probe a second time.
+      ...(consumption === null ? {} : { mediaInfo: consumption.media }),
     });
     return { accepted: true, enqueued: taskIds.length > 0, taskIds };
+  });
+
+  // Subtitle preview (stage 2): the real, on-demand probe behind the picker.
+  // Two invariants live here rather than in the service:
+  //   1. a superseded ticket is released BEFORE the new probe, so a failure
+  //      cannot leave the old id alive (the renderer already forgot it);
+  //   2. an absent service answers with a code, never with fixture data.
+  handlers.set(IPC_CHANNELS.SUBTITLE_PREVIEW, async (payload) => {
+    const record = validateM5Payload(IPC_CHANNELS.SUBTITLE_PREVIEW, payload);
+    const url = assertPreviewUrl(record['url']);
+    const previous = record['previousPreviewId'];
+    if (previous !== undefined && previous !== '') {
+      await deps.subtitlePreview?.cancel(assertPreviewId(previous));
+    }
+    if (deps.subtitlePreview === undefined) {
+      return { ok: false, code: 'PREVIEW_UNAVAILABLE', message: '当前构建未启用字幕预览' };
+    }
+    return deps.subtitlePreview.preview(url);
+  });
+
+  handlers.set(IPC_CHANNELS.SUBTITLE_PREVIEW_CANCEL, async (payload) => {
+    const record = validateM5Payload(IPC_CHANNELS.SUBTITLE_PREVIEW_CANCEL, payload);
+    const previewId = assertPreviewId(record['previewId']);
+    if (deps.subtitlePreview === undefined) return { ok: false, canceled: false };
+    return { ok: true, canceled: await deps.subtitlePreview.cancel(previewId) };
   });
 
   // 0.2.1 (D-98): the download root. `pick` is the only way to change it — the
@@ -925,4 +1216,7 @@ export const M5_CHANNELS: readonly string[] = [
   IPC_CHANNELS.DOWNLOAD_START,
   IPC_CHANNELS.THUMBNAIL_CACHE,
   IPC_CHANNELS.APP_INFO,
+  // Subtitle preview (stage 2, append-only; the fixture PROBE is untouched).
+  IPC_CHANNELS.SUBTITLE_PREVIEW,
+  IPC_CHANNELS.SUBTITLE_PREVIEW_CANCEL,
 ];

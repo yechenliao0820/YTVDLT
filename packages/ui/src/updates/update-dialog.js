@@ -21,6 +21,9 @@
   var state = null;
   var nodes = null;
   var busy = false;
+  var downloadPending = false;
+  var cancelling = false;
+  var actionVersion = 0;
 
   function t(key, params) {
     return global.YTVDLT && global.YTVDLT.i18n ? global.YTVDLT.i18n.t(key, params) : key;
@@ -172,6 +175,7 @@
     primary.type = 'button';
     primary.id = 'ytvdlt-update-primary';
     primary.addEventListener('click', function () {
+      if (downloadPending || (state !== null && state.phase === 'downloading')) { act('cancel-download', false); return; }
       if (state !== null && state.phase === 'ready') { act('install', false); return; }
       act('download', false);
     });
@@ -231,7 +235,7 @@
     });
     nodes.notes.textContent = latest.notes !== '' ? latest.notes : t('update.notes.empty');
 
-    var downloading = state.phase === 'downloading';
+    var downloading = state.phase === 'downloading' || downloadPending;
     var ready = state.phase === 'ready';
     var showProgress = downloading || ready;
     nodes.progress.style.display = showProgress ? 'flex' : 'none';
@@ -262,8 +266,8 @@
       nodes.hint.textContent = '';
     }
 
-    nodes.primary.textContent = ready ? t('update.install') : t('update.download');
-    nodes.primary.disabled = busy || downloading || (!state.canAutoInstall && !ready);
+    nodes.primary.textContent = downloading ? t(cancelling ? 'update.cancelling' : 'update.cancelDownload') : (ready ? t('update.install') : t('update.download'));
+    nodes.primary.disabled = downloading ? cancelling : (busy || (!state.canAutoInstall && !ready));
     nodes.page.disabled = busy;
     nodes.skip.disabled = busy;
   }
@@ -301,22 +305,36 @@
   function act(action, closeAfter) {
     var api = bridge();
     if (api === null) return;
+    if (action === 'cancel-download' && cancelling) return;
+    var version = ++actionVersion;
+    if (action === 'download') downloadPending = true;
+    if (action === 'cancel-download') cancelling = true;
     busy = true;
     paint();
     var pending;
     try {
       pending = api.invoke(CH_ACTION, { action: action });
     } catch (error) {
+      if (version !== actionVersion) return;
+      downloadPending = false;
+      cancelling = false;
       busy = false;
       paint();
       return;
     }
     Promise.resolve(pending).then(function (result) {
+      if (version !== actionVersion) return;
+      if (action === 'cancel-download') actionVersion += 1;
+      downloadPending = false;
+      cancelling = false;
       busy = false;
       if (result && result.state) apply(result.state);
       else paint();
       if (closeAfter) hide();
     }).catch(function () {
+      if (version !== actionVersion) return;
+      downloadPending = false;
+      cancelling = false;
       busy = false;
       paint();
     });
@@ -327,7 +345,8 @@
     if (api === null) return;
     var pending;
     try { pending = api.invoke(CH_STATUS, {}); } catch (error) { return; }
-    Promise.resolve(pending).then(function (next) { apply(next); }).catch(function () { /* offline */ });
+    var version = actionVersion;
+    Promise.resolve(pending).then(function (next) { if (version === actionVersion && !cancelling) apply(next); }).catch(function () { /* offline */ });
   }
 
   function attach() {

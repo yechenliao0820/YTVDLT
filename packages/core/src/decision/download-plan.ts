@@ -269,6 +269,20 @@ export function resolveDownloadPlan(
   const subLangs = sanitizeToken(subtitle.languages);
   const autoCaptions = subtitle.autoCaptions === true;
   const skipTranslatedSubs = autoCaptions && subtitle.skipTranslated === true;
+  /**
+   * R1 (audit 2026-11-10): `--sub-langs` is the language filter for EVERY kind
+   * of subtitle work, not just manual writing. The bundled yt-dlp 2026.10.26
+   * documents it as "Languages of the subtitles to download (can be regex)".
+   *
+   * Gating it on `writeSubs` meant `enabled:false + autoCaptions:true` produced
+   * `--write-auto-subs` with no filter, so a user who asked for one language got
+   * every automatic track the site had. `writeSubs` is still the only switch for
+   * `--write-subs` itself; this flag only decides whether the shared expression
+   * is emitted. An empty expression keeps the old "all languages" behaviour on
+   * purpose — there is nothing to filter by, and inventing a default would be a
+   * silent product decision.
+   */
+  const subLangsRequested = subLangs !== '' && (writeSubs || autoCaptions || embedSubs);
 
   return {
     effectiveFormatId,
@@ -279,6 +293,7 @@ export function resolveDownloadPlan(
     audioMultistreams,
     writeSubs,
     subLangs,
+    subLangsRequested,
     autoCaptions,
     skipTranslatedSubs,
     convertTo,

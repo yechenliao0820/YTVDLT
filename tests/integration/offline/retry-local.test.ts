@@ -34,7 +34,7 @@ describe('retry-local · L2 cancel → resume consistency (C10)', () => {
       await waitFor(() => sawProgress, 30_000, 'first-attempt progress');
       expect(await first.cancel()).toBe(true);
       await waitFor(() => canceled, 10_000, 'first attempt canceled');
-      await waitFor(async () => (await filesIn(ctx.outDir, (n) => n.endsWith('.part'))).length > 0,
+      await waitFor(async () => (await filesIn(ctx.tempDir, (n) => n.endsWith('.part'))).length > 0,
         10_000, '.part retained after cancel');
 
       // --- second attempt: resume and finish ---
@@ -55,6 +55,7 @@ describe('retry-local · L2 cancel → resume consistency (C10)', () => {
       const stat = await ctx.ports.fs.stat(finalPath);
       expect(stat.sizeBytes).toBe(manifest.sizeBytes);
       // The .part file must be gone after a successful resume.
+      expect(await filesIn(ctx.tempDir, (n) => n.endsWith('.part'))).toHaveLength(0);
       expect(await filesIn(ctx.outDir, (n) => n.endsWith('.part'))).toHaveLength(0);
     } finally {
       await server.close();

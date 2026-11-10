@@ -98,6 +98,16 @@
   var choice = { kind: 'video', videoQuality: 'best', audioQuality: 'best', audioFormat: 'auto' };
   var model = { tab: 'all', query: '', sort: 'newest', selected: {} };
 
+  /**
+   * Stage 5: the subtitle picker is a component in its own right, but it is
+   * mounted ONLY in live mode (a preload bridge exists) or when the layout
+   * switch `?subtitle=1` is given. That is the D-120 rule: static file://
+   * preview and the frozen screenshot baselines must stay byte-identical.
+   * A page load therefore adds ZERO nodes and ZERO probes by default.
+   */
+  var subtitlePicker = null;
+  var subtitleLoading = false;
+
   function t(key, params) {
     return global.YTVDLT && global.YTVDLT.shell ? global.YTVDLT.shell.t(key, params) : key;
   }
@@ -203,7 +213,12 @@
     TASK_ACTION: 'ytvdlt:task:action',
     DOWNLOAD_START: 'ytvdlt:download:start',
     SETTINGS_GET: 'ytvdlt:settings:get',
-    SETTINGS_SET: 'ytvdlt:settings:set'
+    SETTINGS_SET: 'ytvdlt:settings:set',
+    // Stage 5 (append-only): the live, on-demand subtitle preview. The two
+    // strings are the exact values in shared/src/ipc.ts; the preload whitelist
+    // is generated from that same table, so no bridge change is needed.
+    SUBTITLE_PREVIEW: 'ytvdlt:subtitle:preview',
+    SUBTITLE_PREVIEW_CANCEL: 'ytvdlt:subtitle:previewCancel'
   };
 
   /** Thin wrapper over the preload surface: `{ok:false, code, message}` on failure
@@ -268,6 +283,7 @@
       // `null` = no probe (old build / running task / static preview) → paint
       // nothing. It NEVER changes `state`: the download succeeded in the past.
       fileStatus: isFileStatus(item.fileStatus) ? item.fileStatus : null,
+      subtitleOutcome: item.subtitleOutcome === 'missing' || item.subtitleOutcome === 'partial' ? item.subtitleOutcome : null,
       dirStatus: isFileStatus(item.dirStatus) ? item.dirStatus : null
     };
   }
@@ -341,7 +357,7 @@
         task.id, task.state, task.thumbPath, task.errorCode,
         task.failureKind, progressMode(task.state, hasPercent(task), task.stage),
         // D-120: a state change repaints ONE card once, not on every poll.
-        task.fileStatus
+        task.fileStatus, task.subtitleOutcome
       ].join(',');
     }).join('~');
     return [model.tab, model.query, model.sort, list.length, rows].join('#');
@@ -520,6 +536,68 @@
 
   var enqueueing = false;
 
+  // ---- Stage 5: subtitle picker wiring -----------------------------------
+  // The picker lives in its own zero-dependency browser script. It is loaded
+  // ONLY when a preload bridge exists (live mode), so file:// static preview
+  // and the 31 frozen screenshot baselines are untouched. A page load never
+  // probes: the single SUBTITLE_PREVIEW call happens when the user clicks the
+  // entry button inside the component.
+  function subtitleUrl() {
+    var field = doc.getElementById('queue-url');
+    return field === null ? '' : String(field.value || '').trim();
+  }
+
+  function mountSubtitlePicker(factory) {
+    if (subtitlePicker !== null || !factory || typeof factory.create !== 'function') return;
+    var anchor = doc.getElementById('queue-paste-form');
+    if (anchor === null) return;
+    subtitlePicker = factory.create({
+      doc: doc,
+      t: t,
+      call: call,
+      notify: notify,
+      getUrl: subtitleUrl,
+      getKind: function () { return choice.kind; },
+      onSelectionChange: function () { /* the chip is owned by the picker */ }
+    });
+    subtitlePicker.mount(anchor, '../../styles/subtitles.css', doc.getElementById('queue-paste'));
+    // A typed/pasted URL invalidates any ticket bound to the previous one.
+    var field = doc.getElementById('queue-url');
+    if (field !== null) {
+      field.addEventListener('input', function () {
+        if (subtitlePicker !== null) subtitlePicker.onUrlChanged(subtitleUrl());
+      });
+    }
+  }
+
+  function ensureSubtitlePicker() {
+    if (subtitlePicker !== null || subtitleLoading) return;
+    // `?subtitle=1` is a layout/no-bridge verification switch only. Every
+    // frozen e2e case omits it, so no baseline sees a single extra node.
+    var force = param('subtitle', '') === '1';
+    if (!live.active && !force) return;
+    var existing = global.YTVDLT && global.YTVDLT.subtitles;
+    if (existing) { mountSubtitlePicker(existing); return; }
+    subtitleLoading = true;
+    var tag = doc.createElement('script');
+    tag.setAttribute('src', '../../subtitles/subtitle-picker.js');
+    tag.addEventListener('load', function () {
+      subtitleLoading = false;
+      mountSubtitlePicker(global.YTVDLT && global.YTVDLT.subtitles);
+    });
+    tag.addEventListener('error', function () {
+      subtitleLoading = false;
+      notify(t('subtitle.error.unavailable'));
+    });
+    if (doc.head && typeof doc.head.appendChild === 'function') doc.head.appendChild(tag);
+    else subtitleLoading = false;
+  }
+
+  /** The six flat DOWNLOAD_START keys, or `null` for the untouched old flow. */
+  function currentSubtitleSelection() {
+    return subtitlePicker === null ? null : subtitlePicker.getSelection();
+  }
+
   /** D-83：把界面上选好的类型/清晰度一起交给主进程。 */
   function downloadPayload(url) {
     var payload = { url: url, kind: choice.kind };
@@ -528,6 +606,19 @@
       payload.audioFormat = choice.audioFormat;
     } else {
       payload.quality = choice.videoQuality;
+    }
+    // Stage 5: only when the user confirmed a still-valid selection. With no
+    // selection the payload is byte-for-byte the pre-stage-5 shape, so the old
+    // download experience is preserved (and the main process skips the ticket).
+    var selection = currentSubtitleSelection();
+    if (selection === false) return null;
+    if (selection !== null) {
+      payload.previewId = selection.previewId;
+      payload.subtitleLanguages = selection.subtitleLanguages;
+      payload.subtitleAutoCaptions = selection.subtitleAutoCaptions;
+      payload.subtitleConvertTo = selection.subtitleConvertTo;
+      payload.subtitleEmbed = selection.subtitleEmbed;
+      payload.subtitleKeepFile = selection.subtitleKeepFile;
     }
     return payload;
   }
@@ -538,10 +629,19 @@
       notify(t('queue.notify.invalidUrl'));
       return;
     }
+    var payload = downloadPayload(url);
+    if (payload === null) return;
     enqueueing = true;
     notify(t('queue.notify.enqueuing'));
-    call('DOWNLOAD_START', downloadPayload(url)).then(function (result) {
+    call('DOWNLOAD_START', payload).then(function (result) {
       enqueueing = false;
+      // A one-shot ticket is spent on success; a dead ticket must be forgotten
+      // so the next download does not silently repeat a stale subtitle choice.
+      var subtitleMessage = subtitlePicker === null ? null : subtitlePicker.onEnqueueResult(result);
+      if (subtitleMessage !== null) {
+        notify(subtitleMessage);
+        return;
+      }
       if (!result || result.accepted !== true || result.enqueued !== true) {
         notify(t('queue.notify.enqueueFailed', {
           reason: (result && (result.reason || result.message)) || t('queue.notify.ipc')
@@ -550,6 +650,7 @@
       }
       var field = doc.getElementById('queue-url');
       if (field !== null) field.value = '';
+      if (subtitlePicker !== null) subtitlePicker.onUrlChanged('');
       notify(t('queue.notify.enqueued', { n: Array.isArray(result.taskIds) ? result.taskIds.length : 0 }));
       refresh();
     });
@@ -590,6 +691,9 @@
     renderQualityOptions();
     var root = doc.getElementById('queue-root');
     if (root !== null) root.setAttribute('data-kind', choice.kind);
+    // Stage 5: audio mode cannot embed a soft subtitle track (main process
+    // rejects SUBTITLE_EMBED_UNSUPPORTED), so mirror the gate in the picker.
+    if (subtitlePicker !== null) subtitlePicker.setKind();
     saveView();
   }
 
@@ -972,6 +1076,13 @@
       var fileState = el('span', 'card-file-state', t(fileKey));
       fileState.setAttribute('data-file-status', task.fileStatus);
       meta.appendChild(fileState);
+    }
+    if (task.subtitleOutcome === 'missing' || task.subtitleOutcome === 'partial') {
+      meta.appendChild(doc.createTextNode(' · '));
+      var subtitleWarning = el('span', 'card-failure', t('subtitle.outcome.' + task.subtitleOutcome));
+      subtitleWarning.setAttribute('data-subtitle-outcome', task.subtitleOutcome);
+      subtitleWarning.setAttribute('role', 'status');
+      meta.appendChild(subtitleWarning);
     }
     main.appendChild(meta);
 
@@ -1551,6 +1662,7 @@
   });
 
   live.active = isLive();
+  ensureSubtitlePicker();
   model.tab = TABS.indexOf(param('tab', 'all')) === -1 ? 'all' : param('tab', 'all');
   // `?kind=audio` starts on the audio tab (e2e case + deep-link friendly).
   setKind(param('kind', 'video') === 'audio' ? 'audio' : 'video');
@@ -1615,6 +1727,9 @@
     if (deepLink === null && /^https?:\/\//i.test(fromQuery)) deepLink = fromQuery;
     if (deepLink !== null) {
       global.YTVDLT.shell.prefill(deepLink, { focus: param('focus', '1') !== '0' });
+      // A deep link replaces the URL programmatically (no `input` event), so
+      // invalidate any ticket bound to the previously typed link explicitly.
+      if (subtitlePicker !== null) subtitlePicker.onUrlChanged(subtitleUrl());
       var shellRoot = doc.getElementById('queue-root');
       if (shellRoot !== null) {
         // Never mirror the link itself into the DOM: it can carry a signature.
@@ -1640,6 +1755,10 @@
     switchLocale: switchLocale,
     requestDelete: requestDelete,
     clearHistory: clearHistory,
-    model: model
+    model: model,
+    // Stage 5: test/smoke surface for the subtitle picker wiring.
+    subtitlePicker: function () { return subtitlePicker; },
+    mountSubtitlePicker: mountSubtitlePicker,
+    downloadPayload: downloadPayload
   };
 })(typeof window === 'undefined' ? this : window);

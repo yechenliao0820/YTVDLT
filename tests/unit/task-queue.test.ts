@@ -244,6 +244,21 @@ describe('A-4.4-13 / A-4.4-14 · cancel and restart', () => {
     expect(await history.query({})).toHaveLength(0);
   });
 
+  it('enqueued with a pre-probed mediaInfo: no probe, still walks the two legal info edges', async () => {
+    // Stage 3: a spent subtitle-preview ticket hands the queue a MediaInfo.
+    // `enqueue()` stores `Idle`, and the machine has no `Idle -> Running` edge,
+    // so the run must pass through FetchingInfo -> ReadyWithInfo WITHOUT spawning.
+    const { queue, events, engineState } = setup('completed');
+    const probesBefore = engineState.probeCalls;
+    await queue.enqueue({ ...record('t9'), mediaInfo: mediaInfo() });
+    await tick();
+
+    expect(engineState.probeCalls).toBe(probesBefore);
+    expect(events).toContain('state:Idle->FetchingInfo');
+    expect(events).toContain('state:FetchingInfo->ReadyWithInfo');
+    expect(queue.get('t9')?.state).toBe('Completed');
+  });
+
   it('restart() from Canceled skips re-probing (cached mediaInfo) and completes', async () => {
     const { queue, history, engineState } = setup('hang');
     await queue.enqueue(record('t1'));

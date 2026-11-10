@@ -83,6 +83,7 @@ export type CheckRuntime = (
 import type {
   VerificationReport, ExpectedArtifactManifest, HistoryEntry, HistoryQuery,
   HistoryAddResult, TaskRecord, TaskSnapshot, TaskEvent, DownloadKind, MediaInfo,
+  SubtitleDomain,
 } from '@ytvdlt/shared';
 
 export type { ExpectedArtifactManifest } from '@ytvdlt/shared';
@@ -106,6 +107,11 @@ export interface VerifierInput {
   historyEntry?: HistoryEntry | null;
   /** Video vs audio task (C6 has opposite expectations). */
   kind?: DownloadKind;
+  /**
+   * Stage 4 (append-only): the subtitle domain of the request. Read ONLY by the
+   * advisory attachment probes (embedded-stream check). It cannot fail a task.
+   */
+  subtitleRequest?: SubtitleDomain | null;
 }
 
 export interface IArtifactVerifier {

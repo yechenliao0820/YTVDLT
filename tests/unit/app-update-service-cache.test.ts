@@ -119,6 +119,20 @@ function setup(digest: string | null = GOOD_HASH): Setup {
 
 afterEach(() => { globalThis.fetch = originalFetch; });
 
+describe('update download cancellation', () => {
+  it('cancels during cache inspection and allows a new download', async () => {
+    const h = setup();
+    await h.service.check({ manual: true });
+    const downloading = h.service.perform('download');
+    const cancellation = await h.service.perform('cancel-download');
+    expect(cancellation.ok).toBe(true);
+    expect(cancellation.state.phase).toBe('available');
+    expect((await downloading).state.phase).toBe('available');
+    expect(h.fetchCalls()).toBe(0);
+    expect((await h.service.perform('download')).state.phase).toBe('ready');
+  });
+});
+
 describe('D-104 · cached installer SHA-256 verification', () => {
   it('reuses a cache file only after recomputing its hash (zero network)', async () => {
     const h = setup(GOOD_HASH);
@@ -204,5 +218,8 @@ describe('D-104 · install-time integrity re-check', () => {
     expect(h.opened).toHaveLength(1);
     // The service builds paths with `/`; Windows accepts both separators.
     expect(h.opened[0]).toContain(ASSET_NAME);
+    expect(JSON.parse(readFileSync(join(h.dir, 'pending-update-cleanup.json'), 'utf8'))).toEqual({
+      fromVersion: '0.1.10', targetVersion: '0.2.1', fileName: ASSET_NAME, sha256: GOOD_HASH,
+    });
   });
 });

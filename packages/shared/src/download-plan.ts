@@ -47,6 +47,17 @@ export interface DownloadPlan {
   // ---- subtitles (M2 positions 21-27 + M3 conditional segments) ----
   readonly writeSubs: boolean;
   readonly subLangs: string;
+  /**
+   * Whether `--sub-langs` may be emitted at all.
+   *
+   * It used to be gated on `writeSubs` alone, which is only the MANUAL-subtitle
+   * switch. yt-dlp's help (2026.10.26) defines `--sub-langs` as "Languages of
+   * the subtitles to download", i.e. the filter applies to automatic captions
+   * and to embedded subtitles too. Deriving it from `writeSubs` therefore
+   * dropped the filter on an auto-captions-only request, which then downloaded
+   * every automatic track the site offered (audit R1).
+   */
+  readonly subLangsRequested: boolean;
   readonly autoCaptions: boolean;
   readonly skipTranslatedSubs: boolean;
   readonly convertTo: 'none' | 'ass' | 'srt' | 'vtt' | 'lrc';

@@ -16,7 +16,12 @@ import type {
 import { isForwardStage } from '@ytvdlt/shared';
 import type { ICancelHandle, IArtifactVerifier, IHistoryStore, ITaskQueue, ITaskStore } from '../ports.js';
 import { detectPostprocessed } from '../download-flags.js';
+import { resolveDownloadPlan } from '../decision/download-plan.js';
 import { applyCopySuffix, nextCopySuffix } from '../path-resolver/copy-suffix.js';
+import {
+  buildSubtitleLinks, classifyArtifact, evaluateSubtitleOutcome,
+  primaryMediaArtifact, subtitleArtifactsOf,
+} from '../artifact-classify/index.js';
 import { assertTransition } from './state-machine.js';
 
 export interface TaskQueueDeps {
@@ -234,6 +239,15 @@ export class TaskQueue implements ITaskQueue {
           return;
         }
         this.transition(record, 'ReadyWithInfo');
+      } else if (record.state === 'Idle') {
+        // Stage 3: a per-task `MediaInfo` can now arrive already probed (a spent
+        // subtitle-preview ticket). `enqueue()` always stores `Idle`, and the
+        // machine has no `Idle -> Running` (nor `Idle -> ReadyWithInfo`) edge, so
+        // walk the two legal edges the probe path would have walked — without the
+        // probe. Without this the first transition threw and the task sat in
+        // `Idle` forever.
+        this.transition(record, 'FetchingInfo');
+        this.transition(record, 'ReadyWithInfo');
       }
 
       // --- 2) download ---
@@ -270,6 +284,26 @@ export class TaskQueue implements ITaskQueue {
 
       // --- 3) verify BEFORE completion (C12) ---
       record.artifacts = [...outcome.artifacts];
+      // Stage 4: link every subtitle file to its media and reconcile the list
+      // against what the request asked for. Both are pure and evidence-based:
+      // ownership comes from this run's own manifest, never from a folder scan.
+      const subtitlePlan = resolveDownloadPlan(effectiveRequest);
+      const subtitleRequest = {
+        ...effectiveRequest.subtitle,
+        enabled: subtitlePlan.writeSubs,
+        embed: subtitlePlan.embedSubs,
+      };
+      const subtitleFiles = buildSubtitleLinks({
+        artifacts: outcome.artifacts,
+        mediaInfo: record.mediaInfo,
+        subtitle: subtitleRequest,
+      });
+      record.subtitleFiles = subtitleFiles;
+      record.subtitleOutcome = evaluateSubtitleOutcome({
+        subtitle: subtitleRequest,
+        mediaInfo: record.mediaInfo,
+        links: subtitleFiles,
+      });
       // D-115: the engine exited 0 and every stream is on disk, but the record
       // is NOT `Completed` yet — verification still runs. Without this the card
       // sat at "100.0% · 下载中" for the whole verification, which is the exact
@@ -289,6 +323,15 @@ export class TaskQueue implements ITaskQueue {
         // history.add() still happens ONLY after verify().ok === true.
         historyEntry: buildHistoryEntry(record, outcome.artifacts, this.deps.ports),
         kind: record.kind,
+        // Stage 4 / D-127: advisory only — drives the embedded-subtitle probe,
+        // never a verdict.
+        subtitleRequest,
+      });
+      record.subtitleOutcome = evaluateSubtitleOutcome({
+        subtitle: subtitleRequest,
+        mediaInfo: record.mediaInfo,
+        links: subtitleFiles,
+        ...(report.attachments === undefined ? {} : { attachments: report.attachments }),
       });
       if (!report.ok) {
         record.error = {
@@ -463,6 +506,10 @@ export class TaskQueue implements ITaskQueue {
     this.transition(record, target);
     record.error = null;
     record.artifacts = [];
+    // Stage 4: a retry is a NEW run. Keeping the previous attempt's subtitle
+    // links would make the card claim files this run never produced.
+    record.subtitleFiles = [];
+    delete record.subtitleOutcome;
     // D-107: a retry is a NEW run. Keeping the previous run's percent made the
     // card claim "37.0%" while the fresh process was still starting up — a
     // number from the last attempt presented as this attempt's progress. The
@@ -557,10 +604,14 @@ function buildHistoryEntry(
   ports: CorePorts,
 ): HistoryEntry {
   const info: MediaInfo | null = record.mediaInfo;
-  const primary = artifacts[0] ?? '';
-  const audio = artifacts.find((path) => /\.(m4a|mp3|opus|ogg|flac|wav|aac)$/i.test(path)) ?? null;
-  const thumb = artifacts.find((path) => /\.(jpg|jpeg|png|webp)$/i.test(path)) ?? null;
-  const subs = artifacts.filter((path) => /\.(vtt|srt|ass|lrc)$/i.test(path));
+  // Stage 4: `artifacts[0]` is a thumbnail or a subtitle often enough that it
+  // must never be the history's `videoPath` — C11 verifies that path and the UI
+  // opens it. Fall back to index 0 only when no media file exists at all, so a
+  // degenerate run still produces an honest (and correctly failing) record.
+  const primary = primaryMediaArtifact(artifacts) ?? artifacts[0] ?? '';
+  const audio = artifacts.find((path) => classifyArtifact(path) === 'audio') ?? null;
+  const thumb = artifacts.find((path) => classifyArtifact(path) === 'thumbnail') ?? null;
+  const subs = subtitleArtifactsOf(artifacts);
   const timestamp = ports.clock.nowIso();
   return {
     id: record.id,

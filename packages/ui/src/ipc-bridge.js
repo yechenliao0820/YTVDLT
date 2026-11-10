@@ -17,7 +17,11 @@
     // D-76: the real task surface. Until this change the queue and detail pages
     // only wrote `{action, taskId}` into a <pre> and never called the main
     // process, so every button was inert in the packaged app.
-    'TASK_LIST', 'TASK_DETAIL', 'TASK_ACTION', 'DOWNLOAD_START'
+    'TASK_LIST', 'TASK_DETAIL', 'TASK_ACTION', 'DOWNLOAD_START',
+    // Stage 5 (append-only): live, on-demand subtitle preview. The queue page
+    // has its own CHANNELS table, but the symbolic names must also be known
+    // here so no caller can be rejected by the command whitelist (§5).
+    'SUBTITLE_PREVIEW', 'SUBTITLE_PREVIEW_CANCEL'
   ];
 
   function bridge() {
@@ -48,7 +52,10 @@
     TASK_LIST: 'ytvdlt:task:list',
     TASK_DETAIL: 'ytvdlt:task:detail',
     TASK_ACTION: 'ytvdlt:task:action',
-    DOWNLOAD_START: 'ytvdlt:download:start'
+    DOWNLOAD_START: 'ytvdlt:download:start',
+    // Stage 5: exact wire strings from shared/src/ipc.ts (append-only).
+    SUBTITLE_PREVIEW: 'ytvdlt:subtitle:preview',
+    SUBTITLE_PREVIEW_CANCEL: 'ytvdlt:subtitle:previewCancel'
   };
 
   /** Whitelisted, synchronous-safe command dispatch. Never builds a command. */

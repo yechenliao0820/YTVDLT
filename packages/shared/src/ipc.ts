@@ -57,6 +57,15 @@ export const IPC_CHANNELS = {
   // back to a hard-coded literal. This channel reads `app.getVersion()` inside
   // the main process, so it cannot rot and cannot be spoofed by the page.
   APP_INFO: 'ytvdlt:app:info',
+  // Subtitle preview (stage 2, append-only): the live, on-demand probe that
+  // replaces the recorded-fixture PROBE for the subtitle picker. Two channels
+  // on purpose — "open the picker" returns an opaque ticket, "abandon it"
+  // releases that ticket; folding both into one `action` string would blur a
+  // success path and a cleanup path.
+  // NOTE: `PROBE` / `DIALOG_*` above stay fixture channels and keep their
+  // contracts; nothing here changes them.
+  SUBTITLE_PREVIEW: 'ytvdlt:subtitle:preview',
+  SUBTITLE_PREVIEW_CANCEL: 'ytvdlt:subtitle:previewCancel',
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

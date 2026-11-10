@@ -62,7 +62,7 @@ export interface AppUpdateState {
 }
 
 export type AppUpdateAction =
-  | 'check' | 'download' | 'install' | 'open-page' | 'skip-version' | 'dismiss';
+  | 'check' | 'download' | 'cancel-download' | 'install' | 'open-page' | 'skip-version' | 'dismiss';
 
 /** Result of one user action; the renderer re-reads `state` afterwards. */
 export interface AppUpdateActionResult {

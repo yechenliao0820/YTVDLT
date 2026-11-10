@@ -46,3 +46,9 @@ export * from './app-update/index.js';
 export * from './thumbnail-cache-policy/index.js';
 // D-109 (append-only): stable error code → one plain-language failure bucket.
 export * from './failure-summary/index.js';
+// Subtitle preview (append-only, stage 2): source-aware projection + bounded,
+// single-use ticket cache. No probe, no spawn, no disk.
+export * from './subtitle-preview/index.js';
+// Stage 4 (append-only): one artifact extension table, subtitle↔media links and
+// the requested-vs-produced verdict. Pure, no I/O.
+export * from './artifact-classify/index.js';

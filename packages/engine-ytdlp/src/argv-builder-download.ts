@@ -16,6 +16,7 @@ import type { DownloadRequest } from '@ytvdlt/shared';
 import { resolveDownloadPlan } from '@ytvdlt/core';
 import { assertHttpUrl } from './argv-builder.js';
 import { assertNoForbiddenOptions } from './argv-compliance.js';
+import { SUBTITLE_MOVES_PREFIX, SUBTITLE_PATHS_PREFIX } from './subtitle-manifest.js';
 import { YTVDLT_PROGRESS_TEMPLATE, PROGRESS_DELTA_SECONDS } from './progress-template.js';
 
 export interface DownloadContext {
@@ -25,7 +26,17 @@ export interface DownloadContext {
   ffmpegDir: string;
   /** Absolute path of the per-task artifact manifest file. */
   artifactManifestPath: string;
+  /**
+   * Stage 4: absolute path of the SECOND manifest that records the subtitle
+   * files. Omitted by callers that do not care (tests, older assemblies); the
+   * extra `--print-to-file` is then not emitted at all.
+   */
+  subtitleManifestPath?: string;
 }
+
+/** Only paths are printed: post_process retains the move map; after_move does not. */
+export const SUBTITLE_PRINT_TEMPLATE = `after_move:${SUBTITLE_PATHS_PREFIX}%(requested_subtitles.:.filepath|[])j`;
+const SUBTITLE_MOVES_TEMPLATE = `post_process:${SUBTITLE_MOVES_PREFIX}%(__files_to_move|{})j`;
 
 /** Documented argument order (tests assert against a literal copy, not this). */
 export const DOWNLOAD_ARGV_FROZEN_ORDER: readonly string[] = [
@@ -119,7 +130,13 @@ export function buildDownload(req: DownloadRequest, ctx: DownloadContext): strin
   if (plan.ppa !== null) argv.push('--ppa', plan.ppa);
 
   // ---- C · subtitles (M2 frozen positions 21-27) ----
-  if (plan.writeSubs) argv.push('--write-subs', '--sub-langs', plan.subLangs);
+  // R1 fix: `--write-subs` and `--sub-langs` are separate decisions. The filter
+  // applies to manual subs, automatic captions AND embedding, so it is emitted
+  // whenever any of them asks for subtitles (plan.subLangsRequested) — an
+  // auto-captions-only request used to emit `--write-auto-subs` with no filter
+  // and download every language the site offered.
+  if (plan.writeSubs) argv.push('--write-subs');
+  if (plan.subLangsRequested) argv.push('--sub-langs', plan.subLangs);
   if (plan.autoCaptions) argv.push('--write-auto-subs');
   // C1′ · M3 conditional
   if (plan.autoCaptions && plan.skipTranslatedSubs) {
@@ -176,6 +193,15 @@ export function buildDownload(req: DownloadRequest, ctx: DownloadContext): strin
     '--progress-delta', PROGRESS_DELTA_SECONDS,
     '--print-to-file', 'after_move:%(filepath)q', ctx.artifactManifestPath,
   );
+  // Stage 4 · C5′: subtitle file list. Emitted ONLY when this request can
+  // produce subtitles, so a plain download keeps the frozen argv byte for byte
+  // (EXPECTED_MINIMAL still matches element by element).
+  const wantsSubtitles = plan.writeSubs || plan.autoCaptions || plan.embedSubs;
+  const subtitleManifestPath = ctx.subtitleManifestPath;
+  if (wantsSubtitles && typeof subtitleManifestPath === 'string' && subtitleManifestPath.trim() !== '') {
+    argv.push('--print-to-file', SUBTITLE_MOVES_TEMPLATE, subtitleManifestPath);
+    argv.push('--print-to-file', SUBTITLE_PRINT_TEMPLATE, subtitleManifestPath);
+  }
 
   // ---- G · separator + the ONLY user token (must be last) ----
   argv.push('--', req.url);

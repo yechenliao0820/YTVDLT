@@ -16,6 +16,7 @@
  *     open actions), and `forget()` drops the cache after a record is removed.
  */
 import type { TaskRecord } from '@ytvdlt/shared';
+import { primaryMediaArtifact } from '@ytvdlt/core';
 
 export type LocalFileStatus =
   | 'present'
@@ -108,7 +109,10 @@ export function createLocalFileStatusProbe(options: LocalFileStatusOptions): Loc
   const keyOf = (task: FileStateInput): string => `${task.state}|${task.artifacts.join('|')}`;
 
   async function measure(task: FileStateInput): Promise<LocalFileState> {
-    const primary = task.artifacts[0];
+    // Stage 4: probe the MEDIA file. `artifacts[0]` is a thumbnail or a subtitle
+    // on plenty of manifests, and reporting a task as "file deleted" because a
+    // `.jpg` is gone would be a lie.
+    const primary = primaryMediaArtifact(task.artifacts) ?? task.artifacts[0];
     if (!isUsablePath(primary)) return INVALID_STATE;
     const dir = parentDirOf(primary);
     const [fileStat, dirStat] = await Promise.all([

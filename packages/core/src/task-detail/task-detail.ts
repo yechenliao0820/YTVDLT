@@ -12,6 +12,7 @@ import type { CorePorts, IShellPort, TaskRecord } from '@ytvdlt/shared';
 import type { ITaskQueue } from '../ports.js';
 import type { ErrorReport } from '../error-report/error-report.js';
 import { maskUrlSecrets } from '../error-report/error-report.js';
+import { primaryMediaArtifact } from '../artifact-classify/kinds.js';
 
 export type TaskDetailAction =
   | 'open-file'
@@ -110,7 +111,10 @@ export class TaskDetailService {
   }
 
   private async open(task: TaskRecord, action: 'open-file' | 'open-folder'): Promise<TaskDetailResult> {
-    const target = task.artifacts[0];
+    // Stage 4: "the file" is the media, not whatever the manifest listed first.
+    // With `--write-thumbnail` / `--write-subs`, `artifacts[0]` is routinely a
+    // `.jpg` or a `.srt`, and "打开文件" then launched a text editor.
+    const target = primaryMediaArtifact(task.artifacts) ?? task.artifacts[0];
     if (target === undefined) return this.result(action, false, 'NO_ARTIFACT', '任务没有产物路径');
     const shell = this.deps.shell;
     if (shell === undefined) return this.result(action, false, 'SHELL_UNAVAILABLE', '当前环境未注入 shell 端口');

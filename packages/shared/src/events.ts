@@ -1,10 +1,19 @@
 import type { AppError } from './errors.js';
 
-/** A produced file. `path` is absolute; M2 obtains it from `--print after_move:filepath`. */
+/**
+ * A produced file. `path` is absolute; M2 obtains it from `--print after_move:filepath`.
+ *
+ * `other` (stage 4, append-only): the classification is deliberately NOT
+ * "everything unknown is video". A `.srv3` / `.ttml` / `.json3` subtitle used to
+ * fall through to `video` and then became "the main file" of the task; an
+ * unknown extension now says so instead of pretending. Media selection does not
+ * depend on this field (see `primaryMediaArtifact`), so a wrong guess here can
+ * no longer corrupt verification.
+ */
 export interface Artifact {
   taskId: string;
   path: string;
-  kind: 'video' | 'audio' | 'subtitle' | 'thumbnail' | 'infojson';
+  kind: 'video' | 'audio' | 'subtitle' | 'thumbnail' | 'infojson' | 'other';
   sizeBytes: number | null;
 }
 

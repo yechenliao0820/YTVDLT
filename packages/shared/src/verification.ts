@@ -1,6 +1,7 @@
 /**
  * Artifact verification DTOs (C1–C12). Pure types only.
  */
+import type { AttachmentProbe } from './subtitle-artifact.js';
 
 export type CriterionId =
   | 'C1' | 'C2' | 'C3' | 'C4' | 'C5' | 'C6'
@@ -32,6 +33,12 @@ export interface VerificationReport {
   ok: boolean;
   failureCode: 'ARTIFACT_INCOMPLETE' | 'ALREADY_DOWNLOADED' | 'UNKNOWN' | null;
   durationMs: number;
+  /**
+   * Stage 4 (append-only): per-attachment probes (subtitle content sanity,
+   * embedded subtitle tracks). ADVISORY — these never feed `ok` / `failureCode`
+   * / C12, because a subtitle problem is not a broken video (D-127).
+   */
+  attachments?: readonly AttachmentProbe[];
 }
 
 /** L2 expectation manifest (derived from `tests/fixtures/manifest.json`). */

@@ -1,0 +1,158 @@
+/**
+ * subtitles.css — stage 5 subtitle picker on the queue page.
+ *
+ * Scoped to `.subtitle-*` / `#queue-subtitle-*`. It is linked ONLY by
+ * pages/queue/index.html, so no other page (and therefore no other frozen
+ * screenshot baseline) can be affected by these rules.
+ *
+ * All colours come from the shared theme variables: light/dark and the five
+ * accent palettes keep working without a single hard-coded light-mode colour.
+ * The panel is a flex column with an independently scrolling body, so the
+ * footer actions stay reachable at 800x600 as well as on a large display.
+ */
+.subtitle-entry {
+  height: 30px; padding: 0 12px; font-size: 13px; white-space: nowrap;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--ink); cursor: pointer;
+}
+.subtitle-entry:hover { border-color: var(--accent); }
+.subtitle-entry[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.subtitle-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 280px;
+  height: 26px; padding: 0 8px; border-radius: 13px; font-size: 11px;
+  background: var(--accent-soft); color: var(--accent); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.subtitle-chip[data-state="expired"],
+.subtitle-chip[data-state="invalid"] { background: var(--warn-bg); color: var(--danger); }
+.subtitle-chip button {
+  border: 0; background: transparent; color: inherit; cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 0 2px;
+}
+
+/* The picker injects its own backdrop in live mode, so it must NOT depend on
+   the queue page's inline `.modal-backdrop` / `[hidden]` rules. `hidden` is a
+   boolean HTML attribute: `hidden="false"` still matches `[hidden]` in the UA
+   sheet, hence the explicit ID rule below that restores `display:flex`. */
+#subtitle-modal {
+  position: fixed; inset: 0; z-index: 90;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px; background: rgba(12, 22, 34, .48);
+}
+#subtitle-modal[hidden="true"] { display: none !important; }
+.modal.subtitle-modal {
+  width: min(720px, 100%); max-height: min(84vh, 680px);
+  display: flex; flex-direction: column; padding: 18px 20px 16px; gap: 10px;
+}
+.modal.subtitle-modal [hidden="true"] { display: none !important; }
+.subtitle-head { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.subtitle-head h2 { margin: 0; font-size: 17px; flex: 1 1 auto; }
+.subtitle-icon-btn {
+  width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--muted); font-size: 17px; line-height: 1; cursor: pointer;
+}
+.subtitle-icon-btn:hover { color: var(--ink); border-color: var(--accent); }
+.subtitle-media {
+  margin: 0; font-size: 12px; color: var(--muted); flex: 0 0 auto;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.subtitle-alert {
+  flex: 0 0 auto; padding: 8px 10px; border-radius: 6px; font-size: 12px;
+  background: var(--accent-soft); color: var(--ink); line-height: 1.5;
+}
+.subtitle-alert[data-tone="error"] { background: var(--warn-bg); color: var(--danger); }
+.subtitle-body {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 10px; padding-right: 2px;
+}
+.subtitle-state {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 14px 12px; border: 1px dashed var(--line); border-radius: 8px;
+  font-size: 13px; color: var(--muted);
+}
+.subtitle-state[data-state="error"] { color: var(--danger); border-color: var(--danger); }
+.subtitle-state button {
+  height: 28px; padding: 0 12px; font-size: 12px; border: 1px solid var(--line);
+  border-radius: 5px; background: var(--panel); color: var(--ink); cursor: pointer;
+}
+.subtitle-toolbar { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; flex-wrap: wrap; }
+.subtitle-search {
+  flex: 1 1 200px; min-width: 140px; height: 30px; padding: 4px 8px;
+  border: 1px solid var(--line); border-radius: 5px; font-family: inherit; font-size: 12px;
+  background: var(--panel); color: var(--ink);
+}
+.subtitle-count { font-size: 12px; color: var(--accent); font-weight: 700; white-space: nowrap; }
+.subtitle-rows {
+  display: grid; gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  align-content: start;
+}
+.subtitle-row {
+  display: flex; align-items: flex-start; gap: 8px; padding: 9px 10px;
+  border: 1px solid var(--line); border-radius: 7px; background: var(--panel);
+  cursor: pointer; min-width: 0;
+}
+.subtitle-row:hover { border-color: var(--accent); }
+.subtitle-row[data-selected="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.subtitle-row[data-disabled="true"] { opacity: .55; cursor: not-allowed; }
+.subtitle-row > input { width: 15px; height: 15px; margin: 2px 0 0; accent-color: var(--accent); flex: 0 0 auto; }
+.subtitle-row-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 auto; }
+.subtitle-row-code { font-size: 12px; font-weight: 700; color: var(--ink); overflow-wrap: anywhere; }
+.subtitle-row-name { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.subtitle-sources { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.subtitle-source {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px;
+  border-radius: 9px; font-size: 10px; background: var(--chip-bg); color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.subtitle-source[data-source="manual"] { background: var(--accent-soft); color: var(--accent); }
+.subtitle-source[data-source="automatic"] { background: var(--warn-bg); color: var(--ink); }
+.subtitle-source[data-source="none"] { background: var(--warn-bg); color: var(--danger); }
+.subtitle-selected { display: flex; align-items: flex-start; gap: 8px; flex: 0 0 auto; flex-wrap: wrap; }
+.subtitle-selected-label { font-size: 11px; color: var(--muted); padding-top: 3px; }
+.subtitle-chips { display: flex; gap: 5px; flex-wrap: wrap; flex: 1 1 auto; }
+.subtitle-chip-item {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px;
+  border-radius: 10px; font-size: 11px; background: var(--accent-soft); color: var(--accent);
+}
+.subtitle-chip-item button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0; font-size: 12px; }
+.subtitle-options {
+  display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr));
+  flex: 0 0 auto; padding: 10px; border: 1px solid var(--line); border-radius: 8px;
+}
+.subtitle-options fieldset {
+  margin: 0; padding: 6px 10px 8px; border: 1px solid var(--line); border-radius: 6px;
+  display: flex; flex-direction: column; gap: 5px; min-width: 0;
+}
+.subtitle-options legend { font-size: 11px; color: var(--muted); padding: 0 4px; }
+.subtitle-options label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink); min-width: 0; }
+.subtitle-options input[type="radio"], .subtitle-options input[type="checkbox"] { accent-color: var(--accent); flex: 0 0 auto; }
+.subtitle-options select {
+  flex: 1 1 auto; min-width: 0; height: 28px; padding: 2px 6px; border: 1px solid var(--line);
+  border-radius: 5px; font-family: inherit; font-size: 12px; background: var(--panel); color: var(--ink);
+}
+.subtitle-options label:disabled, .subtitle-options input:disabled + span { opacity: .5; }
+.subtitle-warning {
+  margin: 0; padding: 8px 10px; border-radius: 6px; font-size: 12px; line-height: 1.55;
+  background: var(--warn-bg); color: var(--ink); flex: 0 0 auto;
+}
+.subtitle-note { margin: 0; font-size: 11px; color: var(--muted); line-height: 1.55; flex: 0 0 auto; }
+.subtitle-actions { flex: 0 0 auto; display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.subtitle-actions button {
+  height: 32px; padding: 0 14px; font-size: 12px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--panel); color: var(--ink); cursor: pointer; white-space: nowrap;
+}
+.subtitle-actions button.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 700; }
+.subtitle-actions button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* Short / narrow windows: keep the header and footer visible, let only the
+   body scroll. Two-column options collapse to one on narrow viewports. */
+@media (max-width: 720px) {
+  .modal.subtitle-modal { padding: 12px 14px; gap: 8px; }
+  .subtitle-options { grid-template-columns: 1fr; }
+  .subtitle-rows { grid-template-columns: 1fr; }
+}
+@media (max-height: 640px) {
+  .modal.subtitle-modal { max-height: 94vh; }
+  .subtitle-media { display: none; }
+}

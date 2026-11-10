@@ -16,6 +16,7 @@ import type {
   Artifact, EngineUpdateSource, QueueIntakeGate,
 } from '@ytvdlt/shared';
 import type { ILogger, IErrorMapper } from '@ytvdlt/core';
+import { classifyArtifact } from '@ytvdlt/core';
 import { build } from './argv-builder.js';
 import { buildDownload } from './argv-builder-download.js';
 import { toMediaInfo, toPlaylistInfo } from './json-mapper.js';
@@ -23,7 +24,9 @@ import { parseProgressChunk } from './progress-parser.js';
 import { createLineSplitter, detectStageFromLine, type DetectedStage } from './postprocess-parser.js';
 import {
   artifactManifestPath, resolveArtifactManifestDir, parseArtifactManifestDetailed,
+  subtitleManifestPath,
 } from './artifact-manifest.js';
+import { parseSubtitlePathList } from './subtitle-manifest.js';
 import { probeSucceeded, type RawProbeResult } from './probe-result.js';
 import { assertAbsoluteRuntimePaths, assertSafeSpawnOptions, isAbsolutePath } from './runtime-check.js';
 import { SelfUpdater } from './self-updater.js';
@@ -237,6 +240,8 @@ export class YtDlpEngine implements DownloadEngine {
       ? resolveArtifactManifestDir(undefined, req.paths.videoDir, req.paths.audioDir, req.format.extractAudio)
       : configuredTempDir.replace(/[\\/]+$/, '');
     const manifestPath = artifactManifestPath(manifestDir, taskId);
+    // The subtitle manifest pairs post_process move maps with after_move paths.
+    const subtitlePath = subtitleManifestPath(manifestDir, taskId);
 
     // `--print-to-file` APPENDS; a stale manifest would leak old paths.
     //
@@ -248,6 +253,7 @@ export class YtDlpEngine implements DownloadEngine {
     // the `unlink` resolves ENOENT, which was already swallowed here.
     await Promise.all([
       this.deps.ports.fs.unlink(manifestPath).catch(() => undefined),
+      this.deps.ports.fs.unlink(subtitlePath).catch(() => undefined),
       this.deps.ports.fs.mkdir(manifestDir).catch(() => undefined),
       this.deps.ports.fs.mkdir(req.paths.videoDir).catch(() => undefined),
       ...(req.format.extractAudio
@@ -259,6 +265,7 @@ export class YtDlpEngine implements DownloadEngine {
       jsRuntimePath: this.deps.jsRuntimePath,
       ffmpegDir: this.ffmpegDir(),
       artifactManifestPath: manifestPath,
+      subtitleManifestPath: subtitlePath,
     });
     await this.deps.logger.logArgv('engine.download', argv);
 
@@ -383,7 +390,16 @@ export class YtDlpEngine implements DownloadEngine {
     for (const path of paths) {
       let sizeBytes: number | null = null;
       try { sizeBytes = (await this.deps.ports.fs.stat(path)).sizeBytes; } catch { sizeBytes = null; }
-      artifacts.push({ taskId, path, kind: kindOf(path), sizeBytes });
+      artifacts.push({ taskId, path, kind: classifyArtifact(path), sizeBytes });
+    }
+    // Stage 4: subtitle files are appended AFTER the media artifacts. Keeping
+    // index 0 = media preserves every legacy `artifacts[0]` reader while the new
+    // links give exact ownership; both are needed until stage 5 rewires the UI.
+    const subtitleFiles = await this.readSubtitleArtifacts(subtitlePath);
+    for (const path of subtitleFiles) {
+      let sizeBytes: number | null = null;
+      try { sizeBytes = (await this.deps.ports.fs.stat(path)).sizeBytes; } catch { sizeBytes = null; }
+      artifacts.push({ taskId, path, kind: 'subtitle', sizeBytes });
     }
     onEvent({ type: 'completed', taskId, artifacts });
 
@@ -393,6 +409,9 @@ export class YtDlpEngine implements DownloadEngine {
     // diagnosis. Failure to unlink is ignored: a leftover file must never fail
     // a download that already succeeded.
     await this.deps.ports.fs.unlink(manifestPath).catch(() => undefined);
+    // Same lifetime rule for the subtitle list: it has been read and handed
+    // over, so it is residue. A failed parse never reaches this line.
+    await this.deps.ports.fs.unlink(subtitlePath).catch(() => undefined);
 
     // D-118: yt-dlp moved every finished file out of the temp dir, and the
     // manifest is gone too, so an EMPTY directory is pure residue. `rmdir` is
@@ -406,6 +425,52 @@ export class YtDlpEngine implements DownloadEngine {
           : undefined))
         .catch(() => undefined);
     }
+  }
+
+  /**
+   * Stage 4: turn yt-dlp's reported subtitle paths into files that really exist.
+   *
+   * Rules (why each one is here):
+   *  - The list comes from THIS process (`--print-to-file`), so a file is never
+   *    claimed from a folder listing.
+   *  - Only exact reported paths or their explicit move targets are checked.
+   *    Missing paths never fall back to another directory or guessed basename.
+   *  - A file that exists but is EMPTY is not declared as an artifact: the
+   *    verifier treats a declared-but-empty attachment as a failure (C9), and a
+   *    site handing out an empty subtitle must not fail the video's download.
+   *    It is logged instead, and the task's `subtitleOutcome` reports it.
+   *  - Anything unreadable/missing is dropped silently: a subtitle problem may
+   *    never abort a download that already produced its media file.
+   */
+  private async readSubtitleArtifacts(
+    manifestPath: string,
+  ): Promise<string[]> {
+    let text = '';
+    try { text = await this.deps.ports.fs.readText(manifestPath); } catch { return []; }
+    const reported = parseSubtitlePathList(text);
+    if (reported.length === 0) return [];
+
+    const resolved: string[] = [];
+    const seen = new Set<string>();
+    for (const candidate of reported) {
+      let stat: { sizeBytes: number; isFile: boolean };
+      try {
+        stat = await this.deps.ports.fs.stat(candidate);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile) continue;
+      if (stat.sizeBytes <= 0) {
+        await this.deps.logger.warn('engine.download', 'subtitle.empty', { path: candidate });
+        continue;
+      }
+      const key = candidate.replace(/\//g, '\\').toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        resolved.push(candidate);
+      }
+    }
+    return resolved;
   }
 
   async probePlaylist(url: string, opts: ProbeOptions): Promise<PlaylistInfo> {
@@ -482,13 +547,4 @@ function aria2cDirOf(aria2cPath: string | null): string | null {
   if (aria2cPath === null || aria2cPath.trim() === '') return null;
   const match = /^(.*)[\\/][^\\/]+$/.exec(aria2cPath.trim());
   return match?.[1] ?? null;
-}
-
-function kindOf(path: string): Artifact['kind'] {
-  const ext = (/\.([A-Za-z0-9]+)$/.exec(path)?.[1] ?? '').toLowerCase();
-  if (['m4a', 'mp3', 'opus', 'ogg', 'flac', 'wav', 'aac'].includes(ext)) return 'audio';
-  if (['vtt', 'srt', 'ass', 'lrc'].includes(ext)) return 'subtitle';
-  if (['jpg', 'jpeg', 'png', 'webp'].includes(ext)) return 'thumbnail';
-  if (ext === 'json') return 'infojson';
-  return 'video';
 }

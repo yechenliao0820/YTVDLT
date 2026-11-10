@@ -1380,3 +1380,53 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 决策 | 主窗口对可编辑区域显示中英文原生剪切、复制、粘贴、全选菜单，依据 Electron 的编辑能力启用对应项；非编辑区域不弹出，保留任务卡片原有菜单。不读取或自动提交剪贴板内容。 |
 | 验证 | bootstrap 单元测试覆盖中英文、空输入框可粘贴及非编辑区域不弹菜单；桌面主进程 TypeScript 检查通过。 |
 | 未覆盖 | 未在真实 Electron 窗口或安装版人工验证系统剪贴板和右键操作；未打包或发布。 |
+
+## D-124 · 2026-11-10 · 升级成功后清理更新安装包
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 应用更新器下载的安装包在安装后留在 updates 目录，占用空间。 |
+| 根因 | 启动安装程序后旧进程退出，没有记录待清理文件，也没有在新版本启动时核验升级结果。 |
+| 决策 | 业主明确同意对此特定更新缓存采用永久删除。安装前记录目标版本、原版本、安装包名称和已验证的 SHA-256；打包版新进程完成启动且当前版本等于目标版本时，仅对更新目录中符合安装包命名、为普通文件且 SHA-256 仍匹配的单个文件执行清理。取消、启动失败、版本不符、文件被替换或不可访问时保留；清理失败不阻止启动，之后可重试。不清理校验 sidecar、历史缓存或用户文件，不改通用删除规则。 |
+| 验证 | 更新清理、更新服务、缓存复验、启动与菜单共 43 项单元测试通过；workspace 5 个项目 typecheck 通过；git diff --check 通过。清理单测使用内存模拟文件操作，未实际永久删除任何安装包。 |
+| 未覆盖 | 未打包、安装或进行真实 Windows 跨版本升级；现有全量测试包含递归永久删除临时目录的脚本，依手册未运行。旧版更新器不会生成清理记录，因此从不含本功能的旧版升级到首个包含本功能的版本时不会清理该次缓存；后续升级的两端都需包含本功能。数据目录变化、安装器移除记录或文件被占用时保守保留；侧车和记录文件本身不清除。 |
+
+## D-125 · 2026-11-10 · 取消应用更新下载
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 更新下载开始后只能隐藏弹窗，无法停止传输或重新开始。 |
+| 根因 | 下载动作持续等待网络请求，界面忙碌时没有取消入口，下载器只支持超时中止。 |
+| 决策 | 下载期间提供中英文取消按钮，通过独立 IPC 中止当前下载并等待操作结束。每次使用独立临时文件，取消或下载失败时只将本次创建的临时文件移入系统回收站；回收失败时保留文件并报告路径。取消后允许重新下载；已经完成重命名的安装包保留，不能因取消误删已有缓存。关闭弹窗不取消下载。 |
+| 验证 | 相关更新服务、取消、界面、清理、启动与菜单共 52 项单元测试通过；桌面 TypeScript 检查和 git diff --check 通过。测试模拟回收站及中止，没有删除真实安装包。 |
+| 未覆盖 | 未打包、未在真实 Electron 安装版中测试网络下载、Windows 回收站与手动取消；网络完成或校验结束边界取消可能保留完整安装包以避免误删。回收站文件仍占用磁盘空间，需用户自行清空。 |
+
+## D-126 · 2026-11-10 · 字幕选择接入下载请求：语言筛选与人工/自动解耦
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 只勾选自动字幕时，语言筛选参数不生效，站点提供的全部自动字幕轨都会被下载；同时入队入口没有任何字幕字段，用户在预览里选的语言无处传递。 |
+| 根因 | ① `argv-builder-download.ts` 把 `--sub-langs` 挂在 `plan.writeSubs` 分支里输出，而 `writeSubs` 只代表人工字幕；自动字幕只能靠 `enabled=false + autoCaptions=true` 表达，此时筛选表达式整条丢失。② `planSubtitles()` 的规则是"任一语言即 `enabled=true`"，无法表达"只要自动字幕"。③ `SingleEnqueueInput` 只有 url/kind/quality，字幕选择没有入口。④ `TaskQueue.run()` 假定 `mediaInfo` 只能由自身 probe 产生，而 `enqueue()` 固定写 `Idle`，状态机没有 `Idle→Running`/`Idle→ReadyWithInfo` 边，预取 `MediaInfo` 会让任务永久停在 `Idle`。 |
+| 决策 | ① `DownloadPlan` 追加 `subLangsRequested`（= 表达式非空 且 writeSubs/autoCaptions/embedSubs 任一为真），`--write-subs` 与 `--sub-langs` 解耦；空表达式保留 yt-dlp 的"全部语言"默认，不臆造筛选。② 新增纯函数 `mergeSubtitleChoice()`：以预览投影出的可用性决定 `enabled`（仅当所选语言有人工轨）、`autoCaptions`（仅当有自动轨）、`embed`（仅视频且有人工轨），未知语言丢弃并告警；不修改 M3 的 `planSubtitles()`，避免动摇旧对话框的冻结基线。③ `DOWNLOAD_START` 追加 6 个扁平键（`previewId` / `subtitleLanguages` / `subtitleAutoCaptions` / `subtitleConvertTo` / `subtitleEmbed` / `subtitleKeepFile`），语言必须是精确 yt-dlp 代码且必须在预览结果中；账单式凭据（previewId）一次性消费，仅消耗成功才放行。④ `SingleEnqueueInput` 追加 `subtitlePatch` 与 `mediaInfo`（仅主进程构造，渲染层无法直传）；字幕补丁只覆盖本次请求的 `subtitle` 域，不写全局配置。⑤ 队列在"已有 `mediaInfo` 且状态为 `Idle`"时补走 `FetchingInfo→ReadyWithInfo` 两条合法边，不新增状态、不跳过状态机。 |
+| 验证 | 单元 1241 项（新增 65 项：选择合并 21、argv 矩阵 25、IPC 16、队列 1、m4 装配 2）、契约 49 项全部通过；`npm test` 1290 项通过，覆盖率 Stmts 87.26% / Branch 85.75%。`pnpm typecheck` 5/5、`check-layering` 0 violations、`frozen-gate` 退出 0、`request.ts` 无字节差异。随包 yt-dlp 2026.10.26 `--help` 确认 `--sub-langs` 语义为"Languages of the subtitles to download (can be regex)"、`--convert-subs` 支持 ass/lrc/srt/vtt。离线集成 11/13 通过（新增 2 项把生成的 argv 交给随包 yt-dlp 2026.10.26 实际解析，退出码 0 且无 "no such option"），失败的两项（`cancel-local` engine 级、`retry-local`）为 D-118 之后 `.part` 落点变化导致的既有断言过期，与本决策无关。 |
+| 未覆盖 | 未对真实站点做自动字幕实测（离线夹具只有裸 MP4）；`--embed-subs` 是否隐含 `--write-subs` 未验证，因此内嵌请求始终显式带 `--write-subs`，可能留下外置字幕文件；同语言人工/自动分别下载仍无法表达；无 UI 入口（阶段 4）；未打包、未真机验证。 |
+
+## D-127 · 2026-11-10 · 字幕产物识别、视频关联与"附件不判死"验证
+
+| 项 | 内容 |
+|---|---|
+| 现象 | ① `--write-subs` 下载到的字幕文件从来不出现在任务产物里：清单只有一行媒体路径，队列/详情/历史都看不到字幕，`history.subtitlePaths` 在真实下载中恒为空。② 一旦把字幕加进产物，所有按 `artifacts[0]` 取"主文件"的地方（历史 `videoPath`、详情"打开文件"、本地文件状态探测、C1–C8 的 ffprobe）都会把 `.srt` / `.jpg` 当成视频。③ `kindOf()` 只认 `vtt/srt/ass/lrc`，其余 `.ttml`/`.srv3`/`.json3` 一律回落成 `video`，于是字幕被当成主媒体。④ 请求了字幕但站点没有该语言时 yt-dlp 退出 0、不产出任何字幕文件，任务显示"已完成"却没有任何字幕。 |
+| 根因 | yt-dlp 的 `after_move:%(filepath)q` 只对媒体文件触发一次（随包 2026.10.26 实测：一个产出 2 个 `.srt` 的下载，清单仍只有 1 行），字幕路径从未被记录；同时工程里存在 4 份各自维护的扩展名表，且都以"未知即视频"或"`artifacts[0]` 即主文件"收尾。 |
+| 决策 | ① 新增 `core/src/artifact-classify`：全应用唯一扩展名表（13 种必需字幕格式 + `sbv`，未知扩展归 `other`，不再猜成 `video`），`primaryMediaArtifact()` 只认视频/音频扩展（未知扩展仅作最后兜底，字幕/封面/info.json 永不入选）。② 字幕清单走**独立第二清单**：仅当请求可能产生字幕（`writeSubs`/`autoCaptions`/`embedSubs`）时追加 `--print-to-file after_move:%(requested_subtitles.:.filepath|)s`，默认请求 argv 逐字节不变；绝不打印整个 `requested_subtitles`（内含签名 URL 与转换后的字幕全文）。③ 字幕产物由**本条任务自己的 yt-dlp 进程**报告，属主不靠目录扫描；报告路径可能仍指向 temp 目录，按"同名文件 + 媒体所在目录"还原并逐个 `stat` 校验，空文件不入册（否则会让 C9 判失败、把视频拖成 Error）。④ 字幕产物追加在媒体之后（`artifacts[0]` 仍是媒体），并生成 `subtitleFiles: {path,language,ext,source,mediaPath}`：语言取自 yt-dlp 自己拼的文件名中段，来源取自探测的 manual/automatic 桶，取不到就写 `""`/`unknown`。⑤ Verifier 新增**咨询性**附件探针：字幕格式头（含"HTML 错误页伪装成字幕"）、内嵌字幕用 `ffprobe -select_streams s` 校验容器是否真有字幕轨；结果只进 `report.attachments`，不参与 `ok`/`failureCode`/C12。⑥ 记录新增 `subtitleOutcome`（`none/ok/partial/missing`）做"所选→实际"对账，`restart()` 清空；该字段不改变任务状态——**字幕缺失不等于视频损坏**。 |
+| 验证 | 单元 1326 项（新增 85：分类/关联/语言匹配 43、清单解析 13、argv 打印指令 8、验证器附件 13、队列记账 5、IPC DTO 5）、契约 49 项通过；`npm test` 1375 项通过，覆盖率 Stmts 87.36% / Branch 85.99%。`pnpm typecheck` 5/5、`check-layering` 0 violations、`frozen-gate` exit 0。离线集成新增 2 例（真实随包 yt-dlp 2026.10.26 + `<track>` 页面）：字幕落成 2 个 `.srt` 产物、语言/来源/媒体关联正确、`subtitleOutcome=ok`、历史 `videoPath` 为视频；请求站点不存在的语言时任务照常 Completed、`subtitleOutcome=missing`。全量集成 13/15 通过，失败的 2 项（`cancel-local` engine 级、`retry-local`）与阶段 2/3 记录的既有断言过期完全一致。实测另确认：`--sub-langs en` 不匹配 `en-orig`（全匹配而非前缀），语言表达式按此实现；单个字幕 404 会让 yt-dlp 退出 1 且不落地媒体，故"字幕失败拖累视频"在引擎层保持原样，本次只保证"字幕问题不被误判成视频损坏"。 |
+| 未覆盖 | 未接前端（阶段 5）；未在真实站点（YouTube 等）实测字幕 bucket 形状与自动字幕；内嵌字幕轨只做容器级存在性校验，未验证播放器兼容性；`--split-chapters` 下的字幕命名未实测；"上一轮遗留的同名字幕文件"会被 yt-dlp 当作已下载并计入本轮产物（内容由咨询探针兜底，不作强判）；跨卷中间文件下的字幕路径未实测。 |
+
+## D-128 · 2026-11-10 · 字幕集成门禁、精确产物归属与真实失败边界
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 自动-only语言未启用自动字幕仍能确认；票据失败/过期后再次点击可能无声变成无字幕下载；temp字幕不存在时按媒体目录同名回退可误认领旧文件；附件诊断未被队列消费，长json3被截断误判。 |
+| 根因 | UI确认状态与票据生命周期分离；选择合并未拒绝无人工轨语言；清单仅含移动前路径；字幕来源/期望忽略有效来源开关；advisory只产出不对账。 |
+| 决策 | UI与Main共同拒绝自动开关关闭时的自动-only选择；失效已确认选择必须显式清除或重新预览，清除使旧异步响应失效。复用唯一resolveDownloadPlan对字幕来源/期望记账，附件失败仅更新subtitleOutcome及队列警告，不改媒体C12或状态机。json3完整解析、超过8MiB跳过读取，嵌入探测异常记SKIPPED、轨数不足记附件失败。字幕清单用post_process路径移动映射与after_move字幕源路径精确配对，取消同名目录猜测；只打印路径，不打印字幕URL/全文。非零引擎退出仍Error，禁止因磁盘有视频而伪报整体成功；独立字幕重试不在本版实现。 |
+| 验证 | 最终unit+contract 106文件1462项通过；真实引擎串行integration 10文件26项通过；五包直接tsc检查通过；既有E2E 31截图与5反例通过且未改基线。真实404为exit1/Error无媒体；零字节字幕与SRT转ASS失败为exit1/Error但均保留308666字节MP4；无cue VTT产生0字节SRT且Completed/missing。双语MKV实有eng/zho两条subrip软轨；真实MP3仅audio加外置SRT。受控metadata自动-only仅下载所选AUTO_EN，不冒称外部站点实测。构建使用原配方输出独立新目录避免删除原dist，main/preload成功；request.ts仍冻结。取消/重试测试按真实tempDir核对.part，保留成功后无残留断言。 |
+| 未覆盖 | 未实测YouTube等在线来源、播放器兼容、真实拆章/片段字幕时间轴、跨卷字幕移动、安装升级或最新覆盖率。keepSubtitleFile=false仍可能保留外置字幕；内嵌强制MKV，不承诺MP4。内嵌轨数不证明每轨内容/语言正确；未来yt-dlp内部移动映射变化需重跑真实测试。历史M5验收证据陈旧，handoff-check仍失败，不以旧报告证明本次发布门禁通过。 |

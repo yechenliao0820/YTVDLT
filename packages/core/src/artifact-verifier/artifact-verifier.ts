@@ -10,6 +10,7 @@ import {
   checkC7, checkC8, checkC9, checkC10, checkC11, checkC12,
   type CheckContext,
 } from './criteria.js';
+import { collectAttachmentProbes } from './attachments.js';
 
 export interface ArtifactVerifierDeps {
   ports: CorePorts;
@@ -36,6 +37,8 @@ export class ArtifactVerifier implements IArtifactVerifier {
       historyEntry: input.historyEntry ?? null,
       // exactOptionalPropertyTypes: only add `kind` when it is defined.
       ...(input.kind === undefined ? {} : { kind: input.kind }),
+      // Stage 4: advisory-only input (embedded subtitle probe). Never scored.
+      ...(input.subtitleRequest === undefined ? {} : { subtitleRequest: input.subtitleRequest }),
       ports: this.deps.ports,
       ffprobePath: this.deps.ffprobePath ?? `${runtimeDir}/ffmpeg/ffprobe.exe`,
       ffmpegPath: this.deps.ffmpegPath ?? `${runtimeDir}/ffmpeg/ffmpeg.exe`,
@@ -62,6 +65,11 @@ export class ArtifactVerifier implements IArtifactVerifier {
     ];
     criteria.push(checkC12(criteria));
 
+    // Stage 4 / D-127: attachment probes are ADVISORY. They are reported so the
+    // queue can annotate the record, but they never take part in `ok` /
+    // `failureCode` / C12 — a subtitle problem is not a broken video.
+    const attachments = await collectAttachmentProbes(ctx);
+
     const failures = criteria.filter((criterion) => criterion.status === 'FAIL');
     // C11 (history) failing means "already downloaded", which is a distinct
     // user-facing outcome from a generic incomplete artifact.
@@ -78,6 +86,7 @@ export class ArtifactVerifier implements IArtifactVerifier {
       ok: failures.length === 0,
       failureCode,
       durationMs: Date.now() - started,
+      ...(attachments.length === 0 ? {} : { attachments }),
     };
   }
 }

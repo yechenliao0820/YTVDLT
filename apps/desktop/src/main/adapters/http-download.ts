@@ -9,8 +9,8 @@
  *
  * This file is allowed to use `node:*`: it is a main-process adapter, not Core.
  */
-import { createHash } from 'node:crypto';
-import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, open, rename, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 export interface DownloadProgress {
@@ -28,7 +28,11 @@ export interface DownloadRequest {
   readonly idleTimeoutMs?: number;
   /** Hard ceiling; a "installer" bigger than this is a bug or an attack. */
   readonly maxBytes?: number;
+  readonly signal?: AbortSignal;
+  readonly trashPartial?: (path: string) => Promise<void>;
 }
+
+export class PartialCleanupError extends Error {}
 
 export interface DownloadResult {
   readonly path: string;
@@ -43,13 +47,13 @@ const DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
 export async function downloadToFile(request: DownloadRequest): Promise<DownloadResult> {
   const maxBytes = request.maxBytes ?? DEFAULT_MAX_BYTES;
   const idleTimeoutMs = request.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
-  const partPath = `${request.targetPath}.part`;
+  const partPath = `${request.targetPath}.${randomUUID()}.part`;
 
   await mkdir(dirname(request.targetPath), { recursive: true });
-  // A leftover `.part` from a crashed attempt must not be resumed blindly.
-  await unlink(partPath).catch(() => undefined);
-
   const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  request.signal?.addEventListener('abort', abort, { once: true });
+  if (request.signal?.aborted) controller.abort();
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   const armIdleTimer = (): void => {
     if (idleTimer !== null) clearTimeout(idleTimer);
@@ -58,6 +62,7 @@ export async function downloadToFile(request: DownloadRequest): Promise<Download
 
   armIdleTimer();
   let handle: Awaited<ReturnType<typeof open>> | null = null;
+  let created = false;
   try {
     const response = await fetch(request.url, {
       signal: controller.signal,
@@ -76,12 +81,15 @@ export async function downloadToFile(request: DownloadRequest): Promise<Download
       throw new Error(`asset too large: ${totalBytes} bytes`);
     }
 
-    handle = await open(partPath, 'w');
+    controller.signal.throwIfAborted();
+    handle = await open(partPath, 'wx');
+    created = true;
     const hash = createHash('sha256');
     const reader = response.body.getReader();
     let downloadedBytes = 0;
     for (;;) {
       const chunk = await reader.read();
+      controller.signal.throwIfAborted();
       if (chunk.done) break;
       const value = chunk.value;
       if (value === undefined) continue;
@@ -95,6 +103,7 @@ export async function downloadToFile(request: DownloadRequest): Promise<Download
     await handle.sync();
     await handle.close();
     handle = null;
+    controller.signal.throwIfAborted();
 
     if (downloadedBytes === 0) throw new Error('empty download');
     if (totalBytes !== null && downloadedBytes !== totalBytes) {
@@ -109,10 +118,18 @@ export async function downloadToFile(request: DownloadRequest): Promise<Download
     };
   } catch (error) {
     if (handle !== null) await handle.close().catch(() => undefined);
-    await unlink(partPath).catch(() => undefined);
+    if (created) {
+      try {
+        if (request.trashPartial === undefined) throw new Error('回收站不可用');
+        await request.trashPartial(partPath);
+      } catch (cleanupError) {
+        throw new PartialCleanupError(`临时文件清理失败，文件保留在 ${partPath}：${String(cleanupError)}`);
+      }
+    }
     throw error;
   } finally {
     if (idleTimer !== null) clearTimeout(idleTimer);
+    request.signal?.removeEventListener('abort', abort);
   }
 }
 

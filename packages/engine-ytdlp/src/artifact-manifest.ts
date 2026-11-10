@@ -84,6 +84,22 @@ export function artifactManifestPath(tempDir: string, taskId: string): string {
 }
 
 /**
+ * Stage 4: the SECOND manifest, holding the subtitle files yt-dlp wrote.
+ *
+ * Measured on the bundled yt-dlp 2026.10.26 (see `subtitle-manifest.ts`):
+ * `after_move:%(filepath)q` prints the MEDIA file only — a download that
+ * produced two `.srt` files yields exactly one line. The subtitle list has to
+ * be asked for separately, and it must be a different FILE: mixing a Python
+ * list literal into the same file as one-path-per-line would corrupt both.
+ */
+export function subtitleManifestPath(tempDir: string, taskId: string): string {
+  const base = tempDir.replace(/[\\/]+$/, '');
+  return base === ''
+    ? `ytvdlt-subtitles-${taskId}.txt`
+    : `${base}/ytvdlt-subtitles-${taskId}.txt`;
+}
+
+/**
  * D-68: with the shipped default `paths.tempDir = ''`, the expression above
  * becomes `/ytvdlt-artifacts-*.txt` — the drive root on Windows — and yt-dlp
  * fails with `Permission denied` even though the media file itself is fine.
