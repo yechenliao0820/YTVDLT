@@ -22,6 +22,11 @@ import {
 import type { IpcGateway, IpcHandler } from './ipc-gateway.js';
 import type { LocalFileStatusPort } from './local-file-status.js';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
+import { assertHttpUrl } from '@ytvdlt/engine-ytdlp';
+import { createTxtImportService } from './txt-import-service.js';
+import type { TxtImportFilePort } from './txt-import-service.js';
+import { randomUUID } from 'node:crypto';
+import { PlaylistPreviewService } from './playlist-preview-service.js';
 
 export interface M5HostOptions extends M4HostOptions {
   /** OS probe (nativeTheme + registry accent); injected so tests stay offline. */
@@ -48,6 +53,11 @@ export interface M5HostOptions extends M4HostOptions {
   readonly fileStatus?: LocalFileStatusPort;
   /** Subtitle preview (stage 2): live probe + ticket store; absent = disabled. */
   readonly subtitlePreview?: SubtitlePreviewPortLike;
+  /**
+   * TXT batch import: the native picker/read adapter. Absent = both channels
+   * report TXT_IMPORT_UNAVAILABLE (unit-test builds stay offline).
+   */
+  readonly txtImportFile?: TxtImportFilePort;
 }
 
 /**
@@ -69,6 +79,8 @@ export interface M5Host {
   readonly gateway: IpcGateway;
   /** Channels added by M5 (for the preload whitelist assertion). */
   readonly channels: readonly string[];
+  /** Main-process ticket store; cleared on `before-quit`. */
+  readonly playlistPreview: PlaylistPreviewService;
   readonly appearance: () => Promise<AppearanceDto>;
   /** Static About-box payload (M5-4). */
   readonly aboutInfo: () => AboutInfo;
@@ -108,13 +120,54 @@ function detailPort(host: M4Host): TaskDetailPort {
   };
 }
 
+/**
+ * D-131: adapt the existing D-120 recycle-bin port to the queue's narrow
+ * cleanup hook. `trashed` / `missing` (and legacy string replies) mean the
+ * file is no longer on disk; a real OS `error` keeps BOTH the file and its
+ * artifact record. A thrown adapter degrades to "remove nothing" — cleanup is
+ * cosmetic and must never fail a verified download.
+ */
+function makeSubtitleRecycler(
+  port: TrashFilesPort,
+): (paths: readonly string[]) => Promise<readonly string[]> {
+  return async (paths) => {
+    try {
+      const outcomes = await port.trash(paths);
+      return outcomes
+        .filter((entry) => typeof entry === 'string'
+          || entry.status === 'trashed' || entry.status === 'missing')
+        .map((entry) => (typeof entry === 'string' ? entry : entry.path));
+    } catch {
+      return [];
+    }
+  };
+}
+
 export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
-  const m4 = await createM4Host(options);
+  const m4 = await createM4Host({
+    ...options,
+    // D-131: the production queue now honours keepSubtitleFile=false through
+    // the SAME `shell.trashItem` adapter as "also delete local files".
+    ...(options.trashFiles === undefined
+      ? {} : { recycleSubtitleFiles: makeSubtitleRecycler(options.trashFiles) }),
+  });
 
   const queue: TaskListPort = {
     list: () => m4.task.queue.list(),
     get: (taskId: string) => m4.task.queue.get(taskId),
   };
+
+  // Live playlist probe: the real yt-dlp engine, an opaque UUID ticket and the
+  // same 5-minute / single-use / URL-bound cache contract as subtitle preview.
+  const playlistPreview = new PlaylistPreviewService({
+    probe: (url: string) => options.engine.probePlaylist(url, {
+      jsRuntimePath: options.jsRuntimePath,
+      noPlaylist: false,
+      flatPlaylist: true,
+    }),
+    clock: options.ports.clock,
+    newId: () => randomUUID(),
+  });
 
   const handlers = createM5Handlers({
     queue,
@@ -139,6 +192,19 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
       packaged: options.ports.env.isPackaged(),
     },
     enqueueSingle: (input) => m4.enqueueSingle(input),
+    playlistPreview,
+    playlistBatch: (input) => m4.enqueuePlaylistBatchWithReport(input),
+    // TXT import reuses the ENGINE's own URL whitelist (assertHttpUrl), the
+    // same one `argv-builder-download.ts` calls before building argv. We do
+    // not invent a site registry: whether yt-dlp supports a host is decided
+    // by yt-dlp when the existing engine runs.
+    ...(options.txtImportFile === undefined ? {} : {
+      txtImport: createTxtImportService({
+        pickFile: options.txtImportFile,
+        validateUrl: assertHttpUrl,
+        enqueueBatch: (input) => m4.enqueueTxtBatch(input),
+      }),
+    }),
   });
 
   const m5Gateway: IpcGateway = {
@@ -170,6 +236,7 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     m4,
     gateway,
     channels: M5_CHANNELS,
+    playlistPreview,
     appearance: async () => gateway.dispatch(IPC_CHANNELS.SETTINGS_GET, {}) as Promise<AppearanceDto>,
     aboutInfo,
     taskDetail: m4.taskDetail,

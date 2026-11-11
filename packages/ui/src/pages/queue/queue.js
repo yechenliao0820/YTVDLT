@@ -136,6 +136,17 @@
     try { return global.localStorage ? global.localStorage.getItem(key) : null; } catch (error) { return null; }
   }
 
+  /**
+   * TXT batch import entry. Loaded ONLY when a preload bridge exists (or via
+   * `?txtimport=1` for layout checks), exactly like the subtitle picker: the
+   * frozen static screenshot baselines must not gain a single DOM node.
+   */
+  var txtImport = null;
+  var txtImportLoading = false;
+  /** Live playlist selector — also loaded only in live mode (frozen baselines). */
+  var playlistImport = null;
+  var playlistImportLoading = false;
+
   /** D-106: one queue view survives menu / nav-bar page switches. */
   var viewReady = false;
 
@@ -218,7 +229,14 @@
     // strings are the exact values in shared/src/ipc.ts; the preload whitelist
     // is generated from that same table, so no bridge change is needed.
     SUBTITLE_PREVIEW: 'ytvdlt:subtitle:preview',
-    SUBTITLE_PREVIEW_CANCEL: 'ytvdlt:subtitle:previewCancel'
+    SUBTITLE_PREVIEW_CANCEL: 'ytvdlt:subtitle:previewCancel',
+    // TXT batch import (append-only): exact wire strings from shared/src/ipc.ts.
+    TXT_IMPORT_PICK: 'ytvdlt:txtImport:pick',
+    TXT_IMPORT_ENQUEUE: 'ytvdlt:txtImport:enqueue',
+    // Playlist batch import (append-only): exact wire strings from shared/src/ipc.ts.
+    PLAYLIST_PREVIEW: 'ytvdlt:playlist:preview',
+    PLAYLIST_PREVIEW_CANCEL: 'ytvdlt:playlist:previewCancel',
+    PLAYLIST_BATCH_ENQUEUE: 'ytvdlt:playlist:batchEnqueue'
   };
 
   /** Thin wrapper over the preload surface: `{ok:false, code, message}` on failure
@@ -593,6 +611,96 @@
     else subtitleLoading = false;
   }
 
+  function mountTxtImport(factory) {
+    if (txtImport !== null || !factory || typeof factory.create !== 'function') return;
+    var anchor = doc.getElementById('queue-paste-form');
+    if (anchor === null) return;
+    txtImport = factory.create({
+      doc: doc,
+      t: t,
+      call: call,
+      notify: notify,
+      // The batch must inherit the SAME type / quality / audio choices a
+      // normal single download would use; the main process reads the rest of
+      // the settings (paths / subtitles / network) from ConfigStore.
+      getChoice: function () {
+        return {
+          kind: choice.kind,
+          videoQuality: choice.videoQuality,
+          audioQuality: choice.audioQuality,
+          audioFormat: choice.audioFormat
+        };
+      },
+      refresh: refresh
+    });
+    txtImport.mount(anchor, '../../styles/txt-import.css');
+  }
+
+  function ensureTxtImport() {
+    if (txtImport !== null || txtImportLoading) return;
+    var force = param('txtimport', '') === '1';
+    if (!live.active && !force) return;
+    var existing = global.YTVDLT && global.YTVDLT.txtImport;
+    if (existing) { mountTxtImport(existing); return; }
+    txtImportLoading = true;
+    var tag = doc.createElement('script');
+    tag.setAttribute('src', '../../txt-import/txt-import.js');
+    tag.addEventListener('load', function () {
+      txtImportLoading = false;
+      mountTxtImport(global.YTVDLT && global.YTVDLT.txtImport);
+    });
+    tag.addEventListener('error', function () { txtImportLoading = false; });
+    if (doc.head && typeof doc.head.appendChild === 'function') doc.head.appendChild(tag);
+    else txtImportLoading = false;
+  }
+
+  function mountPlaylistImport(factory) {
+    if (playlistImport !== null || !factory || typeof factory.create !== 'function') return;
+    var anchor = doc.getElementById('queue-paste-form');
+    if (anchor === null) return;
+    playlistImport = factory.create({
+      doc: doc,
+      t: t,
+      call: call,
+      notify: notify,
+      getChoice: function () {
+        return {
+          kind: choice.kind,
+          videoQuality: choice.videoQuality,
+          audioQuality: choice.audioQuality,
+          audioFormat: choice.audioFormat
+        };
+      },
+      refresh: refresh,
+      // Bypasses auto-detection: a failed probe can fall back to the normal
+      // single-download path without re-entering the playlist selector.
+      startSingleDownload: function (url) { enqueueSingleDownload(url); },
+      readUrl: function () {
+        var field = doc.getElementById('queue-url');
+        return field === null ? '' : String(field.value || '').trim();
+      }
+    });
+    playlistImport.mount(anchor, '../../styles/playlist-import.css');
+  }
+
+  function ensurePlaylistImport() {
+    if (playlistImport !== null || playlistImportLoading) return;
+    var force = param('playlist', '') === '1';
+    if (!live.active && !force) return;
+    var existing = global.YTVDLT && global.YTVDLT.playlists;
+    if (existing) { mountPlaylistImport(existing); return; }
+    playlistImportLoading = true;
+    var tag = doc.createElement('script');
+    tag.setAttribute('src', '../../playlists/playlist-import.js');
+    tag.addEventListener('load', function () {
+      playlistImportLoading = false;
+      mountPlaylistImport(global.YTVDLT && global.YTVDLT.playlists);
+    });
+    tag.addEventListener('error', function () { playlistImportLoading = false; });
+    if (doc.head && typeof doc.head.appendChild === 'function') doc.head.appendChild(tag);
+    else playlistImportLoading = false;
+  }
+
   /** The six flat DOWNLOAD_START keys, or `null` for the untouched old flow. */
   function currentSubtitleSelection() {
     return subtitlePicker === null ? null : subtitlePicker.getSelection();
@@ -623,7 +731,7 @@
     return payload;
   }
 
-  function startRealDownload(url) {
+  function enqueueSingleDownload(url) {
     if (enqueueing) return;
     if (!/^https?:\/\//i.test(url)) {
       notify(t('queue.notify.invalidUrl'));
@@ -654,6 +762,21 @@
       notify(t('queue.notify.enqueued', { n: Array.isArray(result.taskIds) ? result.taskIds.length : 0 }));
       refresh();
     });
+  }
+
+  /**
+   * Auto-detect a playlist URL on paste/submit. Everything else keeps the
+   * byte-identical single-download path above; a failed probe can still fall
+   * back to it from inside the selector.
+   */
+  function startRealDownload(url) {
+    if (enqueueing) return;
+    if (playlistImport !== null && typeof playlistImport.isPlaylistLike === 'function'
+      && playlistImport.isPlaylistLike(url)) {
+      playlistImport.open(url);
+      return;
+    }
+    enqueueSingleDownload(url);
   }
 
   // ---- D-83: 类型 / 清晰度控件 -------------------------------------------
@@ -1663,6 +1786,8 @@
 
   live.active = isLive();
   ensureSubtitlePicker();
+  ensureTxtImport();
+  ensurePlaylistImport();
   model.tab = TABS.indexOf(param('tab', 'all')) === -1 ? 'all' : param('tab', 'all');
   // `?kind=audio` starts on the audio tab (e2e case + deep-link friendly).
   setKind(param('kind', 'video') === 'audio' ? 'audio' : 'video');
@@ -1759,6 +1884,15 @@
     // Stage 5: test/smoke surface for the subtitle picker wiring.
     subtitlePicker: function () { return subtitlePicker; },
     mountSubtitlePicker: mountSubtitlePicker,
+    // TXT import: exposed for the packaged-app smoke driver / unit tests.
+    txtImport: function () { return txtImport; },
+    mountTxtImport: mountTxtImport,
+    ensureTxtImport: ensureTxtImport,
+    playlistImport: function () { return playlistImport; },
+    mountPlaylistImport: mountPlaylistImport,
+    ensurePlaylistImport: ensurePlaylistImport,
+    startRealDownload: startRealDownload,
+    enqueueSingleDownload: enqueueSingleDownload,
     downloadPayload: downloadPayload
   };
 })(typeof window === 'undefined' ? this : window);

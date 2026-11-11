@@ -228,6 +228,24 @@ describe('evaluateSubtitleOutcome · requested vs produced', () => {
     })).toBe('ok');
   });
 
+  it('D-132: embed + keepSubtitleFile=false is ok with embedded delivery and no sidecar', () => {
+    const probe = [{ path: M, kind: 'subtitle' as const, status: 'PASS' as const, detail: 'container carries 1 subtitle stream(s)' }];
+    const embeddedNoKeep = subtitle({ enabled: false, autoCaptions: true, embed: true, keepSubtitleFile: false });
+    // A real YouTube auto-caption download: subtitle embedded, yt-dlp removed
+    // the temporary sidecar → no missing subtitle, so this must be "ok".
+    expect(evaluateSubtitleOutcome({
+      subtitle: embeddedNoKeep, mediaInfo: media, links: [], attachments: probe,
+    })).toBe('ok');
+    // The user explicitly asked to KEEP the sidecar; it is absent → shortfall.
+    expect(evaluateSubtitleOutcome({
+      subtitle: { ...embeddedNoKeep, keepSubtitleFile: true }, mediaInfo: media, links: [], attachments: probe,
+    })).toBe('partial');
+    // Without a container probe an embed-only request is still unproven.
+    expect(evaluateSubtitleOutcome({
+      subtitle: embeddedNoKeep, mediaInfo: media, links: [],
+    })).toBe('missing');
+  });
+
   it('treats embed-only intent as missing until a container probe confirms delivery', () => {
     const embeddedOnly = subtitle({ enabled: false, embed: true });
     expect(evaluateSubtitleOutcome({ subtitle: embeddedOnly, mediaInfo: media, links: [] })).toBe('missing');

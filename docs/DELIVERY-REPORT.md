@@ -1,14 +1,15 @@
-# YTVDLT 字幕功能交付报告（未发版 · 目标 0.3.0）
+# YTVDLT 交付报告（未发版 · 目标 0.3.0）
 
-> 交付日期：2026-11-10 ｜ 交付人：Buddy ｜ 接收人：LeoLee
-> 状态：**源码已提交（`57a1f3d`），未打包、未发版、未升版本号（仓库仍为 0.2.9）**。本节是交付口径与验收结论，不是发布记录；发版时按 §7 的十进制进位规则取 `0.3.0`，并另在 `CHANGELOG.md` 补版本行、在 Release 用英文说明（铁律 14）。
+> 交付日期：2026-11-11 ｜ 交付人：Buddy ｜ 接收人：LeoLee
+> 状态：字幕功能已提交（`57a1f3d` / `3abc4b0`）；TXT 批量导入（D-129）、播放列表批量（D-130）、审查修复（D-131）、真实在线验证与 `subtitleOutcome` 修复（D-132）随本文件所在提交一起入库。**未打包、未发版、未升版本号（仓库仍为 0.2.9）**。本节是交付口径与验收结论，不是发布记录；发版时按 §7 的十进制进位规则取 `0.3.0`，并另在 `CHANGELOG.md` 补版本行、在 Release 用英文说明（铁律 14）。
 
 ## 一、交付物
 
 | 交付物 | 位置 | 说明 |
 |---|---|---|
-| 源码提交 | `main` @ `57a1f3d` | 80 文件，+8913 / −97 |
-| 决策记录 | `docs/DECISIONS.md` D-126 / D-127 / D-128 | 入队语义、产物与验证、UI 接入 |
+| 源码提交 | `main` @ `57a1f3d` + 本文件所在提交 | 字幕功能 80 文件；批量导入 / 播放列表 / 审查修复 / 在线验证见 D-129…D-132 |
+| 决策记录 | `docs/DECISIONS.md` D-126…D-132 | 字幕入队与产物、TXT 导入、播放列表批量、`keepSubtitleFile` 修复、在线验收与 `subtitleOutcome` 修复 |
+| 测试入口 | `npm test`（离线）/ `npm run test:online`（真实国际网） | 在线套件默认排除，不显式运行不联网 |
 | 安装包 | **无** | 本轮未打包（铁律 9：非点名不打包） |
 
 ## 二、逐项落地
@@ -21,6 +22,8 @@
 | 4 | 产物与关联 | 13 种字幕扩展名统一分类；独立字幕清单精确取路径（不扫目录、不猜名）；`subtitleFiles` 记录 language / ext / source / mediaPath；`subtitleOutcome` 做「所选 → 实际」对账 |
 | 5 | 验证 | C1–C12 只对主媒体执行，字幕永不进 ffprobe 主流程；附件诊断（格式头、HTML 错误页、内嵌轨数）为咨询结论，不把字幕缺陷判成视频损坏 |
 | 6 | 失败与提示 | 取消/关闭/Esc 只释放票据不建任务；过期、已消费、URL 不匹配、语言不存在、音频内嵌均有稳定码与中英文案；仅自动字幕的语言未开开关时阻断确认并提示 |
+| 7 | TXT 清单批量导入 | 主进程原生选择器 + 严格 UTF-8 / 1 MiB / 2000 行 / 200 URL 上限；一次性票据（10 min / 8 个 / 单次消费）；复用 `applyFormatChoice → buildDownloadRequest → resolveTempDirFor → TaskQueue.enqueueBatch()`，每条独立 taskId / tempDir；`requested / enqueued / failed` 如实回报（D-129） |
+| 8 | 播放列表自动识别与批量下载 | 真 `engine.probePlaylist()` + 票据（5 min / 单次 / URL 绑定）；renderer DTO 无条目 URL；声明 / 实际解析 / 可下载 / 不可访问四数如实；默认全选、一次确认、唯一 taskId + 独立 tempDir；真实 YouTube 20/20 解析、3 条下载全部 `Completed`（D-130 / D-132） |
 
 ## 三、验收结果
 
@@ -30,7 +33,7 @@
 | 全量单测 + 契约 | 106 文件 / **1464 项通过**，0 失败 |
 | 离线集成（真实随包 yt-dlp / ffmpeg / ffprobe） | 10 文件 / **26 项通过**（含取消、重试哈希、双语字幕产物、argv 解析） |
 | 截图 E2E | **31/31 case + 反例 5/5**，基线零重建、像素差 0 px |
-| 真实站点（YouTube） | ① `gUgfS1vkMxw` 预览：3 语言，人工 7 种格式 + 自动 vtt ② `aOEXPeO-nnk`（仅自动字幕）：未开开关时确认被阻断，开启后下载 `Completed`，落 `.en.vtt` 且 `source=automatic`、`subtitleOutcome=ok` |
+| 真实站点（YouTube） | **已在线实测（2026-11-11，D-132）**：① 播放列表 `PLpODSd__yLPULp9c7RaFXF4W8yxRnMZgd`（Learning English Podcast）真解析 **20 / 20** 条（declared=fetched=20、available=20、unavailable=0、truncated=false、总时长 19,505 s），renderer DTO 序列化后无任何条目 URL；选 **3 条** 360p 批量入队 → 3 个独立 taskId / 独立 tempDir / 全部 `Completed`，产物 17.1 / 29.6 / 33.5 MB `.webm`，标题与时长逐条对应；② 单视频 `DTu4yvmc0Fc`（实际标题「DeepSeek Harness Just Changed AI Forever」，356 s，public；人工字幕 0 种 / 自动字幕 157 种）→ 自动字幕 `en` + 内嵌 + `keepSubtitleFile=false` → `Completed`，MKV 9.6 MB，`ffprobe` 内嵌 1 条 `subrip` eng 轨，输出目录无外置字幕；③ 本轮测量暴露并修复 `subtitleOutcome` 误判（D-132）。证据：`reports/live-audit/*.json`、`reports/l2-tmp/youtube-live-*`。**范围限制：只测 3 条、只覆盖自动字幕、未走 Electron 窗口 UI、未打包安装版** |
 | 真实 UI 全链路（本地夹具） | 外置：`Completed`，mp4 + 2 个 vtt 且记录关联正确；内嵌：`Completed`，MKV 内 ffprobe 2 条 `webvtt` 轨（eng/zho） |
 | `check-layering` / `frozen-gate` / `request.ts` 冻结 | 0 violations / exit 0 / 无差异 |
 | `handoff-check.mjs` | **exit 1**：M5 验收与覆盖率证据早于最后一次代码提交，属证据新鲜度问题，未伪造时间戳 |
@@ -38,13 +41,14 @@
 ## 四、已知边界
 
 1. **「最低画质」当前是空选项（未修，待决策）**：`core/src/decision/download-plan.ts` 的 `RESOLUTION_QUALITIES` 只映射 2160p…360p，没有 `lowest`。实测选「最低画质」仍拉最高分辨率（24:52 视频产生约 980 MB 4K 临时文件，且 argv 无 `-S res:`）。修法需先定语义（`res:360` 或 `+res`），并补 plan 层回归。
-2. **仅代理出网的环境无法探测**：`yt-dlp-engine.ts::spawnBase` 只注入 `PATH`，不透传 `HTTP_PROXY`/`HTTPS_PROXY`，界面也无代理设置。本机直连可用故验收成立。
+2. **仅代理出网的环境无法探测**：`yt-dlp-engine.ts::spawnBase` 只注入 `PATH`，不透传 `HTTP_PROXY`/`HTTPS_PROXY`（配置域 `network.proxy` 仍会生成 `--proxy` argv）。本轮未在任何代理环境下验证，此处不构成在线验收结论。
 3. 独立字幕重试未实现：引擎非零退出仍整体 `Error`，`restart` 重跑整个任务（可能产生副本名），不能用忽略退出码伪装成功。
 4. 同语言人工 / 自动不能分别下载两份，界面只提供「包含自动字幕」。
-5. 内嵌强制 MKV，不承诺保留 MP4；`keepSubtitleFile=false` 时仍会保留外置字幕文件（UI 已提示）。
+5. 内嵌强制 MKV，不承诺保留 MP4；`keepSubtitleFile=false` **已在 D-131 修复**：内嵌完成后按本任务 yt-dlp 精确报告的字幕清单，把独立字幕副本移入回收站，并同步更新任务产物、字幕关联与历史记录；UI 提示已改为「未勾选保留的独立字幕副本会移入回收站，可自行恢复」。**真实 YouTube 自动字幕场景下 yt-dlp 嵌入后会自行删除外置副本，输出目录无残留（`_recycled` 为空）；人工字幕场景的回收动作由离线真实引擎 `<track>` 用例证明（回收站收到 2 个字幕文件）。** 失败／取消／异常退出时的残留仍未验证。
 6. 未打包、未做安装/升级/卸载验证；播放器对 `webvtt` 内嵌轨的识别未测；需登录或 Cookie 的受限视频未测。
 7. 本轮未重跑覆盖率（本机 safe-delete 守卫限制），不引用历史 85.99% 作为本次结果。
-8. 下一决策编号从 **D-129** 起。
+8. 下一决策编号原写 D-129；**口径订正**：D-129 / D-130 为批量导入与播放列表批量，D-131 为独立审查修复，D-132 为真实在线验收与 `subtitleOutcome` 修复，后续从 **D-133** 起。
+9. **口径变更记录（D-131 → D-132）**：第 3 节「真实站点（YouTube）」曾因「只有文档、没有任何日志／产物／测试记录」被 2026-11-11 独立审查改为「未验证」；随后业主放行国际网，完成真实在线测试并补齐证据，现改为「已在线实测」并注明范围限制。**前后两次结论都不矛盾：当时确实无证据，现在确实有证据。** 本次只以 `reports/live-audit/` 与 `reports/l2-tmp/youtube-live-*` 为准，不沿用旧口径。`keepSubtitleFile=false` 的实现缺陷已修复（D-131），`ipc-bridge.js` 通道登记与 `TXT_IMPORT_ENQUEUE` 的 `kind` 校验已补齐。详见 `docs/DECISIONS.md` D-131 / D-132 与工作区 `handoff/INDEPENDENT_CODE_AUDIT_REPORT.md`、`handoff/ONLINE_VERIFICATION_REPORT.md`。
 
 ---
 

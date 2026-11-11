@@ -98,6 +98,10 @@ filesystem. `scripts/check-layering.mjs` enforces the boundary.
 - Paste a link, choose **video** or **audio**, pick a resolution preset
   (best / 2160p / 1440p / 1080p / 720p / 480p / 360p / lowest) or an audio
   bitrate (192 / 128 / 64 / 32 kbps, with optional MP3 or M4A transcode).
+- Batch import: paste a TXT list (one URL per line) or a playlist link. A
+  playlist is probed live, previewed and selected by default, then confirmed
+  once into N independent tasks — each with its own cancel / retry.
+  (D-129, D-130)
 - Real filenames: `--restrict-filenames` is no longer silently enabled, so CJK
   titles, spaces and punctuation survive. Existing configs are migrated
   (schema v1 → v2). A repeated download is saved as a separate ` (1)` / ` (2)`
@@ -195,8 +199,10 @@ never installs silently. When the installer is ready the button switches to
 
 Stated plainly rather than glossed over:
 
-- The playlist batch dialog and the per-format picker are still fixture-driven
-  previews; real batch enqueue is not wired to them yet.
+- The live playlist batch flow (probe → preview → select all by default → one
+  confirmation → N independent tasks) is wired to the real engine. The legacy
+  M3 playlist picker and the per-format picker remain fixture-driven previews
+  and are not part of the production batch path.
 - The installer is unsigned; `Engine: unknown` can still appear in an error
   report; post-processing stages have no speed / ETA because the engine does
   not report one.

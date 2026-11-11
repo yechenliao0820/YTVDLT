@@ -1,0 +1,108 @@
+/* TXT import dialog (live mode only; never loaded by the frozen static pages).
+ * Uses the shared theme tokens so dark / accent presets apply without a second
+ * stylesheet. Fallbacks keep it readable if the tokens are not present yet. */
+.txt-import-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(9, 16, 24, 0.55);
+}
+.txt-import-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 100%);
+  max-height: min(82vh, 760px);
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 14px;
+  background: var(--panel, #ffffff);
+  color: var(--ink, #1c2733);
+  box-shadow: var(--shadow, 0 12px 32px rgba(0, 0, 0, 0.28));
+  font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+.txt-import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line, #d7dee7);
+}
+.txt-import-title { font-size: 17px; font-weight: 650; }
+.txt-import-icon {
+  border: 0;
+  background: transparent;
+  color: var(--muted, #6b7785);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+.txt-import-body { padding: 16px 20px; overflow: auto; flex: 1 1 auto; }
+.txt-import-file { display: flex; gap: 8px; align-items: baseline; margin-bottom: 12px; }
+.txt-import-file-label { color: var(--muted, #6b7785); }
+.txt-import-file-name { font-weight: 600; word-break: break-all; }
+.txt-import-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.txt-import-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 9px;
+  background: var(--chip-bg, #f6f8fa);
+}
+.txt-import-stat-value { font-size: 20px; font-weight: 700; }
+.txt-import-stat-label { color: var(--muted, #6b7785); font-size: 12px; }
+.txt-import-stat.ok .txt-import-stat-value { color: var(--ok, #16794f); }
+.txt-import-stat.warn .txt-import-stat-value { color: var(--danger, #b42332); }
+.txt-import-message { margin: 6px 0; padding: 8px 10px; border-radius: 8px; }
+.txt-import-message.warn { background: var(--warn-bg, #fff5d6); color: var(--ink, #1c2733); }
+.txt-import-message.ok { background: var(--accent-soft, #e5f0ff); }
+.txt-import-list-title { display: block; margin: 12px 0 6px; font-weight: 650; }
+.txt-import-list {
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 9px;
+  max-height: 260px;
+  overflow: auto;
+}
+.txt-import-row {
+  display: grid;
+  grid-template-columns: 42px 88px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line, #d7dee7);
+}
+.txt-import-row:last-child { border-bottom: 0; }
+.txt-import-line { color: var(--muted, #6b7785); font-variant-numeric: tabular-nums; }
+.txt-import-badge { font-size: 12px; color: var(--muted, #6b7785); }
+.txt-import-row[data-status="valid"] .txt-import-badge { color: var(--ok, #16794f); }
+.txt-import-row[data-status="invalid"] .txt-import-badge,
+.txt-import-row[data-status="too-long"] .txt-import-badge,
+.txt-import-row[data-status="playlist"] .txt-import-badge { color: var(--danger, #b42332); }
+.txt-import-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.txt-import-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line, #d7dee7);
+}
+.txt-import-btn {
+  padding: 8px 16px;
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink, #1c2733);
+  cursor: pointer;
+}
+.txt-import-btn.primary { background: var(--accent, #1d63b8); border-color: var(--accent, #1d63b8); color: #fff; }
+.txt-import-btn[disabled] { opacity: 0.45; cursor: not-allowed; }

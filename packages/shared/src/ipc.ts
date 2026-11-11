@@ -66,6 +66,17 @@ export const IPC_CHANNELS = {
   // contracts; nothing here changes them.
   SUBTITLE_PREVIEW: 'ytvdlt:subtitle:preview',
   SUBTITLE_PREVIEW_CANCEL: 'ytvdlt:subtitle:previewCancel',
+  // TXT batch import (append-only). Two channels on purpose: PICK takes NO
+  // payload (the renderer may never name a local path), ENQUEUE takes ONLY the
+  // opaque import id + the existing download enums (never a URL list).
+  TXT_IMPORT_PICK: 'ytvdlt:txtImport:pick',
+  TXT_IMPORT_ENQUEUE: 'ytvdlt:txtImport:enqueue',
+  // Playlist batch import (append-only). The M3 `PLAYLIST_ENQUEUE` above stays
+  // untouched for its frozen L1 contract; these three carry the live probe,
+  // its ticket release and the ticket-bound batch confirmation.
+  PLAYLIST_PREVIEW: 'ytvdlt:playlist:preview',
+  PLAYLIST_PREVIEW_CANCEL: 'ytvdlt:playlist:previewCancel',
+  PLAYLIST_BATCH_ENQUEUE: 'ytvdlt:playlist:batchEnqueue',
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

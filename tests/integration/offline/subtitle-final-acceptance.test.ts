@@ -50,8 +50,12 @@ async function probe(ctx: L2Context, path: string): Promise<ProbeStream[]> {
   return (JSON.parse(result.stdout) as { streams: ProbeStream[] }).streams;
 }
 
-async function runCase(name: string, tracks: string, routes: MockRoute[], configure: (base: DownloadRequest) => DownloadRequest) {
-  const ctx = await createL2Context(`subtitle-final-${name}`);
+async function runCase(
+  name: string, tracks: string, routes: MockRoute[],
+  configure: (base: DownloadRequest) => DownloadRequest,
+  recycleSubtitles = false,
+) {
+  const ctx = await createL2Context(`subtitle-final-${name}`, null, { recycleSubtitles });
   const observed = observeProcesses(ctx);
   const verify = ctx.verifier.verify.bind(ctx.verifier);
   ctx.verifier.verify = async (...args) => {
@@ -158,6 +162,40 @@ describe('subtitle-final-acceptance · bundled processes and physical artifacts'
     expect(streams[0]!.streams.some((stream) => stream.codec_type === 'video')).toBe(true);
     expect(record.subtitleFiles).toHaveLength(2);
     expect(record.subtitleOutcome).toBe('ok');
+  }, 180_000);
+
+  it('D-131: keepSubtitleFile=false leaves no standalone sidecar but keeps both embedded tracks', async () => {
+    const { ctx, record, media, streams, disk, result } = await runCase(
+      'd131-embed-no-keep',
+      track('en', '/en.vtt') + track('zh-Hans', '/zh.vtt'),
+      [
+        { path: '/en.vtt', body: vtt('English'), contentType: 'text/vtt' },
+        { path: '/zh.vtt', body: vtt('Chinese'), contentType: 'text/vtt' },
+      ],
+      (base) => ({
+        ...withSubtitles(base),
+        subtitle: {
+          ...withSubtitles(base).subtitle,
+          languages: 'en,zh-Hans', embed: true, keepSubtitleFile: false,
+        },
+      }),
+      true,
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(record.state).toBe('Completed');
+    expect(media).toHaveLength(1);
+    expect(basename(media[0]!.path)).toMatch(/\.mkv$/);
+    // The user's output/temp folders contain no standalone subtitle file.
+    expect(disk.filter((entry) => /\.(srt|vtt|ass)$/i.test(entry.path))).toEqual([]);
+    // The subtitles were really delivered — as MKV streams, not as junk files.
+    expect(streams[0]!.streams.filter((stream) => stream.codec_type === 'subtitle')).toHaveLength(2);
+    // Queue state stays consistent with what is physically on disk.
+    expect(record.artifacts).toEqual([media[0]!.path]);
+    expect(record.subtitleFiles).toEqual([]);
+    expect(record.subtitleOutcome).toBe('ok');
+    // Cleanup is a recycle-bin move: the bytes are recoverable, not destroyed.
+    const recycled = await readdir(join(ctx.dir, '_recycled'));
+    expect(recycled.filter((name) => /\.(srt|vtt)$/i.test(name))).toHaveLength(2);
   }, 180_000);
 
   it.each([true, false])('observes real move templates with subtitles=%s without changing queue spawning', async (hasSubtitles) => {

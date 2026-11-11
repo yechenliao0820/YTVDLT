@@ -12,6 +12,7 @@
 import type {
   DownloadEngine, EngineEvent, EngineStage, TaskRecord, TaskEvent, TaskState, AppError,
   CorePorts, HistoryEntry, MediaInfo, ExpectedArtifactManifest, TaskSnapshot,
+  SubtitleFileLink,
 } from '@ytvdlt/shared';
 import { isForwardStage } from '@ytvdlt/shared';
 import type { ICancelHandle, IArtifactVerifier, IHistoryStore, ITaskQueue, ITaskStore } from '../ports.js';
@@ -20,7 +21,7 @@ import { resolveDownloadPlan } from '../decision/download-plan.js';
 import { applyCopySuffix, nextCopySuffix } from '../path-resolver/copy-suffix.js';
 import {
   buildSubtitleLinks, classifyArtifact, evaluateSubtitleOutcome,
-  primaryMediaArtifact, subtitleArtifactsOf,
+  primaryMediaArtifact, subtitleArtifactsOf, mediaArtifactsOf,
 } from '../artifact-classify/index.js';
 import { assertTransition } from './state-machine.js';
 
@@ -44,6 +45,19 @@ export interface TaskQueueDeps {
    * value <= 0 persists on every progress event (L0 tests use 0).
    */
   persistIntervalMs?: number;
+  /**
+   * D-131 (append-only): move the standalone subtitle files that were created
+   * ONLY to feed `--embed-subs` into the OS recycle bin when the user chose
+   * `keepSubtitleFile=false`. Receives the exact paths this task's own yt-dlp
+   * process reported and MUST return the paths it actually removed; anything
+   * it could not remove stays in the task's artifact list. Absent = the
+   * pre-D-131 behaviour (no cleanup), which keeps core/L0 tests side-effect
+   * free and lets a build without a recycle-bin adapter degrade safely.
+   *
+   * Never a permanent unlink: projects' §0 rule sends every deletion through
+   * the recycle bin so a file that turns out to be pre-existing is recoverable.
+   */
+  recycleSubtitleFiles?: (paths: readonly string[]) => Promise<readonly string[]>;
 }
 
 /** Hard ceiling: more slots than this only thrashes the network + disk. */
@@ -58,6 +72,11 @@ export function normalizeConcurrency(value: unknown): number {
 }
 
 const nowIso = (ports: CorePorts): string => ports.clock.nowIso();
+
+/** Windows path equality: case-insensitive, slash-insensitive. */
+function pathKeyOf(path: string): string {
+  return path.replace(/\//g, '\\').toLowerCase();
+}
 
 export class TaskQueue implements ITaskQueue {
   private readonly deps: TaskQueueDeps;
@@ -345,8 +364,23 @@ export class TaskQueue implements ITaskQueue {
         return;
       }
 
+      // --- 3b) D-131: honour keepSubtitleFile=false AFTER verification -------
+      // `--embed-subs` needs the standalone subtitle file while ffmpeg runs and
+      // the bundled yt-dlp (2026.10.26 --help) has no "delete after embedding"
+      // switch. Before D-131 the flag only decided whether to ADD `--write-subs`,
+      // so the checkbox never affected the files left on disk. The attachment
+      // probes above need the real bytes, hence cleanup runs only now.
+      // `subtitleOutcome` is deliberately NOT recomputed: it answers "did this
+      // run deliver what was requested", not "which files survive the user's
+      // cleanup preference".
+      const kept = await this.discardEmbeddedSubtitleArtifacts(
+        record, outcome.artifacts, subtitleFiles, subtitlePlan,
+      );
+      record.artifacts = [...kept.artifacts];
+      record.subtitleFiles = kept.links;
+
       // --- 4) history then Completed ---
-      const entry = buildHistoryEntry(record, outcome.artifacts, this.deps.ports);
+      const entry = buildHistoryEntry(record, kept.artifacts, this.deps.ports);
       const addResult = await this.deps.history.add(entry, { privateMode: record.privateMode });
       if (addResult.added === false && addResult.reason === 'duplicate') {
         // D-101: the artifact passed every verification criterion and exists on
@@ -365,6 +399,68 @@ export class TaskQueue implements ITaskQueue {
       // A freed slot is immediately offered to the FIFO (auto-fill, ①).
       this.pump();
     }
+  }
+
+  /**
+   * D-131: remove the throw-away standalone subtitle files produced for an
+   * embedded-subtitle download when the user unchecked "keep standalone files".
+   *
+   * Safety rules (each one exists to prevent deleting something that is not
+   * ours):
+   *  1. ONLY `embedSubs && !keepSubtitleFile`. An external subtitle IS the
+   *     requested product of a non-embedded download and is never recycled.
+   *  2. ONLY paths this task's own yt-dlp process printed (`subtitleFiles`).
+   *     No directory scan, no glob, no guessed basename.
+   *  3. ONLY links attached to one of THIS task's media files, AND with a
+   *     proven `<media>.<lang>.<ext>` name. A stale file from an earlier run
+   *     (different ` (n)` copy suffix) cannot prove ownership and is spared.
+   *  4. ONLY paths not referenced by another live task record.
+   *  5. The caller-side adapter moves to the OS recycle bin, never unlinks.
+   *     `error` outcomes keep the file AND the record; a cleanup failure can
+   *     never fail a download that already passed verification.
+   */
+  private async discardEmbeddedSubtitleArtifacts(
+    record: TaskRecord,
+    artifacts: readonly string[],
+    links: readonly SubtitleFileLink[],
+    plan: ReturnType<typeof resolveDownloadPlan>,
+  ): Promise<{ artifacts: readonly string[]; links: readonly SubtitleFileLink[] }> {
+    const unchanged = { artifacts, links };
+    const recycle = this.deps.recycleSubtitleFiles;
+    if (recycle === undefined || !plan.embedSubs || plan.keepSubtitleFile) return unchanged;
+    if (links.length === 0) return unchanged;
+
+    const ownMedia = new Set(mediaArtifactsOf(artifacts));
+    const candidates = links
+      .filter((link) => ownMedia.has(link.mediaPath))
+      .filter((link) => link.language !== '')
+      .filter((link) => !this.isArtifactSharedWithOtherTasks(link.path, record.id))
+      .map((link) => link.path);
+    if (candidates.length === 0) return unchanged;
+
+    let removed: readonly string[];
+    try {
+      removed = await recycle(candidates);
+    } catch {
+      // Cleanup is cosmetic; the verified media is already on disk.
+      return unchanged;
+    }
+    const removedKeys = new Set(removed.map(pathKeyOf));
+    if (removedKeys.size === 0) return unchanged;
+    return {
+      artifacts: artifacts.filter((path) => !removedKeys.has(pathKeyOf(path))),
+      links: links.filter((link) => !removedKeys.has(pathKeyOf(link.path))),
+    };
+  }
+
+  /** D-131: a second task may legitimately reference the same physical file. */
+  private isArtifactSharedWithOtherTasks(path: string, ownId: string): boolean {
+    const key = pathKeyOf(path);
+    for (const [id, other] of this.records) {
+      if (id === ownId) continue;
+      if ((other.artifacts ?? []).some((candidate) => pathKeyOf(candidate) === key)) return true;
+    }
+    return false;
   }
 
   /**

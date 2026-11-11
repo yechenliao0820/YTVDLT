@@ -21,7 +21,14 @@
     // Stage 5 (append-only): live, on-demand subtitle preview. The queue page
     // has its own CHANNELS table, but the symbolic names must also be known
     // here so no caller can be rejected by the command whitelist (§5).
-    'SUBTITLE_PREVIEW', 'SUBTITLE_PREVIEW_CANCEL'
+    'SUBTITLE_PREVIEW', 'SUBTITLE_PREVIEW_CANCEL',
+    // D-129 / D-130 (append-only): the two batch-import surfaces. Their UI
+    // components call `queue.js::call()` directly today, but §5 requires all
+    // THREE cable tables to agree. Registering them here prevents a future
+    // dialog / renderer caller from being silently rejected with
+    // `command-not-allowed` (the classic "button does nothing" failure).
+    'TXT_IMPORT_PICK', 'TXT_IMPORT_ENQUEUE',
+    'PLAYLIST_PREVIEW', 'PLAYLIST_PREVIEW_CANCEL', 'PLAYLIST_BATCH_ENQUEUE'
   ];
 
   function bridge() {
@@ -55,7 +62,13 @@
     DOWNLOAD_START: 'ytvdlt:download:start',
     // Stage 5: exact wire strings from shared/src/ipc.ts (append-only).
     SUBTITLE_PREVIEW: 'ytvdlt:subtitle:preview',
-    SUBTITLE_PREVIEW_CANCEL: 'ytvdlt:subtitle:previewCancel'
+    SUBTITLE_PREVIEW_CANCEL: 'ytvdlt:subtitle:previewCancel',
+    // D-129 / D-130: exact wire strings from shared/src/ipc.ts (append-only).
+    TXT_IMPORT_PICK: 'ytvdlt:txtImport:pick',
+    TXT_IMPORT_ENQUEUE: 'ytvdlt:txtImport:enqueue',
+    PLAYLIST_PREVIEW: 'ytvdlt:playlist:preview',
+    PLAYLIST_PREVIEW_CANCEL: 'ytvdlt:playlist:previewCancel',
+    PLAYLIST_BATCH_ENQUEUE: 'ytvdlt:playlist:batchEnqueue'
   };
 
   /** Whitelisted, synchronous-safe command dispatch. Never builds a command. */

@@ -1,0 +1,120 @@
+/* Playlist batch selector (live mode only; frozen static baselines never load
+ * this file). Uses the shared theme tokens so dark / accent presets apply. */
+.pl-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 92;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(9, 16, 24, 0.55);
+}
+.pl-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 100%);
+  max-height: min(86vh, 820px);
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 14px;
+  background: var(--panel, #ffffff);
+  color: var(--ink, #1c2733);
+  box-shadow: var(--shadow, 0 12px 32px rgba(0, 0, 0, 0.28));
+  font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+.pl-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line, #d7dee7);
+}
+.pl-title { font-size: 17px; font-weight: 650; }
+.pl-icon {
+  border: 0;
+  background: transparent;
+  color: var(--muted, #6b7785);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+.pl-body { padding: 16px 20px; overflow: auto; flex: 1 1 auto; }
+.pl-name-big { font-size: 16px; font-weight: 650; margin-bottom: 12px; word-break: break-word; }
+.pl-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.pl-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 9px;
+  background: var(--chip-bg, #f6f8fa);
+}
+.pl-stat-value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.pl-stat-label { color: var(--muted, #6b7785); font-size: 12px; }
+.pl-stat.ok .pl-stat-value { color: var(--ok, #16794f); }
+.pl-stat.warn .pl-stat-value { color: var(--danger, #b42332); }
+.pl-message { margin: 6px 0; padding: 8px 10px; border-radius: 8px; }
+.pl-message.warn { background: var(--warn-bg, #fff5d6); color: var(--ink, #1c2733); }
+.pl-message.ok { background: var(--accent-soft, #e5f0ff); }
+.pl-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0;
+  font-weight: 600;
+}
+.pl-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.pl-btn {
+  padding: 7px 14px;
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink, #1c2733);
+  cursor: pointer;
+}
+.pl-btn.primary { background: var(--accent, #1d63b8); border-color: var(--accent, #1d63b8); color: #fff; }
+.pl-btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+#pl-search {
+  flex: 1 1 220px;
+  min-width: 160px;
+  padding: 7px 10px;
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink, #1c2733);
+}
+.pl-list {
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 9px;
+  max-height: 340px;
+  overflow: auto;
+}
+.pl-row {
+  display: grid;
+  grid-template-columns: 22px 86px minmax(0, 1fr) 90px;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line, #d7dee7);
+  cursor: pointer;
+}
+.pl-row:last-child { border-bottom: 0; }
+.pl-row[data-available="false"] { opacity: 0.6; cursor: not-allowed; }
+.pl-row[data-selected="true"] { background: var(--accent-soft, #e5f0ff); }
+.pl-no { color: var(--muted, #6b7785); font-variant-numeric: tabular-nums; }
+.pl-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-meta { color: var(--muted, #6b7785); text-align: right; font-variant-numeric: tabular-nums; }
+.pl-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line, #d7dee7);
+}

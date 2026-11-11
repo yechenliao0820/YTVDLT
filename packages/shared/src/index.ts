@@ -32,3 +32,5 @@ export * from './subtitle-preview.js';
 // Stage 4 (append-only): subtitle artifacts produced by a task, their link to
 // the media, and the requested-vs-produced outcome.
 export * from './subtitle-artifact.js';
+// Playlist batch import (append-only): display-safe preview DTO + ticket codes.
+export * from './playlist-preview.js';

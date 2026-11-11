@@ -14,6 +14,7 @@
     "test:unit": "node scripts/run-tests.mjs unit",
     "test:contract": "node scripts/run-tests.mjs contract",
     "test:integration:offline": "node scripts/run-tests.mjs integration",
+    "test:online": "vitest run --config vitest.online.config.ts",
     "check-runtime": "node --import tsx scripts/check-runtime.mjs",
     "fetch:runtime": "node scripts/fetch-runtime.mjs",
     "u3:verify": "node scripts/u3-verify.mjs",

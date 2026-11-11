@@ -151,6 +151,9 @@ ui（零依赖） ← preload ← apps/desktop
 | **主题 / 强调色 / 动效全局状态与持久化** | `packages/ui/src/theme/theme.js`（`set/sync/listen/state`）、`pages/settings/settings.js`、`main/m5-channels.ts::SETTINGS_GET/SET` |
 | **本地文件状态探测 / 删除任务时文件已不存在 / 打开文件与打开文件夹反馈** | `apps/desktop/src/main/local-file-status.ts`（errno 分类 + 短 TTL 缓存 + force 重查）、`apps/desktop/src/main/adapters/local-file-status-port.ts`（真实 `stat` + 幂等回收）、`main/m5-channels.ts::TASK_ACTION` / `TASK_LIST`、`core/src/task-detail/task-detail.ts::open`、`ui/src/pages/queue/queue.js::fileStateKey` / `openActionMessage` / `performRemoval`；卡片「打开文件」按钮**只在 live 模式注入**（静态预览不注入，保住冻结基线）；原理见 §9 坑 22 |
 | **响应式布局（视口宽高驱动）** | `packages/ui/src/styles/layout.css`（`--ui-step` + 高特异性覆盖）；`ytvdlt.css` 仍是 M3 固定画幅，**不要改它** |
+| **TXT 清单批量导入（选文件 / 预览 / 确认入队）** | `packages/core/src/txt-import/parse.ts`（纯解析，URL 校验由外层注入）→ `apps/desktop/src/main/txt-import-service.ts`（一次性票据 + 真实计数）→ `apps/desktop/src/main/adapters/txt-file-picker.ts`（原生选择器 + 读）→ `main/txt-import-file.ts`（扩展名 / 大小 / 严格 UTF-8 纯解码）→ `m5-channels.ts::TXT_IMPORT_PICK/ENQUEUE` → `m4-host.ts::enqueueTxtBatch` → `TaskQueue.enqueueBatch()`；UI 在 `packages/ui/src/txt-import/txt-import.js`（**仅 live 模式注入**，静态基线不受影响） |
+| **播放列表批量下载（自动识别 / 预览 / 默认全选 / 一次确认）** | `core/src/playlist/preview-cache.ts`（票据）→ `apps/desktop/src/main/playlist-preview-service.ts`（真 `engine.probePlaylist()` + 脱敏 DTO）→ `m5-channels.ts::PLAYLIST_PREVIEW / PREVIEW_CANCEL / BATCH_ENQUEUE` → `m4-host.ts::runPlaylistBatch` → `buildPlaylistBatchRecordsByUrl()` → `TaskQueue.enqueueBatch()`；UI 在 `packages/ui/src/playlists/playlist-import.js`（**仅 live 模式注入**）。M3 fixture 对话框 `dialogs/playlist-selector.js` 与 `pages/queue/playlist-batch.html` 保持冻结不动 |
+| **内嵌字幕后按 `keepSubtitleFile` 清理外置副本** | `core/src/task-queue/task-queue.ts::discardEmbeddedSubtitleArtifacts`（本任务字幕清单 + 媒体归属 / 语言段 / 其它任务引用三重校验）→ `main/m5-host.ts::makeSubtitleRecycler` → `main/adapters/local-file-status-port.ts::createTrashFilesPort` → `shell.trashItem`（D-131；**删除只进回收站**） |
 
 ---
 
@@ -203,6 +206,10 @@ ui（零依赖） ← preload ← apps/desktop
 10. **`APP_INFO` 只读、零参数**（D-114）：主进程回 `app.getVersion()`。**页面上的版本号只能来自它**（`?v=` 仅作首帧提示，不得作为唯一来源，更不得在渲染层写死版本字符串——那正是 0.2.2 存活四个版本的机制）。
 11. **`TASK_LIST` 的 `fileStatus` / `dirStatus` 只是文件系统观察值，不是下载状态**（D-120）：主进程只对 `Completed` 任务按记录里的产物路径 `stat`，枚举固定 `present|missing|inaccessible|unavailable|invalid`；`refreshFileStatus: true` 只请求一次强制重查，**不接受任何路径**。渲染层绝不能因 `missing` 删除历史记录或把「已完成」改成「失败」。
 12. **`TASK_ACTION` 的 `withFiles` 是幂等清理**（D-120）：`TrashFilesPort` 逐路径返回 `trashed|missing|error`；只有 `error` 才保留记录并回 `FILE_DELETE_FAILED` + 真实原因，`missing` 一律继续删记录。被其它在册任务引用的同一物理文件跳过回收，删除范围不得扩大。`open-file` / `open-folder` 在操作前强制重查；`open-folder` 只看目录状态，文件缺失不阻止打开原目录。
+13. **`TXT_IMPORT_PICK` 零参数、`TXT_IMPORT_ENQUEUE` 不接受 URL**（D-129）：渲染层既不能传路径也不能传 URL 列表，只能传主进程颁发的一次性 `importId` 加现有下载枚举。文件选择与读取只发生在主进程 adapter，票据由 `txt-import-service.ts` 单次消费（TTL + 数量上限）。
+14. **导入预览的统计必须来自真实解析结果**（D-129）：部分入队失败按 `requested / enqueued / failed` 如实回报，禁止把 `PARTIAL_SUCCESS` 写成全部成功；无效、重复、播放列表行不进入批量。
+15. **`PLAYLIST_PREVIEW` 只收 url / previousPreviewId，`PLAYLIST_BATCH_ENQUEUE` 不收 PlaylistInfo**（D-130）：完整 `PlaylistInfo`（含条目 URL）只留在主进程 `PlaylistPreviewCache`；Renderer 拿到的 DTO 无任何 URL。票据绑定 URL、5 分钟 TTL、单次消费，取消 / 关闭 / 退出清理。M3 冻结的 `PLAYLIST_ENQUEUE` 仍在 fixture gateway，两条链路共用 `m4-host.ts::runPlaylistBatch()`。
+16. **播放列表生产 taskId 不用 `defaultBatchTaskId()`**（D-130）：`<playlistId>-<entryId>` 会让同一合集二次入队覆盖旧记录。新票据链路注入唯一 `makeTaskId`；旧 M3 链路和纯函数保持原样。预览显示「声明总数 / 实际解析 / 可下载 / 不可访问」四个数，只解析到 20 条不得写成 65 条。
 
 ---
 
@@ -292,6 +299,7 @@ ui（零依赖） ← preload ← apps/desktop
 | `scripts/handoff-check.mjs` | 把文档数字与仓库现状对账 |
 | `scripts/acceptance.mjs` | 里程碑验收，产出 `reports/acceptance-report-m*.json` |
 | `scripts/l3-smoke.mjs` | 打包应用在线烟测（CDP 驱动真实 IPC） |
+| `vitest.online.config.ts` / `npm run test:online` | **真实国际网**在线审计（D-132）：真播放列表探测 + 批量下载、真字幕内嵌。默认 `vitest.config.ts` 已排除 `tests/integration/online/**`，不显式运行不会联网；产物只落 `reports/l2-tmp/` |
 | `scripts/check-layering.mjs` | 分层依赖检查（core 不许 import `node:*`） |
 | `scripts/frozen-gate.mjs` | 冻结门控（`request.ts` 逐字节、package.json 白名单） |
 | `scripts/verify-artifact.mjs` | 单个媒体文件的产物校验 |
@@ -341,7 +349,7 @@ ui（零依赖） ← preload ← apps/desktop
 
 | 项 | 位置 |
 |---|---|
-| 播放列表批量对话框仍是 fixture，未接真实批量入队 | `ui/src/pages/queue/playlist-batch.js`、`ipc-gateway.ts` |
+| M3 播放列表选择对话框仍读录制 fixture、确认不创建任务（D-38 冻结保留）；**真实播放列表批量入口另见 §3「播放列表批量下载」**，两条链路互不替代 | `ui/src/pages/queue/playlist-batch.js`、`ipc-gateway.ts` |
 | 逐格式选择对话框仍读录制 JSON（`PROBE` 是 fixture） | `ui/src/dialogs/` |
 | 错误报告里的 `Engine: unknown`（展示缺陷） | `core/src/error-report/` |
 | 自更新会清空便携模式数据（NSIS 清空 `$INSTDIR`） | 需迁出数据目录或自定义 NSIS 脚本 |

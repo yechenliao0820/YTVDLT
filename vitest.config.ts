@@ -24,7 +24,10 @@ export default defineConfig({
   },
   test: {
     include: ['tests/**/*.test.ts'],
-    exclude: ['**/node_modules/**', 'tests/e2e/**'],
+    // `tests/integration/online/**` performs real international traffic and real
+    // downloads. It must only run through `vitest.online.config.ts` on purpose;
+    // the default suite stays offline and deterministic.
+    exclude: ['**/node_modules/**', 'tests/e2e/**', 'tests/integration/online/**'],
     environment: 'node',
     testTimeout: 30_000,
     hookTimeout: 30_000,

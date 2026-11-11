@@ -63,4 +63,12 @@ export interface PlaylistInfo {
   extractor_key: string;
   webpage_url: string;
   entries: PlaylistEntry[];
+  /**
+   * What yt-dlp declared as `playlist_count`. OPTIONAL and only written when
+   * the raw JSON actually carries the key — legacy fixtures map to the exact
+   * same object as before, so the frozen M1/M4 contracts are unaffected.
+   */
+  playlistCount?: number | null;
+  /** Raw `entries` items that were null / non-objects and got skipped. */
+  skippedEntries?: number;
 }

@@ -13,11 +13,12 @@
  *     `maskUrlSecrets()` (same rule as the error report, D-32);
  *   - no `electron` / `node:*` import — the services arrive injected.
  */
-import { IPC_CHANNELS } from '@ytvdlt/shared';
+import { IPC_CHANNELS, MAX_PLAYLIST_ITEMS } from '@ytvdlt/shared';
 import type {
   AppUpdateAction, AppUpdateActionResult, AppUpdateState, DownloadKind, FormatDomain, TaskRecord,
   MediaInfo, SubtitleDomain, SubtitlePreviewConsumeResult, SubtitlePreviewResult,
-  SubtitleArtifactSource, SubtitleOutcome,
+  SubtitleArtifactSource, SubtitleOutcome, PlaylistInfo, PlaylistPreviewCode,
+  PlaylistPreviewDto, PlaylistPreviewCancelDto, PlaylistBatchEnqueueDto,
 } from '@ytvdlt/shared';
 import {
   ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES, buildTaskListSnapshot,
@@ -33,6 +34,14 @@ import type { ThumbnailCacheStatus, ThumbnailPruneReport } from './thumbnail-cac
 import type {
   LocalFileState, LocalFileStatusPort, LocalFileStatus as FileStatusBucket,
 } from './local-file-status.js';
+import type {
+  TxtImportServicePort, TxtImportEnqueueDto, TxtImportPickDto,
+} from './txt-import-service.js';
+import {
+  failedPlaylistPreview, isPlaylistEntryAvailable,
+  type PlaylistPreviewPortLike,
+} from './playlist-preview-service.js';
+import type { PlaylistBatchReport, PlaylistEnqueueInput } from './m4-host.js';
 
 /** Minimal slice of the queue this layer needs (tests inject a fake). */
 export interface TaskListPort {
@@ -245,6 +254,15 @@ export interface M5ChannelDeps {
    * this layer only validates the wire input and forwards it.
    */
   readonly subtitlePreview?: SubtitlePreviewPortLike;
+  /**
+   * TXT batch import. Absent = both channels answer TXT_IMPORT_UNAVAILABLE
+   * instead of falling back to any renderer-side file access.
+   */
+  readonly txtImport?: TxtImportServicePort;
+  /** Live playlist probe + ticket store; absent = preview reports unavailable. */
+  readonly playlistPreview?: PlaylistPreviewPortLike;
+  /** The ONE M4Host batch implementation, shared with the frozen M3 channel. */
+  readonly playlistBatch?: (input: PlaylistEnqueueInput) => Promise<PlaylistBatchReport>;
 }
 
 /** D-114: what `APP_INFO` answers. `version` is `''` when it is unknown. */
@@ -394,7 +412,25 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   // it. `previousPreviewId` only releases the superseded ticket.
   [IPC_CHANNELS.SUBTITLE_PREVIEW]: ['url', 'previousPreviewId'],
   [IPC_CHANNELS.SUBTITLE_PREVIEW_CANCEL]: ['previewId'],
+  // TXT import: PICK accepts NOTHING (no path, ever). ENQUEUE accepts an opaque
+  // single-use id plus the three download enums — never a URL or a file name.
+  [IPC_CHANNELS.TXT_IMPORT_PICK]: [],
+  [IPC_CHANNELS.TXT_IMPORT_ENQUEUE]: [
+    'importId', 'kind', 'quality', 'audioQuality', 'audioFormat',
+  ],
+  // Playlist batch import: the renderer may name a URL and a ticket, never a
+  // PlaylistInfo, an entry URL, a path or an argv token.
+  [IPC_CHANNELS.PLAYLIST_PREVIEW]: ['url', 'previousPreviewId'],
+  [IPC_CHANNELS.PLAYLIST_PREVIEW_CANCEL]: ['previewId'],
+  [IPC_CHANNELS.PLAYLIST_BATCH_ENQUEUE]: [
+    'previewId', 'url', 'selectedIds', 'kind', 'quality', 'audioQuality', 'audioFormat',
+  ],
 };
+
+/** Opaque, main-process-issued import ticket. */
+const IMPORT_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
+/** `crypto.randomUUID()` ids (36 chars) fit this shape. */
+const PLAYLIST_PREVIEW_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
 
 /** D-103: the only cache actions the renderer may trigger. */
 const THUMBNAIL_CACHE_ACTIONS: readonly string[] = [
@@ -1004,6 +1040,165 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     return { accepted: true, enqueued: taskIds.length > 0, taskIds };
   });
 
+  // ---- TXT batch import ----------------------------------------------------
+  // The service owns the native picker, the file read, the parse, the ticket
+  // store and the real enqueue. This layer only validates the wire shape and
+  // refuses unknown keys, so no renderer can name a local path or inject a URL.
+  const txtUnavailablePick = (): TxtImportPickDto => ({
+    ok: false, canceled: false, code: 'TXT_IMPORT_UNAVAILABLE',
+    fileName: '', importId: '', totalLines: 0, blankCount: 0,
+    validCount: 0, invalidCount: 0, duplicateCount: 0, playlistCount: 0,
+    items: [], maxUrls: 0,
+  });
+  const txtUnavailableEnqueue = (): TxtImportEnqueueDto => ({
+    ok: false, code: 'TXT_IMPORT_UNAVAILABLE', requested: 0, enqueued: 0,
+    failed: 0, taskIds: [], failures: [],
+  });
+
+  handlers.set(IPC_CHANNELS.TXT_IMPORT_PICK, async (payload): Promise<TxtImportPickDto> => {
+    validateM5Payload(IPC_CHANNELS.TXT_IMPORT_PICK, payload);
+    return deps.txtImport === undefined
+      ? txtUnavailablePick()
+      : deps.txtImport.pick();
+  });
+
+  handlers.set(IPC_CHANNELS.TXT_IMPORT_ENQUEUE, async (payload): Promise<TxtImportEnqueueDto> => {
+    const record = validateM5Payload(IPC_CHANNELS.TXT_IMPORT_ENQUEUE, payload);
+    const importId = record['importId'];
+    if (typeof importId !== 'string' || !IMPORT_ID_RE.test(importId)) {
+      throw new Error('[m5-ipc] invalid importId');
+    }
+    const rawKind = record['kind'];
+    // §5 rule 1: an out-of-range enum is a protocol failure, not a silent
+    // downgrade to `video`. The other three enums already followed this rule;
+    // `kind` was the one gap in the new D-129 channel.
+    if (rawKind !== undefined && rawKind !== 'video' && rawKind !== 'audio') {
+      throw new Error('[m5-ipc] invalid kind');
+    }
+    const rawQuality = record['quality'];
+    const rawAudioQuality = record['audioQuality'];
+    const rawAudioFormat = record['audioFormat'];
+    if (rawQuality !== undefined && !VIDEO_QUALITY_VALUES.includes(String(rawQuality))) {
+      throw new Error('[m5-ipc] invalid quality');
+    }
+    if (rawAudioQuality !== undefined && !AUDIO_QUALITY_VALUES.includes(String(rawAudioQuality))) {
+      throw new Error('[m5-ipc] invalid audioQuality');
+    }
+    if (rawAudioFormat !== undefined && !AUDIO_FORMAT_VALUES.includes(String(rawAudioFormat))) {
+      throw new Error('[m5-ipc] invalid audioFormat');
+    }
+    if (deps.txtImport === undefined) return txtUnavailableEnqueue();
+    return deps.txtImport.enqueue({
+      importId,
+      kind: rawKind === 'audio' ? 'audio' : 'video',
+      ...(rawQuality === undefined ? {} : { quality: rawQuality as VideoQualityChoice }),
+      ...(rawAudioQuality === undefined ? {} : { audioQuality: rawAudioQuality as AudioQualityChoice }),
+      ...(rawAudioFormat === undefined ? {} : { audioFormat: rawAudioFormat as AudioFormatChoice }),
+    });
+  });
+
+  // ---- Playlist batch import (live probe + single-use ticket) -------------
+  const playlistEnqueueUnavailable = (code: PlaylistPreviewCode): PlaylistBatchEnqueueDto => ({
+    ok: false, code, requested: 0, enqueued: 0, failed: 0, taskIds: [], failures: [],
+  });
+
+  handlers.set(IPC_CHANNELS.PLAYLIST_PREVIEW, async (payload): Promise<PlaylistPreviewDto> => {
+    const record = validateM5Payload(IPC_CHANNELS.PLAYLIST_PREVIEW, payload);
+    const previous = record['previousPreviewId'];
+    if (previous !== undefined && typeof previous !== 'string') {
+      throw new Error('[m5-ipc] previousPreviewId must be a string');
+    }
+    if (typeof previous === 'string' && previous !== '' && !PLAYLIST_PREVIEW_ID_RE.test(previous)) {
+      throw new Error('[m5-ipc] invalid previousPreviewId');
+    }
+    if (deps.playlistPreview === undefined) return failedPlaylistPreview('PREVIEW_UNAVAILABLE');
+    return deps.playlistPreview.preview(
+      record['url'], typeof previous === 'string' ? previous : undefined,
+    );
+  });
+
+  handlers.set(IPC_CHANNELS.PLAYLIST_PREVIEW_CANCEL, async (payload): Promise<PlaylistPreviewCancelDto> => {
+    const record = validateM5Payload(IPC_CHANNELS.PLAYLIST_PREVIEW_CANCEL, payload);
+    const previewId = record['previewId'];
+    if (typeof previewId !== 'string' || !PLAYLIST_PREVIEW_ID_RE.test(previewId)) {
+      throw new Error('[m5-ipc] invalid previewId');
+    }
+    if (deps.playlistPreview === undefined) return { ok: false };
+    return { ok: await deps.playlistPreview.cancel(previewId) };
+  });
+
+  handlers.set(IPC_CHANNELS.PLAYLIST_BATCH_ENQUEUE, async (payload): Promise<PlaylistBatchEnqueueDto> => {
+    const record = validateM5Payload(IPC_CHANNELS.PLAYLIST_BATCH_ENQUEUE, payload);
+    const previewId = record['previewId'];
+    if (typeof previewId !== 'string' || !PLAYLIST_PREVIEW_ID_RE.test(previewId)) {
+      throw new Error('[m5-ipc] invalid previewId');
+    }
+    const url = record['url'];
+    if (typeof url !== 'string' || url.length > 2000 || !/^https?:\/\//i.test(url)) {
+      throw new Error('[m5-ipc] invalid playlist url');
+    }
+    const rawIds = record['selectedIds'];
+    if (rawIds !== undefined) {
+      if (!Array.isArray(rawIds)) throw new Error('[m5-ipc] selectedIds must be an array');
+      if (rawIds.length > MAX_PLAYLIST_ITEMS) {
+        throw new Error(`[m5-ipc] selectedIds exceeds ${MAX_PLAYLIST_ITEMS} items`);
+      }
+      for (const id of rawIds) {
+        if (typeof id !== 'string' || id.length === 0 || id.length > 200) {
+          throw new Error('[m5-ipc] invalid selectedIds entry');
+        }
+      }
+    }
+    const rawQuality = record['quality'];
+    const rawAudioQuality = record['audioQuality'];
+    const rawAudioFormat = record['audioFormat'];
+    if (rawQuality !== undefined && !VIDEO_QUALITY_VALUES.includes(String(rawQuality))) {
+      throw new Error('[m5-ipc] invalid quality');
+    }
+    if (rawAudioQuality !== undefined && !AUDIO_QUALITY_VALUES.includes(String(rawAudioQuality))) {
+      throw new Error('[m5-ipc] invalid audioQuality');
+    }
+    if (rawAudioFormat !== undefined && !AUDIO_FORMAT_VALUES.includes(String(rawAudioFormat))) {
+      throw new Error('[m5-ipc] invalid audioFormat');
+    }
+    if (deps.playlistPreview === undefined || deps.playlistBatch === undefined) {
+      return playlistEnqueueUnavailable('PREVIEW_UNAVAILABLE');
+    }
+    // An explicit empty selection is refused BEFORE spending the ticket.
+    if (Array.isArray(rawIds) && rawIds.length === 0) {
+      return playlistEnqueueUnavailable('EMPTY_SELECTION');
+    }
+    const consumed = deps.playlistPreview.consume(previewId, url);
+    if (!consumed.ok || consumed.playlist === undefined) {
+      return playlistEnqueueUnavailable(consumed.code === '' ? 'PREVIEW_UNKNOWN' : consumed.code);
+    }
+    const playlist: PlaylistInfo = consumed.playlist;
+    // No ids = "download all", resolved in the MAIN process from the cached
+    // probe. The renderer can never submit a PlaylistInfo of its own.
+    const selected: readonly string[] = rawIds === undefined
+      ? playlist.entries.filter(isPlaylistEntryAvailable).map((entry) => entry.id).slice(0, MAX_PLAYLIST_ITEMS)
+      : rawIds as readonly string[];
+    if (selected.length === 0) return playlistEnqueueUnavailable('EMPTY_SELECTION');
+    const report = await deps.playlistBatch({
+      selectedIds: selected,
+      playlistUrl: url,
+      kind: record['kind'] === 'audio' ? 'audio' : 'video',
+      playlist,
+      ...(rawQuality === undefined ? {} : { quality: rawQuality as VideoQualityChoice }),
+      ...(rawAudioQuality === undefined ? {} : { audioQuality: rawAudioQuality as AudioQualityChoice }),
+      ...(rawAudioFormat === undefined ? {} : { audioFormat: rawAudioFormat as AudioFormatChoice }),
+    });
+    return {
+      ok: report.failed === 0 && report.enqueued > 0,
+      code: report.failed === 0 ? '' : (report.enqueued > 0 ? 'PARTIAL_SUCCESS' : 'ENQUEUE_FAILED'),
+      requested: report.requested,
+      enqueued: report.enqueued,
+      failed: report.failed,
+      taskIds: report.taskIds,
+      failures: report.failures,
+    };
+  });
+
   // Subtitle preview (stage 2): the real, on-demand probe behind the picker.
   // Two invariants live here rather than in the service:
   //   1. a superseded ticket is released BEFORE the new probe, so a failure
@@ -1219,4 +1414,12 @@ export const M5_CHANNELS: readonly string[] = [
   // Subtitle preview (stage 2, append-only; the fixture PROBE is untouched).
   IPC_CHANNELS.SUBTITLE_PREVIEW,
   IPC_CHANNELS.SUBTITLE_PREVIEW_CANCEL,
+  // TXT batch import (append-only).
+  IPC_CHANNELS.TXT_IMPORT_PICK,
+  IPC_CHANNELS.TXT_IMPORT_ENQUEUE,
+  // Playlist batch import (append-only; M3 PLAYLIST_ENQUEUE stays in the
+  // fixture gateway and is NOT part of this list).
+  IPC_CHANNELS.PLAYLIST_PREVIEW,
+  IPC_CHANNELS.PLAYLIST_PREVIEW_CANCEL,
+  IPC_CHANNELS.PLAYLIST_BATCH_ENQUEUE,
 ];

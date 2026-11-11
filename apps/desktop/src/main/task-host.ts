@@ -29,6 +29,8 @@ export interface TaskHostOptions {
   /** Test/CLI override; when absent `general.concurrency` wins. */
   concurrency?: number;
   history?: IHistoryStore;
+  /** D-131: recycle-bin hook for embedded-subtitle cleanup. Absent = no cleanup. */
+  recycleSubtitleFiles?: (paths: readonly string[]) => Promise<readonly string[]>;
 }
 
 export interface TaskHost {
@@ -70,6 +72,7 @@ export async function createTaskHost(options: TaskHostOptions): Promise<TaskHost
     taskStore: store,
     jsRuntimePath: options.jsRuntimePath,
     concurrency,
+    ...(options.recycleSubtitleFiles === undefined ? {} : { recycleSubtitleFiles: options.recycleSubtitleFiles }),
   });
 
   const restore = await restoreTasks(queue, store);

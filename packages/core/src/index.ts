@@ -52,3 +52,6 @@ export * from './subtitle-preview/index.js';
 // Stage 4 (append-only): one artifact extension table, subtitle↔media links and
 // the requested-vs-produced verdict. Pure, no I/O.
 export * from './artifact-classify/index.js';
+// TXT batch import (append-only): pure line parsing, URL transport validation
+// is INJECTED so core never depends on the engine package.
+export * from './txt-import/index.js';

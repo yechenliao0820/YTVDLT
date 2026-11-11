@@ -87,7 +87,16 @@ export function evaluateSubtitleOutcome(input: {
   const links = input.links.filter((link) => !failedPaths.has(link.path));
   const embedded = subtitle.embed && input.attachments?.some((probe) => probe.kind === 'subtitle'
     && isMediaArtifact(probe.path) && probe.status === 'PASS') === true;
-  const needsFiles = subtitle.enabled || subtitle.autoCaptions;
+  /**
+   * D-132 (found by a live YouTube audit): "embed AND do not keep the standalone
+   * file" is an explicit request for NO sidecar. Counting `autoCaptions` as
+   * "a standalone file is required" made a real auto-caption download report
+   * `partial` even though the subtitle WAS embedded and yt-dlp itself removed
+   * the temporary sidecar. The offline `<track>` fixture never exposed this
+   * because it always left the `.srt` behind.
+   */
+  const keepStandalone = !(subtitle.embed === true && subtitle.keepSubtitleFile === false);
+  const needsFiles = (subtitle.enabled || subtitle.autoCaptions) && keepStandalone;
   if (links.length === 0) return embedded ? (needsFiles ? 'partial' : 'ok') : 'missing';
 
   const matched = matchLanguageExpression(subtitle.languages, requestableLanguages(subtitle, mediaInfo));

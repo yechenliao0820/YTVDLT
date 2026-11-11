@@ -3,8 +3,8 @@
  * so the offline tests exercise the production adapters (spawnStreaming,
  * taskkill, real fs) without touching the user's profile.
  */
-import { mkdir, rm, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, rm, readdir, rename } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createNodePorts } from '../../../apps/desktop/src/main/adapters/node-ports.js';
 import { ArtifactVerifier, HistoryStore, TaskQueue } from '@ytvdlt/core';
@@ -80,7 +80,11 @@ export function makeRecord(req: DownloadRequest, privateMode = false): TaskRecor
   };
 }
 
-export async function createL2Context(caseName: string, expectedManifest: ExpectedArtifactManifest | null = null): Promise<L2Context> {
+export async function createL2Context(
+  caseName: string,
+  expectedManifest: ExpectedArtifactManifest | null = null,
+  options: { recycleSubtitles?: boolean } = {},
+): Promise<L2Context> {
   // Unique per run: avoids stale `.part` files and bulk-delete churn. These
   // scratch dirs live under reports/ (gitignored) and are never reused.
   const dir = join(ROOT, 'reports', 'l2-tmp', `${caseName}-${process.pid}-${Date.now()}`);
@@ -107,9 +111,28 @@ export async function createL2Context(caseName: string, expectedManifest: Expect
   });
   const history = new HistoryStore({ ports });
   const verifier = new ArtifactVerifier({ ports });
+  // D-131: L2 runs without Electron, so `shell.trashItem` is unavailable.
+  // Simulate the recycle bin with a RECOVERABLE rename into <case>/_recycled
+  // (outside outDir/tempDir), never a permanent delete. Opt-in only: every
+  // existing L2 case keeps its pre-D-131 behaviour byte for byte.
+  const recycleSubtitleFiles = options.recycleSubtitles === true
+    ? async (paths: readonly string[]): Promise<readonly string[]> => {
+      const bin = join(dir, '_recycled');
+      await mkdir(bin, { recursive: true });
+      const removed: string[] = [];
+      for (const path of paths) {
+        try {
+          await rename(path, join(bin, basename(path)));
+          removed.push(path);
+        } catch { /* keep the file and its artifact record */ }
+      }
+      return removed;
+    }
+    : undefined;
   const queue = new TaskQueue({
     ports, engine, verifier, history, jsRuntimePath: NODE_EXE,
     expectedManifestFor: () => expectedManifest,
+    ...(recycleSubtitleFiles === undefined ? {} : { recycleSubtitleFiles }),
   });
 
   const events: L2Context['events'] = [];

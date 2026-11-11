@@ -25,6 +25,7 @@ import {
 } from '@ytvdlt/core';
 import { createTaskHost, type TaskHost } from './task-host.js';
 import { createIpcGateway, type IpcGateway } from './ipc-gateway.js';
+import type { TxtBatchRequest, TxtBatchResult, TxtBatchFailure } from './txt-import-service.js';
 
 export interface M4HostOptions {
   ports: CorePorts;
@@ -65,12 +66,41 @@ export interface M4HostOptions {
    * media, no temp dir at all).
    */
   internalWorkDir?: string;
+  /**
+   * D-131: recycle-bin hook for `keepSubtitleFile=false` cleanup. Wired by
+   * `createM5Host()` from the existing D-120 `TrashFilesPort`; absent in the
+   * M4-only unit tests, which keep the pre-D-131 behaviour.
+   */
+  recycleSubtitleFiles?: (paths: readonly string[]) => Promise<readonly string[]>;
 }
 
 export interface PlaylistEnqueueInput {
   readonly selectedIds: readonly string[];
   readonly playlistUrl: string;
   readonly kind: 'video' | 'audio';
+  /**
+   * Playlist batch import: the CACHED probe result. When present the batch
+   * skips the second network probe entirely; the legacy M3 channel omits it
+   * and keeps its original `resolvePlaylist()` behaviour.
+   */
+  readonly playlist?: PlaylistInfo;
+  /** Per-batch format choices, folded in exactly like `enqueueSingle()`. */
+  readonly quality?: FormatDomain['quality'];
+  readonly audioQuality?: FormatDomain['audioQuality'];
+  readonly audioFormat?: 'auto' | 'mp3' | 'm4a';
+}
+
+/** Real outcome of one batch; never rounded up to "all succeeded". */
+export interface PlaylistBatchFailure {
+  readonly id: string;
+  readonly reason: string;
+}
+export interface PlaylistBatchReport {
+  readonly requested: number;
+  readonly enqueued: number;
+  readonly failed: number;
+  readonly taskIds: readonly string[];
+  readonly failures: readonly PlaylistBatchFailure[];
 }
 
 export interface M4Host {
@@ -82,8 +112,12 @@ export interface M4Host {
   readonly gateway: IpcGateway;
   /** Real batch enqueue used by the `PLAYLIST_ENQUEUE` IPC channel. */
   enqueuePlaylistBatch(input: PlaylistEnqueueInput): Promise<readonly string[]>;
+  /** Same implementation, with the honest per-item outcome for the live UI. */
+  enqueuePlaylistBatchWithReport(input: PlaylistEnqueueInput): Promise<PlaylistBatchReport>;
   /** D-69: real single-video enqueue backing the `DOWNLOAD_START` IPC channel. */
   enqueueSingle(input: SingleEnqueueInput): Promise<readonly string[]>;
+  /** TXT batch import: N independent TaskRecords via `TaskQueue.enqueueBatch()`. */
+  enqueueTxtBatch(input: TxtBatchRequest): Promise<TxtBatchResult>;
   /** Restore result from the boot path. */
   readonly restore: TaskHost['restore'];
   /** Detach the queue listener (tests / hot reload). */
@@ -279,6 +313,12 @@ export function resolveAria2cPath(
   return null;
 }
 
+/**
+ * Process-global sequence for production playlist task ids. Module scope (not
+ * per-host) so two hosts in one process can never mint the same id.
+ */
+let playlistSeq = 0;
+
 export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
   const { ports } = options;
   const task = await createTaskHost({
@@ -289,6 +329,8 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
     ...(options.snapshotPath === undefined ? {} : { snapshotPath: options.snapshotPath }),
     ...(options.configPath === undefined ? {} : { configPath: options.configPath }),
     ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
+    ...(options.recycleSubtitleFiles === undefined
+      ? {} : { recycleSubtitleFiles: options.recycleSubtitleFiles }),
   });
 
   const commandTemplates = new CommandTemplateStore({ ports });
@@ -395,18 +437,64 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
     return [taskId];
   };
 
-  const enqueuePlaylistBatch = async (input: PlaylistEnqueueInput): Promise<readonly string[]> => {
-    // Empty selection must not cost a network probe.
-    if (input.selectedIds.length === 0) return [];
-    const playlist = await resolvePlaylist(input.playlistUrl);
+  /**
+   * The ONE playlist batch implementation. Both the frozen M3 channel and the
+   * new ticket-bound channel end up here; there is no parallel batch engine.
+   *
+   * D-130 fixes two production defects without touching the frozen pure
+   * planner (`core/src/playlist/batch.ts`):
+   *   1. `defaultBatchTaskId()` returns `<playlistId>-<entryId>`, so enqueuing
+   *      the same collection twice produced identical ids and the second run
+   *      silently replaced the first record. The production `makeTaskId`
+   *      below adds a timestamp + a process-global sequence + a random suffix.
+   *   2. The old path re-probed the URL on enqueue. With a cached `playlist`
+   *      we use the ALREADY validated result, so confirm cannot diverge from
+   *      what the user previewed.
+   */
+  const runPlaylistBatch = async (input: PlaylistEnqueueInput): Promise<PlaylistBatchReport> => {
+    const requested = input.selectedIds.length;
+    const empty: PlaylistBatchReport = {
+      requested, enqueued: 0, failed: 0, taskIds: [], failures: [],
+    };
+    if (requested === 0) return empty;
+
+    let playlist: PlaylistInfo;
+    try {
+      playlist = input.playlist ?? await resolvePlaylist(input.playlistUrl);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return {
+        requested, enqueued: 0, failed: requested, taskIds: [],
+        failures: input.selectedIds.map((id) => ({ id, reason })),
+      };
+    }
+
+    const defaults = readDefaults(task.config, options.bundledAria2cPath, options.expandPath);
+    const hasChoice = input.quality !== undefined
+      || input.audioQuality !== undefined || input.audioFormat !== undefined;
+    // Absent choices keep the legacy M3 behaviour byte-for-byte; present ones
+    // are folded in by the SAME helper a normal single download uses.
+    const format = hasChoice
+      ? applyFormatChoice(defaults.format, {
+        url: input.playlistUrl,
+        kind: input.kind,
+        ...(input.quality === undefined ? {} : { quality: input.quality }),
+        ...(input.audioQuality === undefined ? {} : { audioQuality: input.audioQuality }),
+        ...(input.audioFormat === undefined ? {} : { audioFormat: input.audioFormat }),
+      })
+      : undefined;
     const base = buildDownloadRequest({
       taskId: 'batch-template',
       url: input.playlistUrl,
       kind: input.kind,
-      defaults: readDefaults(task.config, options.bundledAria2cPath, options.expandPath),
+      defaults: format === undefined ? defaults : { ...defaults, format },
     });
-    // D-69: use each entry's own URL instead of a --playlist-items position.
-    // The legacy position-based planner remains exported for the M4-4 contract.
+    const stamp = ports.clock.nowIso().replace(/[^0-9]/g, '');
+    const uniqueTaskId = (_playlistId: string, entryId: string): string => {
+      playlistSeq += 1;
+      const safeEntry = String(entryId).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 48);
+      return `pl-${stamp}-${playlistSeq}-${Math.random().toString(36).slice(2, 8)}-${safeEntry}`;
+    };
     const plan = buildPlaylistBatchRecordsByUrl({
       playlist,
       selectedIds: input.selectedIds,
@@ -414,24 +502,161 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
       kind: input.kind,
       createdAt: ports.clock.nowIso(),
       privateMode: base.paths.privateMode,
+      // ONLY the ticket-bound production path gets unique ids. The frozen M3
+      // PLAYLIST_ENQUEUE channel keeps `defaultBatchTaskId()` exactly as its
+      // existing unit/contract tests expect.
+      ...(input.playlist === undefined ? {} : { makeTaskId: uniqueTaskId }),
     });
-    if (plan.records.length === 0) return [];
-    // D-118: every batch member gets its OWN temp dir — a shared one would let
-    // two entries of the same playlist collide on `.part` / `.ytdl` names.
-    const records = plan.records.map((record) => {
-      if (record.request === null) return record;
-      return {
-        ...record,
-        request: {
-          ...record.request,
-          paths: {
-            ...record.request.paths,
-            tempDir: resolveTempDirFor(record.request, record.id, options.expandPath, options.internalWorkDir),
+
+    const failures: PlaylistBatchFailure[] = plan.unknownIds
+      .map((id) => ({ id, reason: 'UNKNOWN_ENTRY_ID' }));
+    const records: TaskRecord[] = [];
+    for (const record of plan.records) {
+      try {
+        if (record.request === null) { records.push(record); continue; }
+        // D-118: one temp dir PER TASK → own `.part` / `.ytdl` AND own
+        // artifact manifest. No two members can collide.
+        records.push({
+          ...record,
+          request: {
+            ...record.request,
+            paths: {
+              ...record.request.paths,
+              tempDir: resolveTempDirFor(
+                record.request, record.id, options.expandPath, options.internalWorkDir,
+              ),
+            },
           },
-        },
-      };
-    });
-    return task.queue.enqueueBatch(records);
+        });
+      } catch (error) {
+        failures.push({
+          id: record.id,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    let ids: readonly string[] = [];
+    let batchReason = '';
+    try {
+      ids = await task.queue.enqueueBatch(records);
+    } catch (error) {
+      // `enqueueBatch` awaits `enqueue()` one record at a time; a throw halfway
+      // through leaves earlier records live. Ask the queue what really landed.
+      batchReason = error instanceof Error ? error.message : String(error);
+      ids = records
+        .filter((candidate) => task.queue.get(candidate.id) !== undefined)
+        .map((candidate) => candidate.id);
+    }
+    const idSet = new Set(ids);
+    for (const candidate of records) {
+      if (!idSet.has(candidate.id)) {
+        failures.push({ id: candidate.id, reason: batchReason || 'ENQUEUE_FAILED' });
+      }
+    }
+    return {
+      requested,
+      enqueued: ids.length,
+      failed: Math.max(0, requested - ids.length),
+      taskIds: ids,
+      failures,
+    };
+  };
+
+  /** Frozen M3 channel contract: only ids, no report. */
+  const enqueuePlaylistBatch = async (input: PlaylistEnqueueInput): Promise<readonly string[]> =>
+    (await runPlaylistBatch(input)).taskIds;
+  /** New ticket-bound channel: honest per-item outcome. */
+  const enqueuePlaylistBatchWithReport = async (input: PlaylistEnqueueInput): Promise<PlaylistBatchReport> =>
+    runPlaylistBatch(input);
+
+  /**
+   * TXT batch import. Deliberately does NOT touch `enqueueSingle`: the single
+   * download path stays byte-for-byte as it was, so this feature cannot regress
+   * a normal download. Every batch member is built with the SAME ingredients
+   * (`readDefaults` → `applyFormatChoice` → `buildDownloadRequest` →
+   * `resolveTempDirFor`) and then handed to the existing
+   * `TaskQueue.enqueueBatch()`, which parks them in the shared FIFO so the
+   * concurrency limit, per-task progress, cancel, retry and persistence all
+   * come from the queue itself.
+   */
+  const enqueueTxtBatch = async (input: TxtBatchRequest): Promise<TxtBatchResult> => {
+    const failures: TxtBatchFailure[] = [];
+    const defaults = readDefaults(task.config, options.bundledAria2cPath, options.expandPath);
+    const choice: SingleEnqueueInput = {
+      url: input.urls[0] ?? '',
+      kind: input.kind,
+      ...(input.quality === undefined ? {} : { quality: input.quality }),
+      ...(input.audioQuality === undefined ? {} : { audioQuality: input.audioQuality }),
+      ...(input.audioFormat === undefined ? {} : { audioFormat: input.audioFormat }),
+    };
+    // One resolved format/subtitle/paths/network/advanced set for the batch,
+    // exactly the values a single download would have received.
+    const format = applyFormatChoice(defaults.format, choice);
+    const now = ports.clock.nowIso();
+    const records: TaskRecord[] = [];
+    for (const url of input.urls) {
+      try {
+        // Sharing `singleSeq` with the single path keeps ids globally unique.
+        const taskId = `txt-${now.replace(/[^0-9]/g, '')}-${++singleSeq}`;
+        const base = buildDownloadRequest({
+          taskId: 'txt-template',
+          url,
+          kind: input.kind,
+          defaults: { ...defaults, format },
+        });
+        // D-118: one temp dir PER TASK, or two downloads collide on `.part`.
+        const request: DownloadRequest = {
+          ...base,
+          taskId,
+          url,
+          paths: {
+            ...base.paths,
+            tempDir: resolveTempDirFor(
+              { ...base, taskId, url }, taskId, options.expandPath, options.internalWorkDir,
+            ),
+          },
+        };
+        records.push({
+          id: taskId,
+          url,
+          kind: input.kind,
+          state: 'Idle',
+          createdAt: now,
+          updatedAt: now,
+          mediaInfo: null,
+          request,
+          artifacts: [],
+          lastPercent: null,
+          error: null,
+          privateMode: base.paths.privateMode,
+          postprocessed: false,
+        });
+      } catch (error) {
+        failures.push({ url, reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    let ids: readonly string[] = [];
+    let batchReason = '';
+    try {
+      ids = await task.queue.enqueueBatch(records);
+    } catch (error) {
+      // `enqueueBatch` awaits `enqueue()` one record at a time, so a throw
+      // halfway through leaves the earlier records live. Ask the queue which
+      // ids really exist instead of reporting either "0" or "all N".
+      batchReason = error instanceof Error ? error.message : String(error);
+      ids = records
+        .filter((candidate) => task.queue.get(candidate.id) !== undefined)
+        .map((candidate) => candidate.id);
+    }
+    const idSet = new Set(ids);
+    for (const candidate of records) {
+      if (!idSet.has(candidate.id)) {
+        failures.push({ url: candidate.url, reason: batchReason || 'ENQUEUE_FAILED' });
+      }
+    }
+    return { enqueued: ids.length, taskIds: ids, failures };
   };
 
   const gateway = createIpcGateway({
@@ -449,7 +674,9 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
     commandTemplates,
     gateway,
     enqueuePlaylistBatch,
+    enqueuePlaylistBatchWithReport,
     enqueueSingle,
+    enqueueTxtBatch,
     restore: task.restore,
     dispose: unsubscribe,
   };

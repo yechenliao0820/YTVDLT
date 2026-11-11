@@ -99,6 +99,11 @@ export function harness(options: {
    * `FILE_MISSING` / `filesMissing` result without touching the bridge shape.
    */
   onInvoke?: (channel: string, payload: unknown) => unknown;
+  /**
+   * Playlist batch import: inject a selector factory so `queue.js` mounts it
+   * synchronously in live mode (the real component is tested separately).
+   */
+  playlistFactory?: unknown;
 } = {}): QueuePageHarness {
   const sandbox: Record<string, any> = {};
   new Function('window', sources.messages)(sandbox);
@@ -175,6 +180,9 @@ export function harness(options: {
     },
     shortcuts: { on: () => undefined, install: () => () => undefined, extractDeepLink: () => null },
   };
+  if (options.playlistFactory !== undefined) {
+    (sandbox.YTVDLT as Record<string, unknown>).playlists = options.playlistFactory;
+  }
   new Function('window', sources.shell)(sandbox);
 
   if (options.live === true) {

@@ -89,8 +89,10 @@ describe('m5 host · gateway composition', () => {
     }
     for (const channel of built.channels) expect(channels).toContain(channel);
     // 11 (M5) + the four 0.2.1 channels (D-93 / D-94 / D-98) + THUMBNAIL_CACHE (D-103)
-    // + the two subtitle-preview channels (stage 2, append-only).
-    expect(built.channels).toHaveLength(19);
+    // + the two subtitle-preview channels (stage 2, append-only)
+    // + the two TXT import channels (D-129, append-only)
+    // + the three playlist batch channels (D-130, append-only).
+    expect(built.channels).toHaveLength(24);
     expect(new Set(channels).size).toBe(channels.length);
     built.dispose();
   });

@@ -34,6 +34,7 @@ import {
   createComponentUpdater, type ComponentUpdatePort,
 } from './component-updater.js';
 import { createM5Host, type M5Host } from './m5-host.js';
+import { createTxtFilePicker } from './adapters/txt-file-picker.js';
 import { createSubtitlePreviewService, type SubtitlePreviewService } from './subtitle-preview-service.js';
 import { bootstrap, type BootstrapHandle, type ElectronLike } from './bootstrap.js';
 import type { AppUpdatePortLike } from './m5-channels.js';
@@ -148,6 +149,9 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     // Subtitle preview (stage 2): tickets are pure main-process memory; drop
     // them synchronously so an expired/abandoned id can never survive a quit.
     subtitlePreviewRef?.dispose();
+    // Playlist preview tickets hold full PlaylistInfo (entry URLs included);
+    // they are main-process memory only and must not survive a quit.
+    hostRef?.playlistPreview.clear();
     void Promise.race([
       clearPrivateHistory(),
       new Promise<void>((resolve) => { setTimeout(resolve, 3000); }),
@@ -325,6 +329,8 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       // Subtitle preview (stage 2): live probe behind an opaque, short-lived,
       // single-use ticket bound to the target URL.
       subtitlePreview,
+      // TXT batch import: native .txt picker + bounded read stay in main.
+      txtImportFile: createTxtFilePicker(),
     });
     hostRef = host;
     configRef = host.m4.task.config;

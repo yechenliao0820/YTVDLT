@@ -112,8 +112,10 @@ export function toMediaInfo(raw: unknown): MediaInfo {
 export function toPlaylistInfo(raw: unknown): PlaylistInfo {
   const record: Record<string, unknown> = isRecord(raw) ? raw : {};
   const entries: PlaylistEntry[] = [];
+  let skippedEntries = 0;
   for (const item of asArray(record['entries'])) {
-    if (!isRecord(item)) continue;
+    // yt-dlp emits `null` for a removed / private / unavailable slot.
+    if (!isRecord(item)) { skippedEntries += 1; continue; }
     entries.push({
       id: strOr(item['id'], ''),
       title: strOr(item['title'], ''),
@@ -122,6 +124,7 @@ export function toPlaylistInfo(raw: unknown): PlaylistInfo {
       _type: strOr(item['_type'], 'url'),
     });
   }
+  const declaredCount = numOrNull(record['playlist_count']);
   return {
     id: strOr(record['id'], ''),
     title: strOr(record['title'], ''),
@@ -130,6 +133,10 @@ export function toPlaylistInfo(raw: unknown): PlaylistInfo {
       .toLowerCase().replace(/\s+/g, ''),
     webpage_url: firstString(record, ['webpage_url', 'original_url', 'url']) ?? '',
     entries,
+    // Conditional spread keeps the legacy object shape byte-identical for
+    // fixtures without these keys (frozen M1/M4 mapper contracts).
+    ...(declaredCount === null ? {} : { playlistCount: declaredCount }),
+    ...(skippedEntries === 0 ? {} : { skippedEntries }),
   };
 }
 
