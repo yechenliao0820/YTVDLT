@@ -13,8 +13,13 @@
  * within a week, so R3 is name-set based and the test pins both directions.
  */
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   ALLOWED_NEW_DEPS, checkFrozen, lockImporterDeps, lockPackageKeys, packageNameOf,
+  runFrozenGateCli,
 } from '../../scripts/frozen-gate.mjs';
 
 const HEAD_PKG = {
@@ -241,5 +246,88 @@ describe('frozen gate · lockfile parsing helpers', () => {
 
   it('reads importer declarations as importer|section|dependency', () => {
     expect([...lockImporterDeps(HEAD_LOCK)]).toEqual(['.|devDependencies|electron', '.|devDependencies|vitest']);
+  });
+});
+
+/**
+ * R1-09 — the gate must be able to FAIL.
+ *
+ * The file had no CLI entry for a long time, so `node scripts/frozen-gate.mjs`
+ * imported the module and exited 0 without checking anything. These two cases
+ * pin the property that was missing: a real git repository, read through the
+ * same code path the CLI uses, PASSES only when the frozen file is untouched and
+ * FAILS as soon as it is edited. Driven through `runFrozenGateCli(cwd)` rather
+ * than a child process so the assertion is on the verdict, not on an exit code
+ * nobody captured.
+ */
+describe('frozen gate · CLI resolution against a real repository (R1-09)', () => {
+  /** Written as a constant so no escaping layer can turn it into a literal `\n`. */
+  const NL = String.fromCharCode(10);
+  const git = (cwd: string, args: string[]): string => String(
+    spawnSync('git', args, {
+      cwd, shell: false, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    }).stdout ?? '',
+  );
+
+  const scratchRepo = (): string | null => {
+    const dir = mkdtempSync(join(tmpdir(), 'ytvdlt-frozen-'));
+    git(dir, ['init', '-q']);
+    if (!git(dir, ['rev-parse', '--is-inside-work-tree']).includes('true')) return null;
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'x', devDependencies: { vitest: '3.2.4' } }));
+    // A lockfile shaped like the v9 blocks the parser reads: two-space keys
+    // under `packages:`, one importer declaration under `importers:`.
+    const lock = [
+      'lockfileVersion: 9.0',
+      'importers:',
+      '  .:',
+      '    devDependencies:',
+      '      vitest:',
+      '        specifier: 3.2.4',
+      '        version: 3.2.4',
+      'packages:',
+      '',
+      "  'vitest@3.2.4':",
+      '    resolution: {integrity: sha512-x}',
+      '',
+    ].join(NL);
+    writeFileSync(join(dir, 'pnpm-lock.yaml'), lock);
+    mkdirSync(join(dir, 'packages', 'shared', 'src'), { recursive: true });
+    writeFileSync(join(dir, 'packages', 'shared', 'src', 'request.ts'), `export const frozen = 1;${NL}`);
+    git(dir, ['add', '.']);
+    git(dir, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'base']);
+    return dir;
+  };
+
+  it('passes when the frozen file is byte-identical to HEAD', () => {
+    const dir = scratchRepo();
+    if (dir === null) return;               // no usable git: SKIP, never a fake pass
+    try {
+      const verdict = runFrozenGateCli(dir);
+      expect(verdict.ok).toBe(true);
+      expect(verdict.reasons).toEqual([]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('fails as soon as the frozen file is edited in the working tree', () => {
+    const dir = scratchRepo();
+    if (dir === null) return;
+    try {
+      writeFileSync(join(dir, 'packages', 'shared', 'src', 'request.ts'), `export const frozen = 2;${NL}`);
+      const verdict = runFrozenGateCli(dir);
+      expect(verdict.ok).toBe(false);
+      expect(verdict.reasons.join()).toContain('request.ts');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('fails on a deleted dependency instead of passing quietly', () => {
+    const dir = scratchRepo();
+    if (dir === null) return;
+    try {
+      const pkg = { name: 'x', devDependencies: {} };
+      writeFileSync(join(dir, 'package.json'), JSON.stringify(pkg));
+      const verdict = runFrozenGateCli(dir);
+      expect(verdict.ok).toBe(false);
+      expect(verdict.reasons.join()).toContain('vitest');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

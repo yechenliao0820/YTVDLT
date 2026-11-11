@@ -146,6 +146,9 @@
   /** Live playlist selector — also loaded only in live mode (frozen baselines). */
   var playlistImport = null;
   var playlistImportLoading = false;
+  /** D-134: the supported-sites panel; same live-only reason as above. */
+  var supportedSites = null;
+  var supportedSitesLoading = false;
 
   /** D-106: one queue view survives menu / nav-bar page switches. */
   var viewReady = false;
@@ -236,7 +239,11 @@
     // Playlist batch import (append-only): exact wire strings from shared/src/ipc.ts.
     PLAYLIST_PREVIEW: 'ytvdlt:playlist:preview',
     PLAYLIST_PREVIEW_CANCEL: 'ytvdlt:playlist:previewCancel',
-    PLAYLIST_BATCH_ENQUEUE: 'ytvdlt:playlist:batchEnqueue'
+    PLAYLIST_BATCH_ENQUEUE: 'ytvdlt:playlist:batchEnqueue',
+    // D-134 (append-only): supported sites + the per-URL pre-check. Both read
+    // the running engine; neither can start a download.
+    SUPPORTED_SITES: 'ytvdlt:sites:list',
+    URL_SUPPORT_CHECK: 'ytvdlt:sites:check'
   };
 
   /** Thin wrapper over the preload surface: `{ok:false, code, message}` on failure
@@ -699,6 +706,39 @@
     tag.addEventListener('error', function () { playlistImportLoading = false; });
     if (doc.head && typeof doc.head.appendChild === 'function') doc.head.appendChild(tag);
     else playlistImportLoading = false;
+  }
+
+  /** D-134：把「支持的网站」入口挂到粘贴框旁边（仅 live 模式注入）。 */
+  function mountSupportedSites(factory) {
+    if (supportedSites !== null || !factory || typeof factory.create !== 'function') return;
+    var anchor = doc.getElementById('queue-paste-form');
+    if (anchor === null) return;
+    supportedSites = factory.create({ doc: doc, t: t, call: call, notify: notify });
+    supportedSites.mount(anchor, '../../styles/supported-sites.css');
+  }
+
+  /**
+   * Lazy loader, identical in shape to the txt-import / playlist loaders.
+   *
+   * Why lazy at all: the panel is only useful in the packaged app (there is no
+   * engine in a file:// preview), and loading it unconditionally would add a
+   * button and a stylesheet to every frozen screenshot baseline.
+   */
+  function ensureSupportedSites() {
+    if (supportedSites !== null || supportedSitesLoading) return;
+    if (!live.active) return;
+    var existing = global.YTVDLT && global.YTVDLT.supportedSites;
+    if (existing) { mountSupportedSites(existing); return; }
+    supportedSitesLoading = true;
+    var tag = doc.createElement('script');
+    tag.setAttribute('src', '../../sites/supported-sites.js');
+    tag.addEventListener('load', function () {
+      supportedSitesLoading = false;
+      mountSupportedSites(global.YTVDLT && global.YTVDLT.supportedSites);
+    });
+    tag.addEventListener('error', function () { supportedSitesLoading = false; });
+    if (doc.head && typeof doc.head.appendChild === 'function') doc.head.appendChild(tag);
+    else supportedSitesLoading = false;
   }
 
   /** The six flat DOWNLOAD_START keys, or `null` for the untouched old flow. */
@@ -1788,6 +1828,7 @@
   ensureSubtitlePicker();
   ensureTxtImport();
   ensurePlaylistImport();
+  ensureSupportedSites();
   model.tab = TABS.indexOf(param('tab', 'all')) === -1 ? 'all' : param('tab', 'all');
   // `?kind=audio` starts on the audio tab (e2e case + deep-link friendly).
   setKind(param('kind', 'video') === 'audio' ? 'audio' : 'video');

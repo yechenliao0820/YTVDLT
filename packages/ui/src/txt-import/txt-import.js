@@ -194,6 +194,17 @@
       foot.appendChild(confirm);
     }
 
+    /**
+     * R1-03: one line per unconfirmed/no-media url, headed by its bucket name.
+     * `textContent` only (never innerHTML) — these are user-supplied urls.
+     */
+    function appendBucket(body, bucketKey, urls) {
+      var list = Array.isArray(urls) ? urls : [];
+      for (var i = 0; i < list.length; i += 1) {
+        body.appendChild(message(t(bucketKey) + ' — ' + String(list[i]), 'warn'));
+      }
+    }
+
     function renderResult(result) {
       var root = shell();
       var body = root.querySelector('#txt-import-body');
@@ -208,6 +219,27 @@
         failed: result && typeof result.failed === 'number' ? result.failed : 0
       }), ok ? 'ok' : 'warn'));
       if (!ok) body.appendChild(message(errorText(result), 'warn'));
+      // R1-03: the three-way tally FIRST, so the numbers the user is
+      // reconciling ("I imported 40") arrive before the per-URL detail. Only the
+      // buckets that are NOT already listed as failures appear below: an
+      // UNSUPPORTED url is a failure row, a no-media or unconfirmed one is not.
+      var precheck = result && result.precheck;
+      if (precheck) {
+        body.appendChild(message(t('queue.precheck.summary', {
+          supported: Number(precheck.supported) || 0,
+          unsupported: Number(precheck.unsupported) || 0,
+          noMedia: Number(precheck.noMedia) || 0,
+          indeterminate: Number(precheck.indeterminate) || 0,
+          skipped: Number(precheck.skipped) || 0
+        }), 'ok'));
+        if ((Number(precheck.skipped) || 0) > 0) {
+          body.appendChild(message(t('queue.precheck.skippedNote', {
+            skipped: Number(precheck.skipped) || 0
+          }), 'warn'));
+        }
+        appendBucket(body, 'queue.precheck.noMedia', precheck.noMediaUrls);
+        appendBucket(body, 'queue.precheck.indeterminate', precheck.indeterminateUrls);
+      }
       var failures = result && Array.isArray(result.failures) ? result.failures : [];
       failures.forEach(function (item) {
         body.appendChild(message(String(item.url) + ' — ' + String(item.reason), 'warn'));

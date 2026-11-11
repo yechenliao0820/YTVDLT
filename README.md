@@ -19,34 +19,35 @@ dialog on first launch.
 - Download engine: bundled `yt-dlp`, verified and replaceable at runtime
 - Maintainability: a one-way layering rule keeps all queue logic offline-testable
 
-## Latest release — 0.2.8
+## Latest release — 0.2.9
 
 | | |
 |---|---|
 | Released | 2026-11-10 |
-| Artifact | `YTVDLT.Setup.0.2.8.exe` — NSIS installer, Windows x64, 226,309,350 B |
-| SHA-256 | `e5ba021ab9bc49394079b3b3b3c8bc1f315c301bb334b527ec176683a6ee1db2` |
-| Tag / release baseline | `v0.2.8` → commit `0d2a21d` |
-| Downloads | [Release 0.2.8](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.8) · [all releases](https://github.com/yechenliao0820/YTVDLT/releases) |
+| Artifact | `YTVDLT.Setup.0.2.9.exe` — NSIS installer, Windows x64, 226,309,433 B |
+| SHA-256 | `952ec7d890ed099a984c570a18cb2af8ab54bdbc9355f907be8ff0d3f2632e58` |
+| Tag / release baseline | `v0.2.9` → commit `a39468d` |
+| Downloads | [Release 0.2.9](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.9) · [all releases](https://github.com/yechenliao0820/YTVDLT/releases) |
 
-**What changed in 0.2.8** — task deletion is now *idempotent*: if you already
-deleted a video in File Explorer, ticking "also delete local files" no longer
-blocks the history record from being removed. Genuine failures (locked file,
-permission denied, unavailable volume) still keep the record and report the real
-OS reason. Completed cards now show an on-demand local file state hint such as
-*Local file is missing* or *Local file is inaccessible*, and Settings → About
-states the project's own licence separately from every bundled component's
-licence, with the full English licence text embedded. (D-120, D-121)
+**What changed in 0.2.9** — right-click inside an editable field (the video link
+box) now opens the native Cut / Copy / Paste / Select all menu in the UI
+language, with each item enabled according to Electron's own `editFlags`;
+non-editable areas keep their existing task-card menu, and the clipboard is
+never read or auto-submitted (D-123). This is also the first installer to carry
+the settings-page placeholder fix: a path that has not loaded yet shows `—`
+instead of flashing a made-up Downloads path (D-122).
 
 The installer is **not code-signed**; SmartScreen will warn once on first run.
 
 ## Screenshots
 
-All images below were regenerated from the **actual 0.2.8 UI pages** in headless
+All images below were regenerated from the **actual UI pages** in headless
 Chromium at 1280×800 (the task-detail shot is 1280×480). Task rows are
 representative sample data injected into the real renderer — the same mechanism
 the E2E suite uses — so the cards show several states at once: downloading,
-parsing, completed, cancelled, failed, plus two 0.2.8 file-state hints.
+parsing, completed, cancelled, failed, plus two local file-state hints. (The
+supported-sites panel added later is injected in live mode only, so it does not
+appear in these static captures.)
 
 | Download queue — light theme (Chinese), with file-state hints | Download queue — dark theme (English) |
 |---|---|
@@ -98,10 +99,25 @@ filesystem. `scripts/check-layering.mjs` enforces the boundary.
 - Paste a link, choose **video** or **audio**, pick a resolution preset
   (best / 2160p / 1440p / 1080p / 720p / 480p / 360p / lowest) or an audio
   bitrate (192 / 128 / 64 / 32 kbps, with optional MP3 or M4A transcode).
+  *Lowest* is a real choice again: it asks the engine for the smallest stream by
+  relative ordering rather than pinning a number, so a 480p-only source gives
+  480p and an audio-only source is not given an invented video stream. (D-133)
 - Batch import: paste a TXT list (one URL per line) or a playlist link. A
   playlist is probed live, previewed and selected by default, then confirmed
   once into N independent tasks — each with its own cancel / retry.
   (D-129, D-130)
+- **Supported sites, read from your own engine.** The panel lists what the
+  bundled `yt-dlp` actually reports (`--list-extractors`) — site count,
+  sub-extractors, engine version — with search, sort, refresh and paging. There
+  is no fallback list, by design: if the engine cannot be read, the panel says
+  so instead of inventing names. `GenericIE` is called out separately, because
+  it claims any http(s) URL. (D-134)
+- **Support pre-check before a URL joins the queue.** A submission is classified
+  as `SUPPORTED` / `UNSUPPORTED` / `NO_MEDIA` / `INDETERMINATE` / `TIMEOUT` /
+  `CANCELLED` by the same engine, and **only an unambiguous "unsupported" is
+  blocked** — everything else is let through and fails with the engine's own,
+  more accurate error if it really fails. A page that simply has no video is
+  *not* reported as an unsupported site. (D-134)
 - Real filenames: `--restrict-filenames` is no longer silently enabled, so CJK
   titles, spaces and punctuation survive. Existing configs are migrated
   (schema v1 → v2). A repeated download is saved as a separate ` (1)` / ` (2)`
@@ -206,6 +222,10 @@ Stated plainly rather than glossed over:
 - The installer is unsigned; `Engine: unknown` can still appear in an error
   report; post-processing stages have no speed / ETA because the engine does
   not report one.
+- The supported-sites panel and the URL pre-check have been exercised against
+  the real engine **offline** (local fixtures, `127.0.0.1`, the shipped
+  binaries). Their behaviour on live third-party sites — and how *lowest*
+  resolves against a real resolution table — has not been verified online yet.
 - App updates download the whole installer (no delta), and the portable build
   does not participate in self-update.
 - No real-device, all-sites coverage is claimed; the verification numbers
@@ -213,9 +233,9 @@ Stated plainly rather than glossed over:
 
 Full list: [`docs/AI-MAINTENANCE.md`](docs/AI-MAINTENANCE.md) §10.
 
-## Release history — 0.2.2 → 0.2.8
+## Release history — 0.2.2 → 0.2.9
 
-Seven releases in three days. The trajectory moved from UI polish, through
+Eight releases in three days. The trajectory moved from UI polish, through
 download-core correctness, to edge cases that only appear after a file has been
 moved or deleted outside the app.
 
@@ -227,10 +247,14 @@ moved or deleted outside the app.
 | 0.2.5 | 2026-11-09 | Real (CJK) filenames; progress restored by dropping default aria2c; 400 ms polling and in-place progress patches | D-110…D-112 | [v0.2.5](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.5) |
 | 0.2.6 | 2026-11-09 | `APP_INFO` version truth; post-download stages; safer delete dialog; default Videos folder; per-task temp-file isolation | D-114…D-118 | [v0.2.6](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.6) |
 | 0.2.7 | 2026-11-09 | Updater install state machine; card button height adapts to large windows | D-119 | [v0.2.7](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.7) |
-| **0.2.8** | **2026-11-10** | Idempotent deletion; on-demand local file state detection; layered licence pane with the full English licence | D-120 / D-121 | [v0.2.8](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.8) |
+| 0.2.8 | 2026-11-10 | Idempotent deletion; on-demand local file state detection; layered licence pane with the full English licence | D-120 / D-121 | [v0.2.8](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.8) |
+| **0.2.9** | **2026-11-10** | Native right-click edit menu in editable fields; settings placeholder shows `—` instead of a made-up path | D-122 / D-123 | [v0.2.9](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.9) |
 
-Narrative, rationale and per-decision evidence: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
-and [`docs/DECISIONS.md`](docs/DECISIONS.md).
+Unreleased work sitting on top of 0.2.9 — subtitles, batch import, playlist
+batch, supported sites and the URL support pre-check — is described in
+[`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
+[`docs/DECISIONS.md`](docs/DECISIONS.md) (up to D-134) and has not been packaged
+or versioned yet.
 
 ## Engineering and verification
 
@@ -244,6 +268,17 @@ The 0.2.8 release was gated by:
 | Screenshot drift | 0 px (two DOM baselines rebuilt per case after the licence-pane change; no PNG baseline was overwritten) |
 | `check-layering` / `frozen-gate` | 0 violations / passed |
 
+The unreleased work on top of 0.2.9 (subtitles, batch import, playlist batch,
+supported sites, URL pre-check) was gated separately by:
+
+| Gate | Result |
+|---|---|
+| Unit / contract tests | 1724 passed across 121 files, 0 failed |
+| Offline integration (the real bundled `yt-dlp` / FFmpeg) | 40 passed across 12 files |
+| Screenshot E2E | 31/31 cases + 5/5 negative checks, baselines untouched (0 px drift) |
+| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
+| Engine self-report provenance | Which extractors exist, and how failures are classified, are read back from the shipped `yt-dlp` — never from a checked-in list |
+
 Design invariants worth knowing if you plan to modify the code:
 
 - File deletion has exactly one primitive — `shell.trashItem`. Nothing in the
@@ -254,6 +289,9 @@ Design invariants worth knowing if you plan to modify the code:
   it ever does.
 - Every IPC payload is validated against an explicit key whitelist before a
   handler runs.
+- The supported-sites list and the URL verdicts come from the running engine.
+  There is deliberately no hard-coded fallback, and the enqueue gate fails
+  **open**: only a clear "unsupported" blocks a URL.
 
 These are automated results for the shipped build, not a claim that every
 Windows device, DPI setting or video site has been exercised.

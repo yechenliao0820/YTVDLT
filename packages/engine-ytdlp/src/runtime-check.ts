@@ -28,4 +28,16 @@ export function assertAbsoluteRuntimePaths(enginePath: string, jsRuntimePath: st
 export function assertSafeSpawnOptions(opts: SpawnOptions): void {
   if (opts.shell !== false) throw new Error('spawn must use shell:false');
   if (opts.windowsHide !== true) throw new Error('spawn must use windowsHide:true');
+  // D-133: a ceiling that is not a positive integer would be treated as
+  // "unbounded" by the adapter, so a typo (`0`, `-1`, `NaN`) would silently
+  // turn the guard off exactly where it is meant to apply. Refuse it loudly.
+  for (const [name, value] of [
+    ['maxStdoutBytes', opts.maxStdoutBytes],
+    ['maxStderrBytes', opts.maxStderrBytes],
+  ] as const) {
+    if (value === undefined) continue;
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`${name} must be a positive integer when set, got ${String(value)}`);
+    }
+  }
 }

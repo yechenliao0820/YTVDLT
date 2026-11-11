@@ -142,6 +142,15 @@
       'queue.playlist.error.TOO_MANY_ITEMS': '选中条目超过 500 条上限',
       'queue.playlist.error.PARTIAL_SUCCESS': '部分任务加入成功',
       'queue.playlist.error.ENQUEUE_FAILED': '没有任务成功加入队列',
+      // D-135 (R1-03): the pre-check tally. Shown for BOTH batch surfaces so a
+      // user can reconcile "I imported N links" against what was confirmed —
+      // before this, only the refusals were reported and INDETERMINATE links
+      // silently looked like they had been verified.
+      'queue.precheck.summary': '链接预检：支持 {supported} · 不支持 {unsupported} · 无媒体 {noMedia} · 未确认 {indeterminate} · 未检查 {skipped}',
+      'queue.precheck.unsupported': '不支持',
+      'queue.precheck.noMedia': '无媒体',
+      'queue.precheck.indeterminate': '未确认',
+      'queue.precheck.skippedNote': '有 {skipped} 条链接没有经过预检，下载时才会知道结果。',
       'queue.paste.hint': 'Ctrl+V 粘贴解析',
       'queue.concurrency': '并发 {active}/{limit}',
       'queue.empty.title': '还没有任务',
@@ -255,6 +264,32 @@
       'subtitle.notify.confirmed': '已选择 {n} 种字幕，将在开始下载时一起提交。',
       'subtitle.notify.expired': '字幕预览已过期，请重新获取。',
       'subtitle.notify.stale': '字幕选择已失效，请重新获取或清空选择后再下载。',
+
+      // D-134 · 支持的网站（队列页按需加载，不改变冻结截图基线）
+      // 说明：这里的每一个数字都来自「当前正在运行的引擎」，
+      // 任何一行都不允许写死站点名——写死的名单会随引擎升级而失真，
+      // 且与正确名单无法区分。
+      'sites.entry': '支持的网站',
+      'sites.title': '支持的网站',
+      'sites.close': '关闭',
+      'sites.search': '搜索站点或解析器名称',
+      'sites.sort.name': '按名称排序',
+      'sites.sort.broken': '失效优先',
+      'sites.refresh': '刷新',
+      'sites.loading': '正在向下载引擎查询…',
+      'sites.summary': '引擎 {version} · 站点 {sites} 个 · 子解析器 {subs} 个',
+      'sites.summary.cached': '引擎 {version} · 站点 {sites} 个 · 子解析器 {subs} 个（缓存）',
+      'sites.version.unknown': '版本未知',
+      'sites.broken': '引擎标记为失效',
+      'sites.genericBadge': '通用',
+      'sites.generic.note': '通用解析器（generic）会对任意网页尝试查找媒体文件，这不代表所有网站都能下载成功，也不代表站点被专门支持。',
+      'sites.emptyFilter': '没有匹配的站点。',
+      'sites.more': '还有 {count} 条，点击展开',
+      'sites.error.timeout': '下载引擎未在限时内响应，请稍后重试。',
+      'sites.error.unavailable': '当前构建无法查询下载引擎，此处不提供站点名单。',
+      'sites.error.empty': '引擎返回了空列表，可能是引擎文件异常。',
+      'sites.error.tooLarge': '引擎输出的列表超出安全上限，已中止读取。',
+      'sites.error.failed': '无法获取站点列表，请查看运行时自检。',
 
       // 0.2.1 (D-93): 应用更新弹窗（queue 与 settings 共用）
       'update.title': '发现新版本',
@@ -661,6 +696,11 @@
       'queue.playlist.error.TOO_MANY_ITEMS': 'More than 500 entries selected',
       'queue.playlist.error.PARTIAL_SUCCESS': 'Only some tasks were added',
       'queue.playlist.error.ENQUEUE_FAILED': 'No task could be added to the queue',
+      'queue.precheck.summary': 'Link pre-check: {supported} supported · {unsupported} unsupported · {noMedia} no media · {indeterminate} unconfirmed · {skipped} not checked',
+      'queue.precheck.unsupported': 'Unsupported',
+      'queue.precheck.noMedia': 'No media',
+      'queue.precheck.indeterminate': 'Unconfirmed',
+      'queue.precheck.skippedNote': '{skipped} link(s) were never pre-checked — only the download will decide.',
       'queue.paste.hint': 'Ctrl+V to paste and parse',
       'queue.concurrency': 'Running {active}/{limit}',
       'queue.empty.title': 'No tasks yet',
@@ -769,6 +809,32 @@
       'subtitle.notify.confirmed': '{n} subtitle language(s) will be attached to the next download.',
       'subtitle.notify.expired': 'The preview expired. Refresh it.',
       'subtitle.notify.stale': 'The subtitle selection is no longer valid. Refresh or clear it before downloading.',
+
+      // D-134 · Supported sites (loaded on demand; frozen baselines unaffected)
+      // Every number here comes from the RUNNING engine. No site name may be
+      // hard-coded: a shipped list drifts with every engine update and is
+      // indistinguishable from a correct one.
+      'sites.entry': 'Supported sites',
+      'sites.title': 'Supported sites',
+      'sites.close': 'Close',
+      'sites.search': 'Search a site or extractor name',
+      'sites.sort.name': 'Sort by name',
+      'sites.sort.broken': 'Broken first',
+      'sites.refresh': 'Refresh',
+      'sites.loading': 'Asking the download engine…',
+      'sites.summary': 'Engine {version} · {sites} sites · {subs} sub-extractors',
+      'sites.summary.cached': 'Engine {version} · {sites} sites · {subs} sub-extractors (cached)',
+      'sites.version.unknown': 'version unknown',
+      'sites.broken': 'Marked broken by the engine',
+      'sites.genericBadge': 'generic',
+      'sites.generic.note': 'The generic extractor tries to find a media file on any web page. It does not mean every site works, and it is not dedicated site support.',
+      'sites.emptyFilter': 'No matching site.',
+      'sites.more': '{count} more — click to show',
+      'sites.error.timeout': 'The engine did not answer in time. Try again shortly.',
+      'sites.error.unavailable': 'This build cannot query the engine, so no site list is shown here.',
+      'sites.error.empty': 'The engine returned an empty list; its file may be damaged.',
+      'sites.error.tooLarge': 'The engine output exceeded the safety limit; reading was aborted.',
+      'sites.error.failed': 'Could not read the site list. Check the runtime self-test.',
 
       'update.title': 'Update available',
       'update.subtitle': 'v{version} is out (you have v{current})',

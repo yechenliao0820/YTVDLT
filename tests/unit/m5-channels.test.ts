@@ -93,9 +93,10 @@ describe('m5 ipc · channel inventory', () => {
   // 11 (M5) + the four 0.2.1 channels + THUMBNAIL_CACHE (D-103)
   // + the two subtitle-preview channels (stage 2, append-only)
   // + the two TXT import channels (D-129, append-only)
-  // + the three playlist batch channels (D-130, append-only).
-  it('exposes exactly the twenty-four M5 channels, all present in IPC_CHANNELS', () => {
-    expect(M5_CHANNELS).toHaveLength(24);
+  // + the three playlist batch channels (D-130, append-only)
+  // + the two supported-sites / URL pre-check channels (D-134, append-only).
+  it('exposes exactly the twenty-six M5 channels, all present in IPC_CHANNELS', () => {
+    expect(M5_CHANNELS).toHaveLength(26);
     const values = Object.values(IPC_CHANNELS);
     for (const channel of M5_CHANNELS) expect(values).toContain(channel);
     expect(new Set(M5_CHANNELS).size).toBe(M5_CHANNELS.length);

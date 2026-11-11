@@ -192,9 +192,15 @@ const SUBTITLE_FORMATS: readonly SubtitleDomain['convertTo'][] = [
 const PATH_COMBOS: readonly (readonly [boolean, boolean])[] = [
   [false, false], [true, false], [false, true], [true, true],
 ];
+// D-133 (TASK-01): `lowest` maps to the ASCENDING sort `+res`, not to "no
+// term". Without it yt-dlp's default descending sort picked the HIGHEST
+// resolution, which is the bug this table used to ratify. `best` is still
+// absent on purpose: "no term" already means "highest", because yt-dlp sorts
+// `res` descending by default.
 const RESOLUTION: Readonly<Record<string, string>> = {
   '2160p': '2160', '1440p': '1440', '1080p': '1080',
   '720p': '720', '480p': '480', '360p': '360',
+  lowest: '+res',
 };
 const CODEC_FIELD: Readonly<Record<string, string>> = {
   av01: 'vcodec:av01', h264: 'vcodec:h264',
@@ -239,7 +245,11 @@ describe('B3 · 64 combination cases (8 x 2 x 6 x 5 x 4, all dimensions enumerat
       const sortIndex = argv.indexOf('-S');
       const parts: string[] = [];
       const resolution = RESOLUTION[quality ?? ''];
-      if (resolution !== undefined) parts.push(`res:${resolution}`);
+      // D-133: the map value is the COMPLETE sort term — `lowest` is `+res`,
+      // which is a literal term, not a numeric resolution.
+      if (resolution !== undefined) {
+        parts.push(resolution.startsWith('+') ? resolution : `res:${resolution}`);
+      }
       const codecField = CODEC_FIELD[codec ?? ''];
       if (codecField !== undefined) parts.push(codecField);
       const abr = ABR_FIELD[audio ?? ''] ?? null;
@@ -250,9 +260,16 @@ describe('B3 · 64 combination cases (8 x 2 x 6 x 5 x 4, all dimensions enumerat
         expect(sortIndex).toBeGreaterThan(-1);
         expect(argv[sortIndex + 1]).toBe(parts.join(','));
       }
-      // best/lowest with all-default other fields never carry a res constraint.
-      if (quality === 'best' || quality === 'lowest') {
-        expect(argv[sortIndex + 1] ?? '').not.toContain('res:');
+      // D-133: `best` carries no res term (the default sort already means
+      // "highest"), but `lowest` MUST carry `+res` — the whole point of the fix.
+      if (quality === 'best') {
+        expect(argv[sortIndex + 1] ?? '').not.toContain('res');
+      }
+      if (quality === 'lowest') {
+        // Never a fixed resolution: `+res` is relative, so a 480p-only source
+        // still yields 480p instead of upscaling to a hard-coded 360p.
+        expect(argv[sortIndex + 1]).toContain('+res');
+        expect(argv[sortIndex + 1] ?? '').not.toMatch(/\bres:\d/);
       }
 
       // subtitle conversion.

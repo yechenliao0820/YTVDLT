@@ -27,6 +27,8 @@ import { createTxtImportService } from './txt-import-service.js';
 import type { TxtImportFilePort } from './txt-import-service.js';
 import { randomUUID } from 'node:crypto';
 import { PlaylistPreviewService } from './playlist-preview-service.js';
+import { SiteSupportService } from './site-support-service.js';
+import type { SiteSupportPortLike } from './m5-channels.js';
 
 export interface M5HostOptions extends M4HostOptions {
   /** OS probe (nativeTheme + registry accent); injected so tests stay offline. */
@@ -58,6 +60,45 @@ export interface M5HostOptions extends M4HostOptions {
    * report TXT_IMPORT_UNAVAILABLE (unit-test builds stay offline).
    */
   readonly txtImportFile?: TxtImportFilePort;
+  /**
+   * D-134 / D-135: absolute path of the engine `options.engine` wraps.
+   *
+   * Half of the supported-site cache identity (§3.2). Passed explicitly rather
+   * than read off the engine object because `DownloadEngine` is FROZEN at five
+   * methods and carries no path; this is the same value the bootstrap handed to
+   * the engine factory, so the two cannot drift.
+   *
+   * REQUIRED, not optional (R1-02): while it was optional the caller could omit
+   * it, the host filled in `''`, and the catalog slot was written with the
+   * engine's own reported path but looked up with `''` — the two never matched,
+   * so every panel open re-spawned `--list-extractors`. A required field turns
+   * that silent write-off into a compile error at the call site.
+   */
+  readonly enginePath: string;
+  /** D-134: where catalog/pre-check diagnostics go; absent = silent. */
+  readonly siteSupportLogger?: {
+    warn(scope: string, message: string, detail?: Record<string, unknown>): Promise<void> | void;
+    error(scope: string, message: string, detail?: Record<string, unknown>): Promise<void> | void;
+  };
+  /**
+   * D-134 / D-135: the network context a pre-check should run under.
+   *
+   * A function, not a value: the user can change proxy / cookies while the app
+   * is open, and a pre-check that kept the startup snapshot would answer for a
+   * network the download no longer uses.
+   *
+   * REQUIRED (R1-01): it was optional, the bootstrap simply omitted it, and the
+   * pre-check then ran WITHOUT the user's proxy / cookies / UA — on a network
+   * that needs a proxy every URL degrades to `INDETERMINATE` and the feature
+   * looks implemented while doing nothing. Nothing failed, nothing was logged.
+   * Making it required means "I have no network context" has to be stated as
+   * `() => ({})` at the call site instead of happening by omission.
+   */
+  readonly siteSupportNetwork: () => {
+    readonly proxy?: string;
+    readonly cookiesFile?: string;
+    readonly userAgent?: string;
+  };
 }
 
 /**
@@ -169,6 +210,30 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     newId: () => randomUUID(),
   });
 
+  // D-134: supported-site discovery + the per-URL pre-check. Constructing it
+  // costs nothing (no engine is spawned until the page or a submission asks),
+  // so a user who never opens the panel pays no extra subprocess.
+  //
+  // The ENGINE IDENTITY comes from the same two values the bootstrap used to
+  // build the engine — the resolved absolute path and the version it reads —
+  // so a self-update changes the cache key and invalidates the list by
+  // construction (§3.2), without anyone remembering to clear a cache.
+  const siteSupport: SiteSupportPortLike = new SiteSupportService({
+    engine: options.engine,
+    // Required upstream (R1-02), so this can never silently become `''`.
+    enginePath: options.enginePath,
+    // The LIVE engine version, not `options.engineVersion` (a startup snapshot
+    // string): the whole point of the cache identity is to notice a self-update,
+    // and a frozen string could never change.
+    engineVersion: () => options.engine.version(),
+    jsRuntimePath: options.jsRuntimePath,
+    clock: options.ports.clock,
+    ...(options.siteSupportLogger === undefined ? {} : { logger: options.siteSupportLogger }),
+    // Always forwarded: the option is required upstream (R1-01), so there is no
+    // "forgot to pass it" branch left to compile.
+    network: options.siteSupportNetwork,
+  });
+
   const handlers = createM5Handlers({
     queue,
     taskDetail: detailPort(m4),
@@ -194,6 +259,7 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     enqueueSingle: (input) => m4.enqueueSingle(input),
     playlistPreview,
     playlistBatch: (input) => m4.enqueuePlaylistBatchWithReport(input),
+    siteSupport,
     // TXT import reuses the ENGINE's own URL whitelist (assertHttpUrl), the
     // same one `argv-builder-download.ts` calls before building argv. We do
     // not invent a site registry: whether yt-dlp supports a host is decided
@@ -203,6 +269,10 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
         pickFile: options.txtImportFile,
         validateUrl: assertHttpUrl,
         enqueueBatch: (input) => m4.enqueueTxtBatch(input),
+        // D-134: the same pre-check the single path uses. Applied here because
+        // the renderer never receives these URLs (D-129 trust boundary), so this
+        // is the only place the rule can be enforced for a TXT import.
+        siteSupport,
       }),
     }),
   });

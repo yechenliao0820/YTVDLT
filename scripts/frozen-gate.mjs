@@ -28,7 +28,12 @@
  * gate output still shows it.
  *
  * Pure function: it never runs git itself, so it is fully L0-testable.
+ * The CLI wrapper at the bottom of this file owns the git side (R1-09).
  */
+import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 /** Exact versions registered in package.json -> ytvdltPlannedDependencies. */
 export const ALLOWED_NEW_DEPS = Object.freeze({
@@ -224,4 +229,87 @@ export function checkFrozen({
   }
 
   return { ok: reasons.length === 0, reasons, stats };
+}
+
+/* ------------------------------------------------------------------------- *
+ * CLI entry (R1-09)
+ *
+ * WHY THIS EXISTS: until this was added the file exported `checkFrozen()` and
+ * nothing else. `node scripts/frozen-gate.mjs` therefore imported the module,
+ * ran no check at all, and exited 0 — so every "frozen-gate passed" line in a
+ * report was evidence of nothing. A gate that cannot fail is worse than no gate,
+ * because it is counted as coverage.
+ *
+ * Resolution rules, all deliberate:
+ *   - HEAD  side: `git show HEAD:<file>` — the committed baseline.
+ *   - WORK  side: the WORKING TREE file, not the index. `git show :file` would
+ *     report a staged snapshot and miss exactly the uncommitted edits this gate
+ *     is meant to catch.
+ *   - git unavailable or the file missing at HEAD (first commit): exit 2 with a
+ *     message, never a silent pass.
+ *
+ *   node scripts/frozen-gate.mjs          # human output, exit 0/1
+ *   node scripts/frozen-gate.mjs --json   # machine output
+ * ------------------------------------------------------------------------- */
+function isCliEntry() {
+  const invoked = process.argv[1];
+  if (invoked === undefined) return false;
+  try {
+    return pathToFileURL(invoked).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
+function gitShow(ref, cwd) {
+  const run = spawnSync('git', ['show', ref], {
+    cwd, shell: false, windowsHide: true, encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024,
+  });
+  return run.status === 0 ? run.stdout : null;
+}
+
+export function runFrozenGateCli(cwd = process.cwd()) {
+  const headPkg = gitShow('HEAD:package.json', cwd);
+  if (headPkg === null) {
+    return { ok: false, reasons: ['无法读取 git HEAD:package.json（不在 git 仓库或尚无提交）'], stats: {} };
+  }
+  const headLock = gitShow('HEAD:pnpm-lock.yaml', cwd);
+  const workPkgText = readFileSync(join(cwd, 'package.json'), 'utf8');
+  const workLockText = existsSync(join(cwd, 'pnpm-lock.yaml'))
+    ? readFileSync(join(cwd, 'pnpm-lock.yaml'), 'utf8')
+    : null;
+  // The frozen contract file: an empty diff means byte-identical.
+  const coreDiffRun = spawnSync('git', ['diff', 'HEAD', '--', FROZEN_CORE_FILE], {
+    cwd, shell: false, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const coreDiff = coreDiffRun.status === 0 ? (coreDiffRun.stdout ?? '') : '__git_failed__';
+  const reasons = [];
+  if (coreDiff === '__git_failed__') reasons.push(`无法对 ${FROZEN_CORE_FILE} 执行 git diff`);
+
+  const result = checkFrozen({
+    coreDiff: coreDiff === '__git_failed__' ? '' : coreDiff,
+    pkgHead: JSON.parse(headPkg),
+    pkgWork: JSON.parse(workPkgText),
+    lockHead: headLock,
+    lockWork: workLockText,
+  });
+  return { ...result, reasons: [...reasons, ...result.reasons], ok: reasons.length === 0 && result.ok };
+}
+
+if (isCliEntry()) {
+  const result = runFrozenGateCli();
+  if (process.argv.includes('--json')) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else if (result.ok) {
+    process.stdout.write(
+      `[frozen-gate] PASS — ${FROZEN_CORE_FILE} 未改动；package.json 白名单合规；`
+      + `pnpm-lock.yaml 无依赖消失（新增 ${result.stats.addedPackages?.length ?? 0}，`
+      + `版本变动 ${result.stats.versionChanges ?? 0}）\n`,
+    );
+  } else {
+    process.stdout.write('[frozen-gate] FAIL\n');
+    for (const reason of result.reasons) process.stdout.write(`  - ${reason}\n`);
+  }
+  process.exit(result.ok ? 0 : 1);
 }

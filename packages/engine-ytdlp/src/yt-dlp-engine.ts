@@ -14,6 +14,13 @@ import type {
   DownloadEngine, MediaInfo, PlaylistInfo, DownloadRequest, EngineEvent,
   CancelHandle, UpdateResult, ProbeOptions, CorePorts, AppError, ErrorContext,
   Artifact, EngineUpdateSource, QueueIntakeGate,
+  ExtractorCatalogResult, UrlSupportResult,
+} from '@ytvdlt/shared';
+import {
+  METADATA_MAX_STDOUT_BYTES, METADATA_MAX_STDERR_BYTES,
+  OUTPUT_LIMIT_MARKER,
+  EXTRACTOR_LIST_MAX_STDOUT_BYTES, EXTRACTOR_LIST_MAX_STDERR_BYTES,
+  URL_PRECHECK_TIMEOUT_MS,
 } from '@ytvdlt/shared';
 import type { ILogger, IErrorMapper } from '@ytvdlt/core';
 import { classifyArtifact } from '@ytvdlt/core';
@@ -30,6 +37,8 @@ import { parseSubtitlePathList } from './subtitle-manifest.js';
 import { probeSucceeded, type RawProbeResult } from './probe-result.js';
 import { assertAbsoluteRuntimePaths, assertSafeSpawnOptions, isAbsolutePath } from './runtime-check.js';
 import { SelfUpdater } from './self-updater.js';
+import { parseExtractorList, classifySupportFailure, extractorClaimedUrl } from './extractor-list.js';
+import type { SiteDiscovery, UrlSupportCheckOptions } from './site-discovery.js';
 
 export interface YtDlpEngineDeps {
   ports: CorePorts;
@@ -52,7 +61,7 @@ export interface YtDlpEngineDeps {
   intakeGate?: QueueIntakeGate;
 }
 
-export class YtDlpEngine implements DownloadEngine {
+export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
   private readonly deps: YtDlpEngineDeps;
 
   constructor(deps: YtDlpEngineDeps) {
@@ -138,6 +147,11 @@ export class YtDlpEngine implements DownloadEngine {
     const result = await this.deps.ports.process.spawn(this.deps.enginePath, ['--version'], {
       ...this.spawnBase([this.ffmpegDir()]),
       timeoutMs: 30_000,
+      // D-133: `--version` prints one short line; a bounded spawn keeps it out of
+      // the unbounded path for free (the ceiling can never be reached in
+      // practice — it exists so every bounded metadata job looks the same).
+      maxStdoutBytes: METADATA_MAX_STDOUT_BYTES,
+      maxStderrBytes: METADATA_MAX_STDERR_BYTES,
     });
     if (!probeSucceeded(result)) return '';
     return result.stdout.trim().split(/\r?\n/)[0] ?? '';
@@ -159,6 +173,14 @@ export class YtDlpEngine implements DownloadEngine {
     const spawnOptions = {
       ...this.spawnBase([this.ffmpegDir()]),
       timeoutMs: 30_000,
+      // D-133: `--dump-single-json` prints ONE complete JSON document and exits.
+      // The output is therefore proportional to the metadata, and the whole
+      // buffer used to be an unbounded `+=` before it was handed to
+      // `JSON.parse`. Ceilings are ~24x the largest document measured
+      // (678,386 B, `reports/live-audit/video.json`), so no legitimate probe is
+      // affected while a runaway body is turned into a bounded failure.
+      maxStdoutBytes: METADATA_MAX_STDOUT_BYTES,
+      maxStderrBytes: METADATA_MAX_STDERR_BYTES,
     };
     assertSafeSpawnOptions(spawnOptions);
 
@@ -169,6 +191,21 @@ export class YtDlpEngine implements DownloadEngine {
       stderr: result.stderr,
       timedOut: result.timedOut,
     };
+
+    // D-133: an overflow is NOT a yt-dlp error — the child was killed mid-write,
+    // so its stderr says nothing about the real cause. Detect the marker the
+    // adapter appended and say so plainly, instead of letting the keyword table
+    // fall through to a misleading `UNKNOWN`/`NETWORK_TIMEOUT`.
+    if (result.stderr.includes(OUTPUT_LIMIT_MARKER)) {
+      await this.deps.logger.error('engine.probe', 'output-limit-exceeded', {
+        maxStdoutBytes: METADATA_MAX_STDOUT_BYTES,
+        receivedBytes: byteLengthOf(result.stdout),
+      });
+      throw this.deps.mapper.fromCode(
+        'UNKNOWN',
+        this.contextOf(url, `probe output exceeded ${METADATA_MAX_STDOUT_BYTES} bytes`, argv),
+      );
+    }
 
     if (!probeSucceeded(raw)) {
       await this.deps.logger.error('engine.probe', 'failed', { stderr: result.stderr });
@@ -493,6 +530,16 @@ export class YtDlpEngine implements DownloadEngine {
     const spawnOptions = {
       ...this.spawnBase([this.ffmpegDir()]),
       timeoutMs: 60_000,
+      // D-133 (TASK-02) — the target of this round. A flat playlist probe prints
+      // ONE JSON document whose size grows with the entry count, and the whole
+      // thing used to accumulate in an unbounded `+=` before `JSON.parse`. With
+      // `MAX_PLAYLIST_ITEMS = 500` and ~1,502 B per entry measured
+      // (`reports/live-audit/playlist.json`, 20 entries = 30,045 B), 16 MiB
+      // covers ~11,000 entries — comfortably above any list the app will accept
+      // — while a site that streams an endless body is cut off instead of
+      // growing the main process until it stalls.
+      maxStdoutBytes: METADATA_MAX_STDOUT_BYTES,
+      maxStderrBytes: METADATA_MAX_STDERR_BYTES,
     };
     assertSafeSpawnOptions(spawnOptions);
 
@@ -503,6 +550,23 @@ export class YtDlpEngine implements DownloadEngine {
       stderr: result.stderr,
       timedOut: result.timedOut,
     };
+
+    // D-133: the adapter killed the child mid-write, so whatever reached stderr
+    // describes the truncation, not the site. Report the ceiling explicitly.
+    // NOTE: the JSON that DID arrive is deliberately not parsed — a truncated
+    // playlist would silently look like a short one, and enqueueing a partial
+    // list without telling the user is worse than failing the probe.
+    if (result.stderr.includes(OUTPUT_LIMIT_MARKER)) {
+      await this.deps.logger.error('engine.probePlaylist', 'output-limit-exceeded', {
+        maxStdoutBytes: METADATA_MAX_STDOUT_BYTES,
+        receivedBytes: byteLengthOf(result.stdout),
+      });
+      throw this.deps.mapper.fromCode(
+        'UNKNOWN',
+        this.contextOf(url, `playlist probe output exceeded ${METADATA_MAX_STDOUT_BYTES} bytes`, argv),
+      );
+    }
+
     if (!probeSucceeded(raw)) {
       await this.deps.logger.error('engine.probePlaylist', 'failed', { stderr: result.stderr });
       throw this.deps.mapper.map(result.stderr, this.contextOf(url, result.stderr, argv));
@@ -524,6 +588,196 @@ export class YtDlpEngine implements DownloadEngine {
     return info;
   }
 
+  /**
+   * TASK-03 (A) — ask the RUNNING engine what it can parse.
+   *
+   * `--list-extractors` is the one authoritative answer available offline: it
+   * prints the extractors compiled into THIS binary, so a shipped list can never
+   * drift from the engine that will actually run (which is the failure mode the
+   * requirement is about).
+   *
+   * Measured on the bundled 2026.10.26: 1755 lines / 23,500 bytes, pure ASCII,
+   * `(CURRENTLY BROKEN)` on 136 of them. The ceiling is set far above that
+   * (4 MiB ≈ 300,000 lines) because the count grows with every yt-dlp release.
+   *
+   * NEVER THROWS: a caller that cannot read the list must render "unknown", not
+   * a fabricated one — hence the discriminated result instead of an exception
+   * that a caller might catch and paper over.
+   */
+  async listExtractors(): Promise<ExtractorCatalogResult> {
+    const argv = ['--list-extractors'];
+    const spawnOptions = {
+      ...this.spawnBase([this.ffmpegDir()]),
+      timeoutMs: 30_000,
+      maxStdoutBytes: EXTRACTOR_LIST_MAX_STDOUT_BYTES,
+      maxStderrBytes: EXTRACTOR_LIST_MAX_STDERR_BYTES,
+    };
+    assertSafeSpawnOptions(spawnOptions);
+
+    const result = await this.deps.ports.process.spawn(this.deps.enginePath, argv, spawnOptions);
+
+    if (result.stderr.includes(OUTPUT_LIMIT_MARKER)) {
+      await this.deps.logger.error('engine.listExtractors', 'output-limit-exceeded', {
+        maxStdoutBytes: EXTRACTOR_LIST_MAX_STDOUT_BYTES,
+        receivedBytes: utf8ByteLength(result.stdout),
+      });
+      return {
+        ok: false,
+        reason: 'OUTPUT_LIMIT_EXCEEDED',
+        detail: `extractor list exceeded ${EXTRACTOR_LIST_MAX_STDOUT_BYTES} bytes`,
+      };
+    }
+    if (result.timedOut) {
+      await this.deps.logger.warn('engine.listExtractors', 'timeout');
+      return { ok: false, reason: 'ENGINE_TIMEOUT', detail: 'engine did not answer in 30s' };
+    }
+    if (result.exitCode !== 0) {
+      await this.deps.logger.error('engine.listExtractors', 'failed', {
+        stderr: result.stderr.slice(0, 500),
+      });
+      return {
+        ok: false,
+        reason: 'ENGINE_FAILED',
+        detail: `engine exited ${String(result.exitCode)}`,
+      };
+    }
+
+    const parsed = parseExtractorList(result.stdout);
+    if (parsed.empty) {
+      // A zero-exit run with no output is a broken answer, not an empty world:
+      // reporting "0 supported sites" for a working engine would be a lie the
+      // UI could not recover from.
+      await this.deps.logger.error('engine.listExtractors', 'empty');
+      return { ok: false, reason: 'ENGINE_EMPTY', detail: 'engine listed no extractors' };
+    }
+
+    return {
+      ok: true,
+      // This method ALWAYS runs the engine; it has no cache of its own, so a
+      // caller that sees this answer is looking at a fresh list (R1-06).
+      cached: false,
+      catalog: {
+        // The engine's own version, so the cache identity is complete: a self
+        // update swaps the binary and invalidates the list by construction.
+        engineVersion: await this.version(),
+        enginePath: this.deps.enginePath,
+        extractors: parsed.extractors,
+        siteCount: parsed.siteCount,
+        subExtractorCount: parsed.subExtractorCount,
+        brokenCount: parsed.brokenCount,
+        empty: false,
+        fetchedAt: this.deps.ports.clock.nowIso(),
+      },
+    };
+  }
+
+  /**
+   * TASK-03 (B) — resolve ONE url's metadata WITHOUT downloading (§3.3).
+   *
+   * Same engine, same argv builder, `--simulate`: this is a real extraction, so
+   * the answer reflects exactly what a download would face — cookies, proxy and
+   * user agent are threaded through from the same `ProbeOptions` shape the
+   * download uses, which is what keeps the pre-check honest about a URL that
+   * only works with a session.
+   *
+   * NEVER THROWS: a pre-check that fails is an ADVISORY outcome, never a task
+   * failure. The queue must keep working when this returns INDETERMINATE.
+   */
+  async checkUrlSupport(
+    url: string,
+    opts: UrlSupportCheckOptions,
+  ): Promise<UrlSupportResult> {
+    const timeoutMs = opts.timeoutMs ?? URL_PRECHECK_TIMEOUT_MS;
+    let argv: string[];
+    try {
+      assertAbsoluteRuntimePaths(this.deps.enginePath, opts.jsRuntimePath);
+      argv = build({
+        url,
+        opts: {
+          jsRuntimePath: opts.jsRuntimePath,
+          timeoutMs,
+          noPlaylist: true,
+          ...(opts.proxy === undefined ? {} : { proxy: opts.proxy }),
+          ...(opts.cookiesFile === undefined ? {} : { cookiesFile: opts.cookiesFile }),
+          ...(opts.userAgent === undefined ? {} : { userAgent: opts.userAgent }),
+        },
+        enginePath: this.deps.enginePath,
+      });
+    } catch (error) {
+      // An invalid url is knowable without asking the engine, and it is the one
+      // case where we are certain: nothing can download it.
+      const appError = error as Partial<AppError>;
+      const state = appError?.code === 'INVALID_URL' ? 'UNSUPPORTED' : 'INDETERMINATE';
+      return {
+        url, state, extractor: '', cached: false,
+        reason: state === 'UNSUPPORTED' ? 'rejected by URL whitelist' : 'could not build pre-check',
+      };
+    }
+
+    const spawnOptions = {
+      ...this.spawnBase([this.ffmpegDir()]),
+      timeoutMs,
+      maxStdoutBytes: METADATA_MAX_STDOUT_BYTES,
+      maxStderrBytes: METADATA_MAX_STDERR_BYTES,
+    };
+    assertSafeSpawnOptions(spawnOptions);
+
+    const result = await this.deps.ports.process.spawn(this.deps.enginePath, argv, spawnOptions);
+
+    if (result.timedOut) {
+      return { url, state: 'TIMEOUT', extractor: '', cached: false, reason: 'pre-check timed out' };
+    }
+    if (result.stderr.includes(OUTPUT_LIMIT_MARKER)) {
+      return {
+        url, state: 'INDETERMINATE', extractor: '', cached: false,
+        reason: 'pre-check output limit exceeded',
+      };
+    }
+
+    if (result.exitCode === 0) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(result.stdout);
+      } catch {
+        // A clean exit with unparseable metadata: the engine DID find something
+        // (exit 0), so this is not an unsupported site — leave it indeterminate
+        // rather than blocking a URL that is probably fine.
+        return {
+          url, state: 'INDETERMINATE', extractor: '', cached: false,
+          reason: 'engine returned unparseable metadata',
+        };
+      }
+      const extractor = readExtractorKey(parsed);
+      // A result with no formats is a real answer: the extractor matched but
+      // there is nothing to download (a live stream not yet started, a page the
+      // GenericIE read as media-less). Blocking is still wrong — enqueue it and
+      // let the download report the truth.
+      if (!hasDownloadableFormat(parsed)) {
+        return {
+          url, state: 'NO_MEDIA', extractor, cached: false,
+          reason: 'extractor matched but reported no downloadable format',
+        };
+      }
+      return { url, state: 'SUPPORTED', extractor, cached: false, reason: 'engine resolved media' };
+    }
+
+    // Non-zero exit: classify from the engine's own stderr. Only wording that
+    // explicitly means "no extractor" yields UNSUPPORTED; see
+    // `classifySupportFailure` for why a bare `Unsupported URL:` does not.
+    const state = classifySupportFailure(result.stderr);
+    const claimed = extractorClaimedUrl(result.stderr);
+    const reason = state === 'UNSUPPORTED'
+      ? 'engine reported no extractor for this URL'
+      : state === 'NO_MEDIA'
+        ? (claimed
+          ? 'extractor claimed this URL but found no downloadable media'
+          : 'engine found no downloadable media at this URL')
+        : (claimed
+          ? 'extractor failed on this URL for an unclassified reason'
+          : 'pre-check could not classify this URL');
+    return { url, state, extractor: readExtractorKeyFromStderr(result.stderr), cached: false, reason };
+  }
+
   async selfUpdate(channel: 'stable' | 'nightly'): Promise<UpdateResult> {
     const { updateSource } = this.deps;
     if (updateSource === undefined) {
@@ -542,9 +796,115 @@ export class YtDlpEngine implements DownloadEngine {
   }
 }
 
+/**
+ * D-134: which extractor did the engine attribute this URL to?
+ *
+ * Surfaced because it is what makes GenericIE TRANSPARENT: when this returns
+ * `generic`, the engine guessed at the page rather than a dedicated extractor
+ * matching it — a materially weaker guarantee that the UI must be able to state.
+ */
+export function readExtractorKey(raw: unknown): string {
+  if (typeof raw !== 'object' || raw === null) return '';
+  const record = raw as Record<string, unknown>;
+  for (const key of ['extractor_key', 'extractor']) {
+    const value = record[key];
+    if (typeof value === 'string' && value !== '') return value;
+  }
+  return '';
+}
+
+/**
+ * A pre-check that exits 0 but reports no usable format is `NO_MEDIA`, not
+ * `SUPPORTED`. `formats` and `url` are both checked: a progressive result may
+ * carry `url` with no separate format list.
+ *
+ * MEASURED, NOT ASSUMED (D-134): the top-level `url` branch looked suspicious on
+ * `/plain.txt` (`extractor=Generic`, `formats=undefined`, `url=...`, exit 0), so
+ * the case was put through a REAL download — the engine wrote
+ * `plain.unknown_video` to disk. The bytes genuinely are retrievable, so
+ * SUPPORTED is the honest answer here and the branch stays. (This is the
+ * GenericIE trade-off §3.1 warns about: it will happily fetch a text file.)
+ *
+ * `is_live` is deliberately NOT treated as media-less: a live stream that has
+ * not started yet still returns formats, and one that has is downloadable as far
+ * as the pre-check can tell. Judging live-ness belongs to the download.
+ */
+function hasDownloadableFormat(raw: unknown): boolean {
+  if (typeof raw !== 'object' || raw === null) return false;
+  const record = raw as Record<string, unknown>;
+  const formats = record['formats'];
+  if (Array.isArray(formats)) {
+    for (const format of formats) {
+      if (typeof format === 'object' && format !== null) return true;
+    }
+  }
+  // A direct/progressive result carries the media URL at the top level.
+  const direct = record['url'];
+  if (typeof direct === 'string' && direct !== '') return true;
+  // A playlist-shaped answer is not one downloadable item, but it is certainly
+  // not "no media" — leave that judgement to the playlist preview.
+  return record['_type'] === 'playlist';
+}
+
+/**
+ * Best-effort extractor name from a FAILED pre-check's stderr.
+ *
+ * yt-dlp names the extractor inside its own error lines. The prefix is NOT at
+ * the start of the line: the engine writes `ERROR: [generic] …`, `WARNING: …`
+ * or `[debug] [youtube] …`. An earlier `^\s*\[…\]` pattern therefore NEVER
+ * matched a real failure — caught by running the bundled engine, see D-134.
+ * Purely informational: an empty result is fine and must never change the state.
+ */
+function readExtractorKeyFromStderr(stderr: string): string {
+  const match = /(?:^|\n)\s*(?:(?:ERROR|WARNING|DEBUG):\s*)?\[([A-Za-z0-9_.:-]+)\]/.exec(stderr);
+  return match?.[1] ?? '';
+}
+
 /** Directory part of an absolute Windows/POSIX path, without importing `node:path`. */
 function aria2cDirOf(aria2cPath: string | null): string | null {
   if (aria2cPath === null || aria2cPath.trim() === '') return null;
   const match = /^(.*)[\\/][^\\/]+$/.exec(aria2cPath.trim());
   return match?.[1] ?? null;
 }
+
+/**
+ * D-133: UTF-8 byte length of an already-decoded string, WITHOUT `TextEncoder`.
+ *
+ * Why not `TextEncoder`: this package compiles with `lib: ["ES2022"]` and
+ * `types: []` (no DOM, no `@types/node`), so the global is outside its type
+ * surface — the layering gate exists precisely to keep this package free of
+ * runtime globals. Why not `String.length`: that counts UTF-16 code units, so a
+ * CJK glyph costs 1-2 units but 3 UTF-8 bytes, which is the exact 3x
+ * understatement this decision is about.
+ *
+ * Only used for the diagnostic payload on an overflow — the enforcement itself
+ * happens on raw Buffers in the adapter, which is always exact.
+ */
+export function utf8ByteLength(text: string): number {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      // High surrogate: a valid pair is one code point at 4 bytes; consume the
+      // low surrogate too. A lone surrogate is emitted as 3 bytes by every
+      // well-behaved encoder (WHATWG replacement), which is what we book here.
+      const next = index + 1 < text.length ? text.charCodeAt(index + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+/** Alias kept local to this file's call sites. */
+const byteLengthOf = utf8ByteLength;

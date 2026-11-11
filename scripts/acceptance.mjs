@@ -378,7 +378,7 @@ const M3_ASSERTIONS = [
   { id: 'A-4.1-05', layer: 'L1', batch: 'B4', subject: 'flat-playlist fixture → PlaylistInfo，按 _type 分流，不 spawn 不触网', tests: ['playlist-fixture.contract', 'json-mapper.contract'], needs: ['vitest'], evidence: ['reports/vitest-results.json::playlist-fixture.contract.test.ts', 'tests/fixtures/info-flat-playlist.json', 'apps/desktop/src/main/ipc-gateway.ts'] },
   { id: 'A-4.1-07', layer: 'L2', batch: 'B4', subject: '下载类型四态互斥：Audio 字幕嵌入置灰 / Command 格式项禁用说明', e2e: ['format-disabled', 'subtitle-audio-mode', 'format-mp3'], needs: ['e2eAll', 'e2eMeta'], evidence: ['reports/e2e-summary.json::format-disabled,subtitle-audio-mode,format-mp3', 'tests/e2e/baselines/format-disabled.dom.html', 'tests/e2e/baselines/subtitle-audio-mode.dom.html'] },
   // ---- §4.2 quality / format (12) ----
-  { id: 'A-4.2-01', layer: 'L0', batch: 'B3', subject: '清晰度 8 档：6 档 -S res:N / best·lowest 无 res 约束', tests: ['argv-builder-m3', 'format-selector'], needs: ['vitest', 'frozen'], evidence: ['reports/vitest-results.json::argv-builder-m3.test.ts,format-selector.test.ts', 'tests/unit/argv-builder-download.test.ts::EXPECTED_MINIMAL'] },
+  { id: 'A-4.2-01', layer: 'L0', batch: 'B3', subject: '清晰度 8 档：6 档 -S res:N / best 无 res 约束 / lowest = -S +res 最低分辨率排序', tests: ['argv-builder-m3', 'format-selector'], needs: ['vitest', 'frozen'], evidence: ['reports/vitest-results.json::argv-builder-m3.test.ts,format-selector.test.ts', 'tests/unit/argv-builder-download.test.ts::EXPECTED_MINIMAL'] },
   { id: 'A-4.2-02', layer: 'L0', batch: 'B1', subject: '编码偏好 av01 / vp9.2 / h264 分支', tests: ['format-selector', 'argv-builder-m3'], needs: ['vitest'], evidence: ['reports/vitest-results.json::format-selector.test.ts', 'packages/core/src/format-selector/format-selector.ts'] },
   { id: 'A-4.2-03', layer: 'L0', batch: 'B1', subject: '自定义格式排序优先于 quality 预设，留空回退', tests: ['format-selector', 'download-plan'], needs: ['vitest'], evidence: ['reports/vitest-results.json::format-selector.test.ts,download-plan.test.ts'] },
   { id: 'A-4.2-04', layer: 'L0', batch: 'B4', subject: '手动格式 137+251 / 合计体积为两者之和 / 三组分栏截图', tests: ['argv-builder-m3', 'dialog-dto.contract'], e2e: ['format-ready'], needs: ['vitest', 'e2eAll'], evidence: ['reports/e2e-summary.json::format-ready', 'tests/e2e/baselines/format-ready.png', 'tests/contract/dialog-dto.contract.test.ts'] },
@@ -537,6 +537,62 @@ const M3_TEST_FILE_MAP = {
   'queue-progress.test.ts': ['A-4.4-16', 'A-4.4-21'],
   // D-109: one-line failure brief on the card + its stable error bucket.
   'failure-summary.test.ts': ['A-4.4-16', 'A-4.5-07'],
+  // D-135 (R2-01): 0.2.1 / 0.2.2 与 TASK-01/02/03 的测试文件补登记。
+  // 每一条都对应上面新增的真断言（或既有断言），不是为了让门禁变绿而填的空数组。
+  'about-licence.test.ts': ['A-D121'],
+  'app-update-cancel.test.ts': ['A-D114'],
+  'app-update-cleanup.test.ts': ['A-D114'],
+  'app-version.test.ts': ['A-D114'],
+  'artifact-classify.test.ts': ['A-STAGE4'],
+  'artifact-verifier-subtitles.test.ts': ['A-STAGE4'],
+  'engine-subtitle-artifacts.test.ts': ['A-STAGE4'],
+  'local-file-status-adapter.test.ts': ['A-D120'],
+  'local-file-status.test.ts': ['A-D120'],
+  'lowest-quality-local.test.ts': ['A-TASK01'],
+  'playlist-batch-ipc.test.ts': ['A-D130'],
+  'playlist-batch-m4.test.ts': ['A-D130'],
+  'playlist-import-ui.test.ts': ['A-D130'],
+  'playlist-preview-cache.test.ts': ['A-D130'],
+  'playlist-preview-service.test.ts': ['A-D130'],
+  'playlist-probe-local.test.ts': ['A-D130'],
+  'playlist-queue-routing.test.ts': ['A-D130'],
+  'postprocess-parser.test.ts': ['A-D115'],
+  'preview-cache.test.ts': ['A-STAGE2'],
+  'probe-output-limit.test.ts': ['A-TASK02'],
+  'queue-delete.test.ts': ['A-D116'],
+  'queue-file-status.test.ts': ['A-D120'],
+  'queue-stage.test.ts': ['A-D115'],
+  'real-temp-isolation.test.ts': ['A-D118-RESUME'],
+  'settings-app-update.test.ts': ['A-D114'],
+  'site-support.test.ts': ['A-TASK03'],
+  'subtitle-argv-local.test.ts': ['A-STAGE3'],
+  'subtitle-artifact-local.test.ts': ['A-STAGE4'],
+  'subtitle-choice.test.ts': ['A-STAGE3'],
+  'subtitle-discard.test.ts': ['A-D131'],
+  'subtitle-download-argv.test.ts': ['A-STAGE3'],
+  'subtitle-download-channel.test.ts': ['A-STAGE3'],
+  'subtitle-dto.test.ts': ['A-STAGE4'],
+  'subtitle-final-acceptance.test.ts': ['A-STAGE4'],
+  'subtitle-manifest.test.ts': ['A-STAGE4'],
+  'subtitle-picker.test.ts': ['A-STAGE5'],
+  'subtitle-preview-channel.test.ts': ['A-STAGE2'],
+  'subtitle-preview-dto.test.ts': ['A-STAGE2'],
+  'subtitle-preview-local.test.ts': ['A-STAGE2'],
+  'subtitle-preview-service.test.ts': ['A-STAGE2'],
+  'subtitle-print-argv.test.ts': ['A-STAGE4'],
+  'supported-sites-panel.test.ts': ['A-TASK03'],
+  'task-detail-folder.test.ts': ['A-D120'],
+  'task-file-status-ipc.test.ts': ['A-D120'],
+  'task-queue-stage.test.ts': ['A-D115'],
+  'task-queue-subtitles.test.ts': ['A-STAGE4'],
+  'task-removal-idempotent.test.ts': ['A-D116'],
+  'txt-import-batch.test.ts': ['A-D129'],
+  'txt-import-file.test.ts': ['A-D129'],
+  'txt-import-parse.test.ts': ['A-D129'],
+  'txt-import-service.test.ts': ['A-D129'],
+  'txt-import-ui.test.ts': ['A-D129'],
+  'update-dialog-cancel.test.ts': ['A-D114'],
+  'volume.test.ts': ['A-D118'],
   'queue-failure.test.ts': ['A-4.4-16', 'A-4.4-21'],
 };
 
@@ -1222,6 +1278,36 @@ const M5_ASSERTIONS = [
   { id: 'A-4.5-08', layer: 'L0', subject: '全局异常：崩溃报告含版本信息、不静默吞错、下次启动提示并留证', tests: ['crash-guard'], needs: ['vitest'], evidence: ['reports/vitest-results.json::crash-guard.test.ts', 'packages/core/src/crash/crash-guard.ts'] },
   { id: 'A-4.6-06', layer: 'L2', subject: '动态取色改为跟随系统强调色；触觉明确省略；减少动态效果生效', tests: ['appearance'], needs: ['vitest', 'e2e'], evidence: ['reports/vitest-results.json::appearance.test.ts', 'reports/e2e-summary.json::format-dark,settings-en-dark'] },
   { id: 'A-4.6-07', layer: 'L0', subject: '无 Android 残留（0 命中）；开机自启为可选 HKCU Run，无需管理员', tests: ['platform-policy'], needs: ['vitest'], evidence: ['reports/vitest-results.json::platform-policy.test.ts', 'packages/core/src/platform/platform-policy.ts'] },
+
+  // =========================================================================
+  // D-135 (R2-01) · 追加断言：0.2.1 / 0.2.2 的若干决策与 TASK-01/02/03 一直没有
+  // 对应的断言 id，于是它们的测试文件在 `M3_TEST_FILE_MAP` 里无处可挂，
+  // `M5-GATE-file-coverage` 因此长期为红（54 个文件）。
+  //
+  // 这里补的是**真断言**：状态由 `tests` 子串匹配真实 vitest 结果算出
+  // （`findTestCount` 统计 total/failed），不是写死的 PASS；测试文件真挂了、
+  // 或者被跳过，对应断言就会失败。默认跳过的那一个如实标 `deferred`，
+  // 不会伪装成 PASS。
+  // 注意：`deferred` 的那条**不写 `tests`** —— 它的用例默认被 skip，按 tests 归因只能
+  // 得到 0ms，反而会被 `M5-GATE-duration`（durationMs<=1 即 tooFast）判红，属于自伤。
+  // =========================================================================
+  { id: 'A-D114', layer: 'L0', subject: '应用自更新交互：构建版本单一事实源、下载可取消、完成后清理、设置页动作与取消对话框', tests: ['app-version', 'app-update-cancel', 'app-update-cleanup', 'settings-app-update', 'update-dialog-cancel'], needs: ['vitest'], evidence: ['reports/vitest-results.json::app-version.test.ts,app-update-cancel.test.ts,app-update-cleanup.test.ts,settings-app-update.test.ts,update-dialog-cancel.test.ts', 'apps/desktop/src/main/app-update-service.ts,app-update-cleanup.ts', 'packages/ui/src/pages/settings/'] },
+  { id: 'A-D115', layer: 'L0', subject: '后处理阶段（合并/整理/校验）单调推进并在卡片如实呈现，不假装 100% 即完成', tests: ['postprocess-parser', 'queue-stage', 'task-queue-stage'], needs: ['vitest'], evidence: ['reports/vitest-results.json::postprocess-parser.test.ts,queue-stage.test.ts,task-queue-stage.test.ts', 'packages/engine-ytdlp/src/postprocess-parser.ts', 'packages/shared/src/events.ts'] },
+  { id: 'A-D116', layer: 'L2', subject: '删除任务：记录/文件两个动作分离，8 种组合幂等（文件已被外部删除也不报失败）', tests: ['queue-delete', 'task-removal-idempotent'], needs: ['vitest'], evidence: ['reports/vitest-results.json::queue-delete.test.ts,task-removal-idempotent.test.ts', 'packages/ui/src/pages/queue/queue.js', 'core/src/task-queue/task-queue.ts'] },
+  { id: 'A-D118', layer: 'L0', subject: '临时目录与输出目录同卷判定（跨卷回落、任务段名净化）', tests: ['volume'], needs: ['vitest'], evidence: ['reports/vitest-results.json::volume.test.ts', 'packages/core/src/path-resolver/volume.ts'] },
+  { id: 'A-D118-RESUME', layer: 'L2', deferred: '默认跳过（需显式 `--case` 运行）：真实 yt-dlp 对回环 HTTP 服务的「.part 不出输出目录 + 断点续传」闭环；L0 的 volume 判定已由 A-D118 覆盖，端到端这一段未纳入默认套件', evidence: ['tests/integration/real-temp-isolation.test.ts'] },
+  { id: 'A-D120', layer: 'L0', subject: '本地文件状态：卡片提示 / 打开文件与文件夹 / 回收站清理幂等（ENOENT 视为已完成）', tests: ['local-file-status', 'queue-file-status', 'task-file-status-ipc', 'task-detail-folder'], needs: ['vitest'], evidence: ['reports/vitest-results.json::local-file-status.test.ts,local-file-status-adapter.test.ts,queue-file-status.test.ts,task-file-status-ipc.test.ts,task-detail-folder.test.ts', 'core/src/file-status/', 'main/adapters/local-file-status-port.ts'] },
+  { id: 'A-D121', layer: 'L2', subject: '设置页「关于」许可条款逐字准确、自研与组件许可分离、中英双语无缺键', tests: ['about-licence'], needs: ['vitest'], evidence: ['reports/vitest-results.json::about-licence.test.ts', 'packages/ui/src/pages/settings/about.html', 'docs/DECISIONS.md::D-121'] },
+  { id: 'A-STAGE2', layer: 'L1', subject: '字幕预览（stage 2）：一次性票据 + 无凭据 DTO + IPC 校验 + 服务错误分类', tests: ['preview-cache', 'subtitle-preview-dto', 'subtitle-preview-channel', 'subtitle-preview-service', 'subtitle-preview-local'], needs: ['vitest'], evidence: ['reports/vitest-results.json::preview-cache.test.ts,subtitle-preview-dto.test.ts,subtitle-preview-channel.test.ts,subtitle-preview-service.test.ts,subtitle-preview-local.test.ts', 'main/subtitle-preview-service.ts', 'shared/src/subtitle-preview.ts'] },
+  { id: 'A-STAGE3', layer: 'L1', subject: '字幕 argv 与下载通道：手动/自动/转换分支、票据在当前任务内消费、真实引擎接受该 argv', tests: ['subtitle-choice', 'subtitle-download-argv', 'subtitle-download-channel', 'subtitle-argv-local'], needs: ['vitest'], evidence: ['reports/vitest-results.json::subtitle-choice.test.ts,subtitle-download-argv.test.ts,subtitle-download-channel.test.ts,subtitle-argv-local.test.ts', 'core/src/subtitle-planner/subtitle-choice.ts', 'engine-ytdlp/src/argv-builder-download.ts'] },
+  { id: 'A-STAGE4', layer: 'L1', subject: '字幕产物归属：13 种字幕格式分类、字幕永不冒认主媒体、产物清单与 DTO 投影、真实引擎产物实测', tests: ['artifact-classify', 'artifact-verifier-subtitles', 'engine-subtitle-artifacts', 'subtitle-manifest', 'subtitle-dto', 'subtitle-print-argv', 'task-queue-subtitles', 'subtitle-artifact-local', 'subtitle-final-acceptance'], needs: ['vitest'], evidence: ['reports/vitest-results.json::artifact-classify.test.ts,artifact-verifier-subtitles.test.ts,engine-subtitle-artifacts.test.ts,subtitle-manifest.test.ts,subtitle-dto.test.ts,subtitle-print-argv.test.ts,task-queue-subtitles.test.ts,subtitle-artifact-local.test.ts,subtitle-final-acceptance.test.ts', 'core/src/artifact-classify/', 'core/src/task-queue/task-queue.ts'] },
+  { id: 'A-STAGE5', layer: 'L2', subject: '字幕选择器：不打开不探测、三态呈现、选择交互与回写（真实 ship 脚本 + 假 DOM）', tests: ['subtitle-picker'], needs: ['vitest'], evidence: ['reports/vitest-results.json::subtitle-picker.test.ts', 'packages/ui/src/dialogs/subtitle-picker.js'] },
+  { id: 'A-D131', layer: 'L1', subject: '内嵌字幕后按 keepSubtitleFile=false 清理外置副本：只回收本任务产物、媒体与其它任务引用不受影响', tests: ['subtitle-discard'], needs: ['vitest'], evidence: ['reports/vitest-results.json::subtitle-discard.test.ts', 'core/src/task-queue/task-queue.ts::discardEmbeddedSubtitleArtifacts', 'main/m5-host.ts::makeSubtitleRecycler'] },
+  { id: 'A-D129', layer: 'L1', subject: 'TXT 清单批量导入：有界 UTF-8 解码、真实解析统计、票据 + 逐条独立任务、渲染层拿不到文件路径', tests: ['txt-import-batch', 'txt-import-file', 'txt-import-parse', 'txt-import-service', 'txt-import-ui'], needs: ['vitest'], evidence: ['reports/vitest-results.json::txt-import-batch.test.ts,txt-import-file.test.ts,txt-import-parse.test.ts,txt-import-service.test.ts,txt-import-ui.test.ts', 'main/txt-import-service.ts', 'core/src/txt-import/parse.ts'] },
+  { id: 'A-D130', layer: 'L1', subject: '播放列表：真探测 + 票据 + 默认全选 + 逐条独立任务；DTO 不含条目 URL，并发受上限约束', tests: ['playlist-batch-ipc', 'playlist-batch-m4', 'playlist-import-ui', 'playlist-preview-cache', 'playlist-preview-service', 'playlist-queue-routing', 'playlist-probe-local'], needs: ['vitest'], evidence: ['reports/vitest-results.json::playlist-batch-ipc.test.ts,playlist-batch-m4.test.ts,playlist-import-ui.test.ts,playlist-preview-cache.test.ts,playlist-preview-service.test.ts,playlist-queue-routing.test.ts,playlist-probe-local.test.ts', 'main/playlist-preview-service.ts', 'core/src/playlist/preview-cache.ts'] },
+  { id: 'A-TASK01', layer: 'L2', subject: '「最低画质」是相对排序（-S +res）：2160/1080/720/360 源选中 360p，480p 源不降到 360p，纯音频不伪造视频流', tests: ['lowest-quality-local'], needs: ['vitest'], evidence: ['reports/vitest-results.json::lowest-quality-local.test.ts', 'reports/task01-format-selection.json', 'core/src/decision/download-plan.ts::RESOLUTION_QUALITIES'] },
+  { id: 'A-TASK02', layer: 'L1', subject: '有界元数据子进程：stdout/stderr 按字节设上限、超限终止子进程并标记、正常下载流不受影响', tests: ['probe-output-limit'], needs: ['vitest'], evidence: ['reports/vitest-results.json::probe-output-limit.test.ts', 'main/adapters/output-limiter.ts', 'main/adapters/node-ports.ts::OVERFLOW_SETTLE_GRACE_MS', 'shared/src/engine-limits.ts'] },
+  { id: 'A-TASK03', layer: 'L1', subject: '动态支持网站列表（引擎自述、无兜底名单、GenericIE 单列）+ URL 六态预检（仅 UNSUPPORTED 拦截、fail open、批次三分类统计）', tests: ['site-support', 'supported-sites-panel'], needs: ['vitest'], evidence: ['reports/vitest-results.json::site-support.test.ts,supported-sites-panel.test.ts', 'engine-ytdlp/src/extractor-list.ts', 'main/site-precheck-gate.ts', 'main/site-support-service.ts'] },
 ];
 
 /** M5 e2e cases that must exist and pass for the visual assertions. */

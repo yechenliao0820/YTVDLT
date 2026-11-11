@@ -17,6 +17,8 @@ import {
   parseTxtUrlList, TXT_IMPORT_LIMITS,
   type TxtImportItem, type TxtImportParseResult,
 } from '@ytvdlt/core';
+import { precheckBatch } from './site-precheck-gate.js';
+import type { PrecheckPortLike, PrecheckSummary } from './site-precheck-gate.js';
 
 /** What the injected native adapter returns; `text` is already decoded UTF-8. */
 export interface TxtImportFilePort {
@@ -88,6 +90,16 @@ export interface TxtImportEnqueueDto {
   readonly failed: number;
   readonly taskIds: readonly string[];
   readonly failures: readonly TxtBatchFailure[];
+  /**
+   * R1-03 — the three-way pre-check tally (supported / unsupported /
+   * indeterminate) plus the URLs in each bucket, and how many were never
+   * examined.
+   *
+   * Absent ONLY when this build has no pre-check port at all (unit-test
+   * builds). A present summary with `skipped === requested` means "we did not
+   * look", which the UI must say out loud instead of implying coverage.
+   */
+  readonly precheck?: PrecheckSummary;
 }
 
 export interface TxtImportServicePort {
@@ -106,6 +118,14 @@ export interface TxtImportServiceOptions {
   readonly makeId?: () => string;
   readonly sessionTtlMs?: number;
   readonly maxSessions?: number;
+  /**
+   * D-134: the URL pre-check, applied per line BEFORE anything is enqueued.
+   *
+   * Optional on purpose: a build without it keeps the previous behaviour
+   * exactly, and every existing unit test that omits it stays valid. Only a
+   * settled UNSUPPORTED removes a line; see `site-precheck-gate.ts`.
+   */
+  readonly siteSupport?: PrecheckPortLike;
 }
 
 interface Session {
@@ -243,10 +263,47 @@ export function createTxtImportService(options: TxtImportServiceOptions): TxtImp
           failures.push({ url, reason: 'INVALID_URL' });
         }
       }
+
+      // ---- D-134 §3.4: pre-check the batch -----------------------------------
+      // Runs HERE, not in the renderer, because the renderer never sees these
+      // URLs at all (that is the D-129 trust boundary). Only a settled
+      // UNSUPPORTED is removed, and it is reported per-URL with a stable code so
+      // the preview can say WHICH line was refused. A pre-check that times out,
+      // errors or is simply absent changes nothing — every such URL stays in
+      // `allowed`, and the download remains the authority.
+      let enqueueable = accepted;
+      // R1-03: the tally travels with the report. Without it the caller could
+      // only see the BLOCKED urls, so a batch where 6 links came back
+      // INDETERMINATE looked identical to one where all 6 were confirmed.
+      let precheck: PrecheckSummary | undefined;
+      if (options.siteSupport !== undefined && accepted.length > 0) {
+        const outcome = await precheckBatch(accepted, options.siteSupport);
+        for (const block of outcome.blocked) {
+          failures.push({ url: block.url, reason: block.code });
+        }
+        precheck = outcome.summary;
+        enqueueable = [...outcome.allowed];
+      }
+
+      if (enqueueable.length === 0) {
+        // Every accepted URL was refused: report it as a real outcome with the
+        // per-URL reasons, never as a generic failure.
+        return {
+          ok: false,
+          code: 'ENQUEUE_FAILED',
+          requested: urls.length,
+          enqueued: 0,
+          failed: urls.length,
+          taskIds: [],
+          failures,
+          ...(precheck === undefined ? {} : { precheck }),
+        };
+      }
+
       let result: TxtBatchResult = { enqueued: 0, taskIds: [], failures: [] };
       try {
         result = await options.enqueueBatch({
-          urls: accepted,
+          urls: enqueueable,
           kind: input.kind,
           ...(input.quality === undefined ? {} : { quality: input.quality }),
           ...(input.audioQuality === undefined ? {} : { audioQuality: input.audioQuality }),
@@ -255,7 +312,7 @@ export function createTxtImportService(options: TxtImportServiceOptions): TxtImp
       } catch (error) {
         // A thrown batch may still have enqueued some records. Report every
         // un-enqueued URL as a failure instead of claiming a clean total loss.
-        failures.push(...accepted.map((url) => ({
+        failures.push(...enqueueable.map((url) => ({
           url,
           reason: error instanceof Error ? error.message : String(error),
         })));
@@ -270,6 +327,7 @@ export function createTxtImportService(options: TxtImportServiceOptions): TxtImp
         failed: Math.max(0, urls.length - enqueued),
         taskIds: result.taskIds,
         failures: allFailures,
+        ...(precheck === undefined ? {} : { precheck }),
       };
     },
   };

@@ -68,4 +68,31 @@ export interface PlaylistBatchEnqueueDto {
   readonly failed: number;
   readonly taskIds: readonly string[];
   readonly failures: readonly { readonly id: string; readonly reason: string }[];
+  /**
+   * R1-03 — how the per-entry pre-check split the selection.
+   *
+   * Absent when this build has no pre-check port. Present means the numbers are
+   * real: `supported + unsupported + noMedia + indeterminate + skipped` equals
+   * the number of entries the pre-check was given, so the dialog can say
+   * "12 supported · 2 unsupported · 3 not confirmed · 4 not checked" instead of
+   * only listing the refusals — and `skipped` must never be folded into
+   * "supported".
+   *
+   * IDS, not URLs: this file is display-safe by contract (see the header), and
+   * the selection UI already identifies entries by id.
+   */
+  readonly precheck?: PlaylistPrecheckReport;
+}
+
+/** Per-bucket tally of a playlist batch pre-check. Ids only — never URLs. */
+export interface PlaylistPrecheckReport {
+  readonly examined: number;
+  readonly supported: number;
+  readonly unsupported: number;
+  readonly noMedia: number;
+  readonly indeterminate: number;
+  readonly skipped: number;
+  readonly unsupportedIds: readonly string[];
+  readonly noMediaIds: readonly string[];
+  readonly indeterminateIds: readonly string[];
 }

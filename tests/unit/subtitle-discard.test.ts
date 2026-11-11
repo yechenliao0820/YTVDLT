@@ -292,6 +292,10 @@ describe('D-131 · keepSubtitleFile=false discards embedded-download sidecars', 
       ports: mem.ports,
       engine: engineWith(runs),
       verifier: verifier(true, EMBEDDED_OK),
+      // R1-02: required host option — the pre-check's cache identity.
+      enginePath: 'C:/runtime/yt-dlp.exe',
+      // R1-01: required host option — the pre-check's network context.
+      siteSupportNetwork: () => ({}),
       jsRuntimePath: 'C:/runtime/node.exe',
       videoFixturePath: 'C:/fixtures/info-video.json',
       playlistFixturePath: 'C:/fixtures/info-flat-playlist.json',

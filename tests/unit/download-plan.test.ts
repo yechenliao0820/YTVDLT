@@ -235,16 +235,45 @@ describe('B1 · R5 sections > split > embed mkv (all 4 combinations)', () => {
 });
 
 describe('B1 · P0->P7 priority chain is enumerable', () => {
-  it('P7: all 8 quality values map to res:N or no constraint', () => {
+  it('P7: all 8 quality values map to a `-S` term or no constraint (D-133)', () => {
+    // D-133: `lowest` used to assert `null` here — that expectation ENCODED the
+    // bug (no `res` term => yt-dlp's default DESC sort => highest resolution).
+    // The correct term for "lowest" is `+res` (ascending). `best` stays `null`
+    // because the default sort already is "highest first".
     const expected: Record<string, string | null> = {
       best: null, '2160p': 'res:2160', '1440p': 'res:1440', '1080p': 'res:1080',
-      '720p': 'res:720', '480p': 'res:480', '360p': 'res:360', lowest: null,
+      '720p': 'res:720', '480p': 'res:480', '360p': 'res:360', lowest: '+res',
     };
     for (const [quality, res] of Object.entries(expected)) {
       const plan = resolveDownloadPlan(req({ format: format({ quality: quality as FormatDomain['quality'] }) }));
-      if (res === null) expect(plan.effectiveSort === null || !plan.effectiveSort.includes('res:')).toBe(true);
+      if (res === null) expect(plan.effectiveSort === null || !plan.effectiveSort.includes('res')).toBe(true);
       else expect(plan.effectiveSort).toContain(res);
     }
+  });
+
+  it('D-133: lowest never hard-codes a resolution and never becomes audio-only', () => {
+    const plan = resolveDownloadPlan(req({ format: format({ quality: 'lowest' }) }));
+    // A RELATIVE ascending sort, not a fixed 360p ceiling.
+    expect(plan.effectiveSort).toBe('+res');
+    expect(plan.effectiveSort).not.toContain('res:360');
+    // `extractAudio` stays false, so yt-dlp still pairs the video stream with
+    // the best audio; the plan must not silently turn this into an audio task.
+    expect(plan.extractAudio).toBe(false);
+    expect(plan.effectiveFormatId).toBeNull();
+  });
+
+  it('D-133: lowest composes with the codec preference like every other preset', () => {
+    const plan = resolveDownloadPlan(req({ format: format({ quality: 'lowest', videoCodecPref: 'h264' }) }));
+    expect(plan.effectiveSort).toBe('+res,vcodec:h264');
+    // P3 still wins: an explicit formatId suppresses the resolution term.
+    const byId = resolveDownloadPlan(req({ format: format({ quality: 'lowest', formatId: '137+251' }) }));
+    expect(byId.effectiveSort).toBeNull();
+  });
+
+  it('D-133: lowest is inert in audio mode (no video stream to sort)', () => {
+    const plan = resolveDownloadPlan(req({ format: format({ extractAudio: true, quality: 'lowest' }) }));
+    expect(plan.effectiveSort).toBeNull();
+    expect(plan.extractAudio).toBe(true);
   });
 
   it('P7: videoCodecPref 4 branches', () => {

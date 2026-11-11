@@ -34,6 +34,7 @@ import {
   createComponentUpdater, type ComponentUpdatePort,
 } from './component-updater.js';
 import { createM5Host, type M5Host } from './m5-host.js';
+import { readSiteSupportNetwork } from './site-support-network.js';
 import { createTxtFilePicker } from './adapters/txt-file-picker.js';
 import { createSubtitlePreviewService, type SubtitlePreviewService } from './subtitle-preview-service.js';
 import { bootstrap, type BootstrapHandle, type ElectronLike } from './bootstrap.js';
@@ -289,6 +290,18 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       ports,
       engine,
       verifier,
+      // D-135 (R1-01/R1-02): the pre-check needs the SAME engine identity and
+      // the SAME network the download will use.
+      //  - `enginePath` is half the catalog cache key. Omitting it made the key
+      //    `"::<version>"`, which never matched the slot built from the engine's
+      //    own reported path — the catalog re-spawned the engine on every panel
+      //    open instead of being cached.
+      //  - `siteSupportNetwork` is read LAZILY so a proxy/cookie change inside
+      //    one session is picked up; a startup snapshot would answer for a
+      //    network the next download no longer uses.
+      enginePath,
+      siteSupportNetwork: () => readSiteSupportNetwork(configRef),
+      siteSupportLogger: logger,
       jsRuntimePath: join(runtimeDir, 'node.exe'),
       videoFixturePath: join(fixtureDir, 'info-video.json'),
       playlistFixturePath: join(fixtureDir, 'info-flat-playlist.json'),

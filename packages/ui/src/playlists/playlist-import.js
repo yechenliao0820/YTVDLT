@@ -380,6 +380,14 @@
       });
     }
 
+    /** R1-03: one textContent line per id in a pre-check bucket. */
+    function appendIdBucket(body, bucketKey, ids) {
+      var list = Array.isArray(ids) ? ids : [];
+      for (var i = 0; i < list.length; i += 1) {
+        body.appendChild(message(t(bucketKey) + ' — ' + String(list[i]), 'warn'));
+      }
+    }
+
     function renderResult(result, spentId) {
       var body = bodyNode();
       var foot = footNode();
@@ -392,6 +400,26 @@
       var text = t('queue.playlist.result', { requested: requested, enqueued: enqueued, failed: failed });
       body.appendChild(message(text, result && result.ok === true ? 'ok' : 'warn'));
       if (!result || result.ok !== true) body.appendChild(message(errorText(result), 'warn'));
+      // R1-03: the pre-check tally. Ids only (this dialog never receives entry
+      // urls), so the buckets are rendered as id lists — the user identifies
+      // them by the same ids the selection list already shows.
+      var precheck = result && result.precheck;
+      if (precheck) {
+        body.appendChild(message(t('queue.precheck.summary', {
+          supported: Number(precheck.supported) || 0,
+          unsupported: Number(precheck.unsupported) || 0,
+          noMedia: Number(precheck.noMedia) || 0,
+          indeterminate: Number(precheck.indeterminate) || 0,
+          skipped: Number(precheck.skipped) || 0
+        }), 'ok'));
+        if ((Number(precheck.skipped) || 0) > 0) {
+          body.appendChild(message(t('queue.precheck.skippedNote', {
+            skipped: Number(precheck.skipped) || 0
+          }), 'warn'));
+        }
+        appendIdBucket(body, 'queue.precheck.noMedia', precheck.noMediaIds);
+        appendIdBucket(body, 'queue.precheck.indeterminate', precheck.indeterminateIds);
+      }
       var failures = result && Array.isArray(result.failures) ? result.failures : [];
       failures.forEach(function (item) {
         body.appendChild(message(String(item.id) + ' — ' + String(item.reason), 'warn'));

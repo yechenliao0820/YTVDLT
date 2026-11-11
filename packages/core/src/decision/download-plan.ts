@@ -18,14 +18,32 @@ import {
   buildOutputDir, sanitizeToken, truncateWindowsPath,
 } from '../path-resolver/index.js';
 
-/** Video qualities that map to `-S res:<N>` (best / lowest carry no constraint). */
+/**
+ * Video quality -> the `-S` resolution term (D-133).
+ *
+ * `best` is deliberately ABSENT: yt-dlp's default sort is `res` DESC, so "no
+ * resolution term" already means "the highest available" — adding `res:best`
+ * would be a term yt-dlp does not define.
+ *
+ * `lowest` used to be absent too, and that was the bug: with no `res` term the
+ * default descending sort quietly downloaded the HIGHEST resolution, so picking
+ * "最低画质" produced a ~980 MB 4K file. `+res` is yt-dlp's ASCENDING sort —
+ * the `+` prefix flips the direction. Measured offline against the bundled
+ * yt-dlp 2026.10.26 with `--load-info-json` on a 2160/1080/720/360 fixture:
+ * `-S +res` -> `640x360`, bare `-S res` -> `3840x2160`, no `-S` -> `3840x2160`.
+ * `+res` is a RELATIVE choice, not a hard-coded 360p: on a 480p-only source it
+ * picks 480p, and on an audio-only source it still resolves the audio format.
+ * Audio pairing is unaffected (`bv*+ba/b` stays the selector), so the lowest
+ * VIDEO stream is combined with the best audio — never a bare audio-only file.
+ */
 const RESOLUTION_QUALITIES: Readonly<Record<string, string>> = {
-  '2160p': '2160',
-  '1440p': '1440',
-  '1080p': '1080',
-  '720p': '720',
-  '480p': '480',
-  '360p': '360',
+  '2160p': 'res:2160',
+  '1440p': 'res:1440',
+  '1080p': 'res:1080',
+  '720p': 'res:720',
+  '480p': 'res:480',
+  '360p': 'res:360',
+  lowest: '+res',
 };
 
 const VIDEO_CODEC_FIELDS: Readonly<Record<FormatDomain['videoCodecPref'], string | null>> = {
@@ -176,8 +194,10 @@ export function resolveDownloadPlan(
   } else {
     const parts: string[] = [];
     if (!extractAudio && effectiveFormatId === null) {
+      // D-133: the map value is the COMPLETE sort term (`res:<N>` or `+res`),
+      // not a bare number — `lowest` needs the ascending `+` prefix.
       const resolution = RESOLUTION_QUALITIES[format.quality];
-      if (resolution !== undefined) parts.push(`res:${resolution}`);
+      if (resolution !== undefined) parts.push(resolution);
       const vcodec = VIDEO_CODEC_FIELDS[format.videoCodecPref];
       if (vcodec !== null) parts.push(vcodec);
     } else if (!extractAudio) {

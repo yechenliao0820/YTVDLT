@@ -1,16 +1,40 @@
 # YTVDLT 交付报告（未发版 · 目标 0.3.0）
 
 > 交付日期：2026-11-11 ｜ 交付人：Buddy ｜ 接收人：LeoLee
-> 状态：字幕功能已提交（`57a1f3d` / `3abc4b0`）；TXT 批量导入（D-129）、播放列表批量（D-130）、审查修复（D-131）、真实在线验证与 `subtitleOutcome` 修复（D-132）随本文件所在提交一起入库。**未打包、未发版、未升版本号（仓库仍为 0.2.9）**。本节是交付口径与验收结论，不是发布记录；发版时按 §7 的十进制进位规则取 `0.3.0`，并另在 `CHANGELOG.md` 补版本行、在 Release 用英文说明（铁律 14）。
+> 状态：字幕功能已提交（`57a1f3d` / `3abc4b0`）；TXT 批量导入（D-129）、播放列表批量（D-130）、审查修复（D-131）、真实在线验证与 `subtitleOutcome` 修复（D-132）、**下一阶段三项开发任务（D-133 / D-134）**随本文件所在提交一起入库。**未打包、未发版、未升版本号（仓库仍为 0.2.9）**。本节是交付口径与验收结论，不是发布记录；发版时按 §7 的十进制进位规则取 `0.3.0`，并另在 `CHANGELOG.md` 补版本行、在 Release 用英文说明（铁律 14）。
 
 ## 一、交付物
 
 | 交付物 | 位置 | 说明 |
 |---|---|---|
-| 源码提交 | `main` @ `57a1f3d` + 本文件所在提交 | 字幕功能 80 文件；批量导入 / 播放列表 / 审查修复 / 在线验证见 D-129…D-132 |
-| 决策记录 | `docs/DECISIONS.md` D-126…D-132 | 字幕入队与产物、TXT 导入、播放列表批量、`keepSubtitleFile` 修复、在线验收与 `subtitleOutcome` 修复 |
+| 源码提交 | `main` @ `57a1f3d` + 本文件所在提交 | 字幕功能 80 文件；批量导入 / 播放列表 / 审查修复 / 在线验证见 D-129…D-132；下一阶段三项任务见 D-133 / D-134 |
+| 决策记录 | `docs/DECISIONS.md` D-126…**D-134** | 字幕入队与产物、TXT 导入、播放列表批量、`keepSubtitleFile` 修复、在线验收与 `subtitleOutcome` 修复、**最低画质修复 + 有界子进程输出上限（D-133）**、**动态支持的网站列表 + URL 支持六态预检（D-134）** |
 | 测试入口 | `npm test`（离线）/ `npm run test:online`（真实国际网） | 在线套件默认排除，不显式运行不联网 |
+| 离线取证脚本 | `scripts/task01-format-evidence.mjs`、`scripts/task03-site-evidence.mjs`、`scripts/task03-classify-evidence.mjs` | 分别产出格式选择、站点目录、分类映射证据；脚本本身入库（中间产物 `reports/*` 被 gitignore） |
 | 安装包 | **无** | 本轮未打包（铁律 9：非点名不打包） |
+
+## 一·B、下一阶段三项开发任务（D-133 / D-134）
+
+> 依据业主《YTVDLT 下一阶段开发计划书》。**贯穿约束**：以实际 yt-dlp 引擎为唯一事实来源；不破坏分层架构；新增 IPC 全部输入验证；不得 Shell 字符串拼接、保持 `shell: false`；不把完整 Cookie/认证信息放进 UI/日志/错误提示。
+
+| # | 任务 | 落地 | 决策 |
+|---|---|---|---|
+| T1 | **「最低画质」失效修复**（P0） | `RESOLUTION_QUALITIES` 补 `lowest → '+res'`（`+` 前缀 = **升序** = 取最低可用）。**只用相对排序，绝不硬编码分辨率**；`best` 仍**刻意缺键**（默认降序本身即「最高」）。实测：同一 2160/1080/720/360 夹具上，无 `-S` → `v2160`，`-S +res` → `v360`；`+res` **不等于固定 360p**（480p-only 源取 480p，纯音频源不虚构视频流，单分辨率源正常选中） | D-133 |
+| T2 | **有界子进程输出硬上限**（P1） | 新增 append-only 可选字段 `SpawnOptions.maxStdoutBytes / maxStderrBytes`；`probe` / `probePlaylist` / `version` 传具名常量（16 MiB / 1 MiB），**正常下载一字节上限都不加**（`spawnStreaming` 一行未改）。计数按**字节**（对每个 `Buffer` 分片取 `chunk.byteLength`；CJK 一字符最多 3 字节，按 `text.length` 会低估 3 倍）；超限追加**不含关键词触发词**的标记、`exitCode` 置 `null`、**不解析截断 JSON**；超限与超时**都走 `killTree()`**（`taskkill /PID /T /F`） | D-133 |
+| T3 | **动态「支持的网站」列表 + URL 支持状态预检**（P1） | 名单来自引擎 `--list-extractors`（**无兜底名单**，取不到就报稳定 code）；六态模型 `SUPPORTED / UNSUPPORTED / NO_MEDIA / INDETERMINATE / TIMEOUT / CANCELLED`，**只有 `UNSUPPORTED` 拦截**，门禁 **fail open**；三个入口（单 URL / TXT 批量 / 播放列表）共用同一个 `precheckBatch()`；缓存身份 = 引擎路径 + 版本，自更新后自然失效；UI 面板**仅 live 模式注入**（冻结截图基线不受影响） | D-134 |
+
+### 关键发现：引擎措辞的二义性（T3）
+
+实测随包 yt-dlp 2026.10.26（`[debug] Loaded 1747 extractors`）：**`generic`（GenericIE）会认领一切 http(s) URL**，因此引擎的 `ERROR: Unsupported URL:` **一句话同时表达两种意图**——① 无提取器；② 提取器认领了 URL 但页面无媒体。
+
+| 输入 | exit | 引擎措辞 | 归类 |
+|---|---|---|---|
+| `/nomedia.html`、`/video-nosrc.html`（本地） | 1 | `Unsupported URL:`（**无** `[x]` 前缀） | **NO_MEDIA**（放行） |
+| `/missing`(404)、端口拒连（本地） | 1 | `ERROR: [generic] … Unable to download webpage` | INDETERMINATE |
+| `wat` / `mailto:` / `data:` | 1 | `is not a valid URL` / `Unsupported url scheme` | **UNSUPPORTED** |
+| `/plain.txt`（本地） | 0 | 真下载出文件 | SUPPORTED |
+
+→ 裸 `Unsupported URL:` **必须是 NO_MEDIA（放行）**，读成「站点不支持」会拦掉普通「此页面无视频」的下载——正是计划书 §3.1 明令禁止的「网站支持 ≠ 视频可用」混淆。真正 UNSUPPORTED 的只有引擎**连路由都拒绝**的情形，而这类在 http(s) 输入上几乎不可达。**门禁的不对称性决定默认值**：误拦 = 用户无法绕过且无补救；误放 = 只是让下载按引擎自己更准确的错误失败（即现状）→ 一律 **fail open**，预检自身抛异常也算「未检查」放行。取证：`scripts/task03-classify-evidence.mjs` 重放真实 stderr，**10/10 映射通过**（该脚本**导入真实实现**而非重述正则——重述的校验在实现变更后仍会通过，而不会失败的校验不是校验）。
 
 ## 二、逐项落地
 
@@ -24,23 +48,28 @@
 | 6 | 失败与提示 | 取消/关闭/Esc 只释放票据不建任务；过期、已消费、URL 不匹配、语言不存在、音频内嵌均有稳定码与中英文案；仅自动字幕的语言未开开关时阻断确认并提示 |
 | 7 | TXT 清单批量导入 | 主进程原生选择器 + 严格 UTF-8 / 1 MiB / 2000 行 / 200 URL 上限；一次性票据（10 min / 8 个 / 单次消费）；复用 `applyFormatChoice → buildDownloadRequest → resolveTempDirFor → TaskQueue.enqueueBatch()`，每条独立 taskId / tempDir；`requested / enqueued / failed` 如实回报（D-129） |
 | 8 | 播放列表自动识别与批量下载 | 真 `engine.probePlaylist()` + 票据（5 min / 单次 / URL 绑定）；renderer DTO 无条目 URL；声明 / 实际解析 / 可下载 / 不可访问四数如实；默认全选、一次确认、唯一 taskId + 独立 tempDir；真实 YouTube 20/20 解析、3 条下载全部 `Completed`（D-130 / D-132） |
+| 9 | 「支持的网站」面板（D-134 A） | 队列页入口（**live 模式才注入**）→ `SUPPORTED_SITES` → 引擎 `--list-extractors`；显示引擎版本 + 站点数 + 子提取器数；搜索 / 排序（名称 / 失效优先）/ 刷新 / 加载中 / 失败 / 空态；**GenericIE 单独 callout**（仅引擎确实报告 `generic` 时显示）；分页 60 行。**文件内无任何写死站点名**，取不到引擎就报稳定 code，绝不编造列表 |
+| 10 | URL 支持预检（D-134 B） | 单 URL 在 `DOWNLOAD_START` **花掉字幕票据之前**拦截；TXT 与播放列表按条目预检；六态模型、**仅 `UNSUPPORTED` 拦截**、fail open；`blocks` 由主进程算好下发，渲染层不重新推导规则；verdict 缓存**只收已定结果**（`INDETERMINATE`/`TIMEOUT`/`CANCELLED` 每次重问），缓存身份 = 引擎路径 + 版本 + 插件环境；预检与下载使用**同一份** proxy / cookiesFile / userAgent（D-135 R1-01） |
 
 ## 三、验收结果
 
 | 门禁 | 结果 |
 |---|---|
 | `tsc --noEmit`（shared / core / engine-ytdlp / ui / desktop） | 5/5 通过 |
-| 全量单测 + 契约 | 106 文件 / **1464 项通过**，0 失败 |
-| 离线集成（真实随包 yt-dlp / ffmpeg / ffprobe） | 10 文件 / **26 项通过**（含取消、重试哈希、双语字幕产物、argv 解析） |
+| 全量单测 + 契约 | **121 文件 / 1752 项通过**，0 失败（覆盖率四维最低 **86.48%**，门限 70）。数值随代码变动，引用前现跑 `node scripts/run-tests.mjs all --coverage` / `node scripts/handoff-check.mjs`（D-135 R1-08） |
+| 离线集成（真实随包 yt-dlp / ffmpeg / ffprobe） | **12 文件 / 40 项通过**（含取消、重试哈希、双语字幕产物、argv 解析、最低画质本地夹具） |
 | 截图 E2E | **31/31 case + 反例 5/5**，基线零重建、像素差 0 px |
-| 真实站点（YouTube） | **已在线实测（2026-11-11，D-132）**：① 播放列表 `PLpODSd__yLPULp9c7RaFXF4W8yxRnMZgd`（Learning English Podcast）真解析 **20 / 20** 条（declared=fetched=20、available=20、unavailable=0、truncated=false、总时长 19,505 s），renderer DTO 序列化后无任何条目 URL；选 **3 条** 360p 批量入队 → 3 个独立 taskId / 独立 tempDir / 全部 `Completed`，产物 17.1 / 29.6 / 33.5 MB `.webm`，标题与时长逐条对应；② 单视频 `DTu4yvmc0Fc`（实际标题「DeepSeek Harness Just Changed AI Forever」，356 s，public；人工字幕 0 种 / 自动字幕 157 种）→ 自动字幕 `en` + 内嵌 + `keepSubtitleFile=false` → `Completed`，MKV 9.6 MB，`ffprobe` 内嵌 1 条 `subrip` eng 轨，输出目录无外置字幕；③ 本轮测量暴露并修复 `subtitleOutcome` 误判（D-132）。证据：`reports/live-audit/*.json`、`reports/l2-tmp/youtube-live-*`。**范围限制：只测 3 条、只覆盖自动字幕、未走 Electron 窗口 UI、未打包安装版** |
+| 真实站点（YouTube） | **已在线实测（2026-11-11，D-132）**：① 播放列表 `PLpODSd__yLPULp9c7RaFXF4W8yxRnMZgd`（Learning English Podcast）真解析 **20 / 20** 条（declared=fetched=20、available=20、unavailable=0、truncated=false、总时长 19,505 s），renderer DTO 序列化后无任何条目 URL；选 **3 条** 360p 批量入队 → 3 个独立 taskId / 独立 tempDir / 全部 `Completed`，产物 17.1 / 29.6 / 33.5 MB `.webm`，标题与时长逐条对应；② 单视频 `DTu4yvmc0Fc`（实际标题「DeepSeek Harness Just Changed AI Forever」，356 s，public；人工字幕 0 种 / 自动字幕 157 种）→ 自动字幕 `en` + 内嵌 + `keepSubtitleFile=false` → `Completed`，MKV 9.6 MB，`ffprobe` 内嵌 1 条 `subrip` eng 轨，输出目录无外置字幕；③ 本轮测量暴露并修复 `subtitleOutcome` 误判（D-132）。证据：`reports/live-audit/*.json`、`reports/l2-tmp/youtube-live-*`。**范围限制：只测 3 条、只覆盖自动字幕、未走 Electron 窗口 UI、未打包安装版**。**注意：T1/T2/T3 三项未纳入本次在线测试，见「已知边界」第 10 条** |
 | 真实 UI 全链路（本地夹具） | 外置：`Completed`，mp4 + 2 个 vtt 且记录关联正确；内嵌：`Completed`，MKV 内 ffprobe 2 条 `webvtt` 轨（eng/zho） |
-| `check-layering` / `frozen-gate` / `request.ts` 冻结 | 0 violations / exit 0 / 无差异 |
-| `handoff-check.mjs` | **exit 1**：M5 验收与覆盖率证据早于最后一次代码提交，属证据新鲜度问题，未伪造时间戳 |
+| 离线取证（引擎自述） | `scripts/task03-site-evidence.mjs`（仅 127.0.0.1 与本地进程）：catalog = **1754 条 / 1308 站点 / 445 子提取器 / 136 broken**（与真实 `--list-extractors` 1755 行去重后逐项吻合；唯一重复名是 `generic`，从无 broken 同名重复）；precheck = 本地含媒体页 `SUPPORTED`(HTML5MediaEmbed) / 无媒体页 `NO_MEDIA` / 404 与拒连端口 `INDETERMINATE` / 非 http 与非 URL 经白名单 `UNSUPPORTED`。`scripts/task03-classify-evidence.mjs`：**10/10 映射通过** |
+| 变异测试（自证 UI 测试非空转） | 注入硬编码兜底名单 → 1 项失败；清空失败文案 → 8 项失败；GenericIE 注释改为恒显示 → 1 项失败。三处变异均被捕获，还原后与变异前**逐字节一致** |
+| M5 交付验收（`node scripts/acceptance.mjs --milestone M5`） | **10/10 门禁 PASS、allGreen=true**；27 条断言 = 24 PASS + 3 如实 SKIPPED（N1/N2 延后项 + D-118 断点续传默认跳过）；`releaseReady=false` 仍成立，因为**未打包**（N1）。数值为 2026-11-11 快照，引用前现跑（D-135 / D-136） |
+| `check-layering` / `frozen-gate` / `request.ts` 冻结 | 0 violations / exit 0 / 无差异；`check-runtime` 3/3 必需组件 OK（yt-dlp 2026.10.26 / ffmpeg n9.0.2 / node v24.22.2） |
+| 铁律遵守 | 无新增 devDependencies（D-61）；`electron-builder.yml` 的 `files` glob 未改（D-75，靠 `build-desktop.mjs` 的 `cpSync` 整树拷贝使新 UI 文件自动进包） |
 
 ## 四、已知边界
 
-1. **「最低画质」当前是空选项（未修，待决策）**：`core/src/decision/download-plan.ts` 的 `RESOLUTION_QUALITIES` 只映射 2160p…360p，没有 `lowest`。实测选「最低画质」仍拉最高分辨率（24:52 视频产生约 980 MB 4K 临时文件，且 argv 无 `-S res:`）。修法需先定语义（`res:360` 或 `+res`），并补 plan 层回归。
+1. **「最低画质」已由 D-133 修复**（原为空选项）：`RESOLUTION_QUALITIES` 补 `lowest → '+res'`，语义先定在 D-133 并补了 plan 层回归，另加 `tests/integration/offline/lowest-quality-local.test.ts` 8 项在真实引擎本地夹具上断言实际选中的格式串。**残留**：`+res` 在真实站点（YouTube 等）分辨率表上的表现未在线实测。
 2. **仅代理出网的环境无法探测**：`yt-dlp-engine.ts::spawnBase` 只注入 `PATH`，不透传 `HTTP_PROXY`/`HTTPS_PROXY`（配置域 `network.proxy` 仍会生成 `--proxy` argv）。本轮未在任何代理环境下验证，此处不构成在线验收结论。
 3. 独立字幕重试未实现：引擎非零退出仍整体 `Error`，`restart` 重跑整个任务（可能产生副本名），不能用忽略退出码伪装成功。
 4. 同语言人工 / 自动不能分别下载两份，界面只提供「包含自动字幕」。
@@ -49,6 +78,11 @@
 7. 本轮未重跑覆盖率（本机 safe-delete 守卫限制），不引用历史 85.99% 作为本次结果。
 8. 下一决策编号原写 D-129；**口径订正**：D-129 / D-130 为批量导入与播放列表批量，D-131 为独立审查修复，D-132 为真实在线验收与 `subtitleOutcome` 修复，后续从 **D-133** 起。
 9. **口径变更记录（D-131 → D-132）**：第 3 节「真实站点（YouTube）」曾因「只有文档、没有任何日志／产物／测试记录」被 2026-11-11 独立审查改为「未验证」；随后业主放行国际网，完成真实在线测试并补齐证据，现改为「已在线实测」并注明范围限制。**前后两次结论都不矛盾：当时确实无证据，现在确实有证据。** 本次只以 `reports/live-audit/` 与 `reports/l2-tmp/youtube-live-*` 为准，不沿用旧口径。`keepSubtitleFile=false` 的实现缺陷已修复（D-131），`ipc-bridge.js` 通道登记与 `TXT_IMPORT_ENQUEUE` 的 `kind` 校验已补齐。详见 `docs/DECISIONS.md` D-131 / D-132 与工作区 `handoff/INDEPENDENT_CODE_AUDIT_REPORT.md`、`handoff/ONLINE_VERIFICATION_REPORT.md`。
+10. **本轮三项任务（D-133 / D-134）未纳入在线测试**：§三 的「真实站点（YouTube）」一行（D-132，2026-11-11）**只覆盖字幕／播放列表／单视频那三条链路，早于 T1 / T2 / T3**，不能拿来当这三项的在线证据。因此未覆盖的准确口径是：
+    - **T1（最低画质）**：已用真实随包引擎在**本地夹具**（同一 2160/1080/720/360 源）断言 `-S +res` 实选 `v360`，并有 8 项离线集成测试；但 `+res` 在**真实站点（YouTube 等）的分辨率表**上是否同样取到最低档，**未在线实测**。
+    - **T2（子进程输出上限）**：16 MiB / 1 MiB 上限与 `killTree()` 已由单测与离线集成覆盖（超限、按字节计数、不解析截断 JSON、与超时共用击杀路径）；**真实站点上「谁来触发 16 MiB」未构造**——这属于熔断保险，正常路径一字节上限都不加。
+    - **T3（动态支持的网站 + URL 预检）**：名录取自**真实随包引擎** `--list-extractors`（1755 行 → 1754 条去重），分类映射 **10/10** 用**真实 stderr** 重放；但预检在**真实站点**上的六态分布（尤其 `SUPPORTED` / `NO_MEDIA` 在线上页面与线下夹具是否一致、`INDETERMINATE` 的真实触发率）**未在线验证**，UI 面板也**未走 Electron 窗口实机点击**。按计划书要求，做这一步需**先向业主申请国际网络放行并提供测试链接**；未放行前不联网。
+    - **共用的架构口径**：三项都只**新增**可选能力接口 / 可选字段 / IPC 通道，未改冻结面（`request.ts` 逐字节未动、无新增 devDependencies、`electron-builder.yml` 的 `files` glob 未改）。
 
 ---
 

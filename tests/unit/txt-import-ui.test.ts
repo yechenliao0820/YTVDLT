@@ -263,6 +263,61 @@ describe('TXT import UI · confirm and honest results', () => {
     expect(h.refreshed()).toBe(1);
   });
 
+  /**
+   * R1-03 - the pre-check tally.
+   *
+   * Requirement: "分类统计（支持/不支持/不确定各几条 + 具体 URL）". The renderer
+   * must show those numbers, must not print "not checked" as "supported", and
+   * must name the urls in the non-blocking buckets (those do NOT appear in
+   * `failures`, so without this block they were invisible).
+   */
+  it('renders the three-way pre-check tally and the urls it could not confirm', async () => {
+    const h = harness({
+      enqueue: {
+        ok: true, code: '', requested: 5, enqueued: 5, failed: 0,
+        taskIds: ['a', 'b', 'c', 'd', 'e'], failures: [],
+        precheck: {
+          examined: 4, supported: 2, unsupported: 0, noMedia: 1, indeterminate: 1,
+          skipped: 1,
+          unsupportedUrls: [], noMediaUrls: [V(2)], indeterminateUrls: [V(3)],
+        },
+      },
+    });
+    h.entry?.click();
+    await tick();
+    h.doc.byId.get('txt-import-confirm')?.click();
+    await tick();
+    const text = h.doc.byId.get('txt-import-body')?.textContent ?? '';
+    expect(text).toContain('链接预检');
+    expect(text).toContain('支持 2');
+    expect(text).toContain('不支持 0');
+    expect(text).toContain('无媒体 1');
+    expect(text).toContain('未确认 1');
+    expect(text).toContain('未检查 1');
+    // The skipped count is called out separately: it must never read as covered.
+    expect(text).toContain('没有经过预检');
+    // Named urls for the buckets that are not failures.
+    expect(text).toContain('无媒体 — ' + V(2));
+    expect(text).toContain('未确认 — ' + V(3));
+  });
+
+  it('omits the pre-check block entirely when the build has no pre-check port', async () => {
+    const h = harness({
+      enqueue: {
+        ok: true, code: '', requested: 3, enqueued: 3, failed: 0,
+        taskIds: ['a', 'b', 'c'], failures: [],
+      },
+    });
+    h.entry?.click();
+    await tick();
+    h.doc.byId.get('txt-import-confirm')?.click();
+    await tick();
+    const text = h.doc.byId.get('txt-import-body')?.textContent ?? '';
+    // No tally means "we did not check", and the UI must not invent a 0/0/0 line
+    // that would read as "everything confirmed".
+    expect(text).not.toContain('链接预检');
+  });
+
   it('a failed IPC call shows the error and never claims success', async () => {
     const h = harness({ pick: { ok: false, code: 'FILE_TOO_LARGE', items: [] } });
     h.entry?.click();

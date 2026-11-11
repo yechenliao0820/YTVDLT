@@ -129,9 +129,13 @@ describe('A-M2-25 buildDownload · optional segments', () => {
       const mapped = buildDownload(req({ format: format({ quality: quality as never }) }), CTX);
       expect(mapped[mapped.indexOf('-S') + 1]).toBe(`res:${res}`);
     }
-    // best/lowest carry no explicit resolution constraint.
+    // D-133: `best` carries no term (yt-dlp's default sort is already `res`
+    // DESC = highest). `lowest` MUST carry the ASCENDING `+res` — it used to
+    // carry nothing at all, and the default descending sort then downloaded the
+    // HIGHEST resolution (the reported ~980 MB 4K file).
     expect(buildDownload(req({ format: format({ quality: 'best' }) }), CTX)).not.toContain('-S');
-    expect(buildDownload(req({ format: format({ quality: 'lowest' }) }), CTX)).not.toContain('-S');
+    const lowestArgv = buildDownload(req({ format: format({ quality: 'lowest' }) }), CTX);
+    expect(lowestArgv[lowestArgv.indexOf('-S') + 1]).toBe('+res');
   });
 
   it('maps the subtitle subset', () => {
@@ -193,9 +197,12 @@ describe('M3 buildDownload · conditional segments do not disturb the frozen min
     expect(buildDownload(req(), CTX)).toEqual([...EXPECTED_MINIMAL]);
   });
 
-  it('best / lowest still produce NO -S with all other fields at defaults', () => {
+  it('best still produces NO -S, while lowest produces the ascending `+res`', () => {
     expect(buildDownload(req({ format: format({ quality: 'best' }) }), CTX)).not.toContain('-S');
-    expect(buildDownload(req({ format: format({ quality: 'lowest' }) }), CTX)).not.toContain('-S');
+    // D-133 (TASK-01): the fix — "最低画质" is a relative ASCENDING sort, so it
+    // can never be satisfied by "no sort term" (which means the highest).
+    const lowestArgv = buildDownload(req({ format: format({ quality: 'lowest' }) }), CTX);
+    expect(lowestArgv[lowestArgv.indexOf('-S') + 1]).toBe('+res');
   });
 
   it('M3 embed adds remux+merge mkv AFTER --convert-subs, never before --embed-subs', () => {

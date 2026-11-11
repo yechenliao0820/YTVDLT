@@ -77,6 +77,17 @@ export const IPC_CHANNELS = {
   PLAYLIST_PREVIEW: 'ytvdlt:playlist:preview',
   PLAYLIST_PREVIEW_CANCEL: 'ytvdlt:playlist:previewCancel',
   PLAYLIST_BATCH_ENQUEUE: 'ytvdlt:playlist:batchEnqueue',
+  // D-134 (append-only): supported-site discovery and per-URL support
+  // pre-check. Both READ the running engine; neither can start a download and
+  // neither accepts a path, an argv token or a format selection.
+  //   SUPPORTED_SITES    -> the running engine's extractor list (display only)
+  //   URL_SUPPORT_CHECK  -> the six-state advisory verdict for ONE url
+  // Why two channels: the catalog is a page-level read that may be cached for
+  // minutes, while the pre-check is a per-submission action with a 20s budget.
+  // Folding them into one `action` string would hide a long network call inside
+  // a "list" channel.
+  SUPPORTED_SITES: 'ytvdlt:sites:list',
+  URL_SUPPORT_CHECK: 'ytvdlt:sites:check',
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

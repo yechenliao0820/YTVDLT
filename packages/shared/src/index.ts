@@ -34,3 +34,9 @@ export * from './subtitle-preview.js';
 export * from './subtitle-artifact.js';
 // Playlist batch import (append-only): display-safe preview DTO + ticket codes.
 export * from './playlist-preview.js';
+// D-133 (append-only): byte ceilings for bounded metadata spawns, shared between
+// the engine (which requests them) and the desktop adapter (which enforces them).
+export * from './engine-limits.js';
+// TASK-03 (append-only): "what can this engine parse" + the six-state URL
+// pre-check vocabulary. Types and constants only; no list of sites lives here.
+export * from './site-support.js';

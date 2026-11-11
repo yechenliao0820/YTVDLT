@@ -10,7 +10,7 @@
  */
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn as spawnProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { release } from 'node:os';
 import { dirname, join } from 'node:path';
 import type {
@@ -18,7 +18,28 @@ import type {
   EnvPort, LogSinkPort, SpawnResult, SpawnOptions, IShellPort, HttpPort,
 } from '@ytvdlt/shared';
 import { createStreamingProcessPort } from './process-streaming.js';
+import { createBoundedOutput, OUTPUT_LIMIT_MARKER, type BoundedOutput } from './output-limiter.js';
 import { createShellPort } from './shell-port.js';
+
+/**
+ * R1-07 — how long an overflowed child gets to die before the promise settles
+ * without it.
+ *
+ * WHY A SECOND DEADLINE EXISTS: the overflow kill goes through `taskkill /T`,
+ * which is an external process and can genuinely fail (the child already
+ * exited, access denied, a PID recycled in the gap). `killTree()`'s rejection is
+ * swallowed — correctly, there is nothing better to do — but then the only
+ * thing that could settle the promise was the caller's `timeoutMs`. Every
+ * current caller passes one; the next one might not, and the cost of that
+ * mistake is a hung pre-check with no error at all.
+ *
+ * 5 s is deliberately longer than the ~2 s a Windows tree-kill takes in the
+ * measured runs and shorter than every bounded caller's own timeout (20 s
+ * pre-check, 30 s catalog list), so in practice this timer never fires first —
+ * it is a floor, not the normal path. Asserted by a unit test so the bound
+ * cannot silently grow past a caller's timeout.
+ */
+export const OVERFLOW_SETTLE_GRACE_MS = 5_000;
 
 export interface NodePortsOptions {
   packaged: boolean;
@@ -128,59 +149,147 @@ function hashPort(): HashPort {
 
 function processPort(): ProcessPort {
   const streaming = createStreamingProcessPort();
-  return {
-    spawn(file: string, argv: readonly string[], opts: SpawnOptions): Promise<SpawnResult> {
-      return new Promise((resolve) => {
-        let child: ChildProcessWithoutNullStreams;
-        try {
-          child = spawn(file, [...argv], {
-            shell: false,
-            windowsHide: true,
-            cwd: opts.cwd,
-            env: { ...process.env, ...(opts.env ?? {}) },
+
+  /**
+   * D-133 (TASK-02): bounded `spawn()`.
+   *
+   * Counts BYTES, not characters — a CJK playlist title costs 3 UTF-8 bytes per
+   * glyph, so a limit expressed in JS string length is off by up to 3x exactly
+   * for the users this app ships to.
+   *
+   * Unbounded is the DEFAULT and is byte-identical to the legacy path: the
+   * playlist probe passes ceilings, a metadata probe and every other caller
+   * leave them unset. A normal download never reaches here at all (it uses
+   * `spawnStreaming`), so no transfer can be killed by this.
+   *
+   * The overflow kill and the timeout kill both go through `killTree()` — a
+   * bare `child.kill()` does not stop a yt-dlp onefile bootloader (§9 坑 21),
+   * which is what the old timeout path used.
+   */
+  const spawn: ProcessPort['spawn'] = (file, argv, opts) => {
+    const bounded = opts.maxStdoutBytes !== undefined || opts.maxStderrBytes !== undefined;
+    const outLimit: BoundedOutput | null = bounded ? createBoundedOutput(opts.maxStdoutBytes) : null;
+    const errLimit: BoundedOutput | null = bounded ? createBoundedOutput(opts.maxStderrBytes) : null;
+
+    return new Promise((resolve) => {
+      let child: ChildProcessWithoutNullStreams;
+      try {
+        child = spawnProcess(file, [...argv], {
+          shell: false,
+          windowsHide: true,
+          cwd: opts.cwd,
+          env: { ...process.env, ...(opts.env ?? {}) },
+        });
+      } catch (error) {
+        resolve({
+          exitCode: null,
+          stdout: '',
+          stderr: error instanceof Error ? error.message : String(error),
+          timedOut: false,
+        });
+        return;
+      }
+
+      let stdout = '';
+      let stderr = '';
+      let timedOut = false;
+      let settled = false;
+      let overflowed = false;
+
+      // The collector owns the accepted prefix once it exists; the plain string
+      // is authoritative only on the unbounded path.
+      const currentStdout = (): string => (outLimit === null ? stdout : outLimit.text());
+      const currentStderr = (): string => (errLimit === null ? stderr : errLimit.text());
+
+      let timer: NodeJS.Timeout | null = null;
+      /** R1-07: the overflow deadline, kept separate from the caller's timeout. */
+      let settleTimer: NodeJS.Timeout | null = null;
+      const finish = (result: SpawnResult): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) { clearTimeout(timer); timer = null; }
+        if (settleTimer !== null) { clearTimeout(settleTimer); settleTimer = null; }
+        // A settled result must never leave listeners behind (TASK-02 C:
+        // "不能因为增加输出限制而引入新的进程泄漏或者监听器泄漏").
+        child.stdout?.removeAllListeners();
+        child.stderr?.removeAllListeners();
+        child.removeAllListeners();
+        resolve(result);
+      };
+
+      /** Kill the TREE on overflow; the flag decides how `close` is reported. */
+      const killOnOverflow = (): void => {
+        if (overflowed) return;
+        overflowed = true;
+        void streaming.killTree(child.pid ?? null, child).catch(() => undefined);
+        // R1-07: the kill is best-effort — `taskkill` can fail (already gone, an
+        // access-denied zombie, a PID recycled between the spawn and the kill),
+        // and when it does the `close` event may never arrive. Without this
+        // second deadline the promise would hang forever whenever the caller did
+        // not pass `timeoutMs` (the metadata probes do pass one; a future caller
+        // would be the bug). Settling here is honest: the result already says
+        // `exitCode: null` + the overflow marker, so no caller can mistake it
+        // for a clean run with a short answer.
+        settleTimer = setTimeout(() => {
+          settleTimer = null;
+          finish({
+            exitCode: null, stdout: currentStdout(), stderr: `${currentStderr()}${overflowNote()}`,
+            timedOut,
           });
-        } catch (error) {
-          resolve({
-            exitCode: null,
-            stdout: '',
-            stderr: error instanceof Error ? error.message : String(error),
-            timedOut: false,
-          });
+        }, OVERFLOW_SETTLE_GRACE_MS);
+      };
+
+      const onData = (stream: 'stdout' | 'stderr') => (chunk: Buffer | string): void => {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8');
+        const limit = stream === 'stdout' ? outLimit : errLimit;
+        if (limit === null) {
+          // Unbounded: exact legacy accumulation, no per-chunk work.
+          if (stream === 'stdout') stdout += buffer.toString('utf8');
+          else stderr += buffer.toString('utf8');
           return;
         }
+        if (limit.push(buffer) === 'exceeded') killOnOverflow();
+      };
 
-        let stdout = '';
-        let stderr = '';
-        let timedOut = false;
-        let settled = false;
-        const finish = (result: SpawnResult): void => {
-          if (settled) return;
-          settled = true;
-          resolve(result);
-        };
-        child.stdout.setEncoding('utf8');
-        child.stderr.setEncoding('utf8');
-        child.stdout.on('data', (chunk: string) => { stdout += chunk; });
-        child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+      child.stdout?.on('data', onData('stdout'));
+      child.stderr?.on('data', onData('stderr'));
 
-        const timer = opts.timeoutMs === undefined
-          ? null
-          : setTimeout(() => {
-              timedOut = true;
-              child.kill();
-              finish({ exitCode: null, stdout, stderr, timedOut: true });
-            }, opts.timeoutMs);
+      if (opts.timeoutMs !== undefined) {
+        timer = setTimeout(() => {
+          timedOut = true;
+          // Tree-aware: a onefile bootloader survives a bare `child.kill()`.
+          void streaming.killTree(child.pid ?? null, child).catch(() => undefined);
+          finish({
+            exitCode: null, stdout: currentStdout(), stderr: currentStderr(), timedOut: true,
+          });
+        }, opts.timeoutMs);
+      }
 
-        child.on('error', (error: Error) => {
-          if (timer) clearTimeout(timer);
-          finish({ exitCode: null, stdout, stderr: `${stderr}${error.message}`, timedOut });
-        });
-        child.on('close', (code: number | null) => {
-          if (timer) clearTimeout(timer);
-          finish({ exitCode: code, stdout, stderr, timedOut });
+      const overflowNote = (): string => (overflowed ? `\n${OUTPUT_LIMIT_MARKER}` : '');
+
+      child.on('error', (error: Error) => {
+        finish({
+          exitCode: null,
+          stdout: currentStdout(),
+          stderr: `${currentStderr()}${overflowed ? '' : error.message}${overflowNote()}`,
+          timedOut,
         });
       });
-    },
+      child.on('close', (code: number | null) => {
+        finish({
+          // An overflow kill is NOT a clean exit: report a null code so the
+          // caller errors out instead of `JSON.parse`-ing a truncated blob.
+          exitCode: overflowed ? null : code,
+          stdout: currentStdout(),
+          stderr: `${currentStderr()}${overflowNote()}`,
+          timedOut,
+        });
+      });
+    });
+  };
+
+  return {
+    spawn,
     // M2 append-only: streaming spawn (pid + process-tree kill) and liveness.
     spawnStreaming: streaming.spawnStreaming,
     isAlive: streaming.isAlive,

@@ -23,6 +23,13 @@ export interface StreamingProcessPortOptions {
 export function createStreamingProcessPort(options: StreamingProcessPortOptions = {}): {
   spawnStreaming: ProcessPort['spawnStreaming'];
   isAlive: ProcessPort['isAlive'];
+  /**
+   * D-133 (TASK-02): exposed so the bounded `spawn()` path can terminate a
+   * process TREE on output overflow. `child.kill()` is not enough — a yt-dlp
+   * onefile bootloader survives it (§9 坑 21) — so both the timeout and the
+   * overflow paths must funnel through this one implementation.
+   */
+  killTree: (pid: number | null, child: ChildProcess) => Promise<boolean>;
 } {
   const taskkillExe = options.taskkill ?? taskkillPath();
 
@@ -168,5 +175,5 @@ export function createStreamingProcessPort(options: StreamingProcessPortOptions 
     return { pid, done, kill };
   };
 
-  return { spawnStreaming, isAlive };
+  return { spawnStreaming, isAlive, killTree };
 }

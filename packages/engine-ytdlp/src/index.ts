@@ -9,7 +9,9 @@ export {
   toMediaInfo, toPlaylistInfo, mapProbeResult, JsonMapper,
 } from './json-mapper.js';
 export * from './media-guards.js';
-export { YtDlpEngine, type YtDlpEngineDeps } from './yt-dlp-engine.js';
+export {
+  YtDlpEngine, type YtDlpEngineDeps, utf8ByteLength, readExtractorKey,
+} from './yt-dlp-engine.js';
 export { FakeEngine, type FakeEngineDeps } from './fake-engine.js';
 export {
   createEngine, type EngineKind, type EngineFactoryOptions,
@@ -43,3 +45,12 @@ export {
   SelfUpdater, parseChecksums, normalizeToolVersion, type SelfUpdaterDeps,
 } from './self-updater.js';
 export { HttpUpdateSource, type HttpUpdateSourceOptions } from './http-update-source.js';
+// TASK-03 additions (append-only, D-134): supported-site discovery + URL
+// pre-check. Both read-only; neither can start a download.
+export {
+  parseExtractorList, classifySupportFailure, extractorClaimedUrl, PRECHECK_TIMEOUT_REASON,
+  type ParsedExtractorList,
+} from './extractor-list.js';
+export {
+  supportsSiteDiscovery, type SiteDiscovery, type UrlSupportCheckOptions,
+} from './site-discovery.js';

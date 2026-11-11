@@ -133,6 +133,7 @@ ui（零依赖） ← preload ← apps/desktop
 | yt-dlp 参数、进度、产物清单 | `packages/engine-ytdlp/src/argv-builder-download.ts`、`progress-parser.ts`、`artifact-manifest.ts` |
 | **下载后处理阶段（合并 / 整理 / 校验）** | `packages/engine-ytdlp/src/postprocess-parser.ts`（stderr 方括号标记 → `merging` / `postprocess`）→ `core/src/task-queue/task-queue.ts`（`lastStage`，单调推进，校验前置 `verifying`）→ `main/m5-channels.ts::toTaskListItem`（`stage`）→ `ui/src/pages/queue/queue.js::progressMode`（`working`）/ `stageText`；顺序规则在 `shared/src/events.ts::isForwardStage` |
 | **子进程启动环境（cwd / TEMP / PATH）** | `packages/engine-ytdlp/src/yt-dlp-engine.ts::spawnBase` —— 任何新 spawn 都从这里取 |
+| **有界元数据子进程的输出硬上限（`probe` / `probePlaylist` / `version`）** | `shared/src/ports.ts::SpawnOptions.maxStdoutBytes / maxStderrBytes`（append-only 可选字段，字节数）→ `apps/desktop/src/main/adapters/output-limiter.ts::createBoundedOutput`（按**字节**累加：对每个到达的 `Buffer` 分片取 `chunk.byteLength`，**不是** `string.length`；超限保留已接受前缀、拒绝剩余分片且**不抛异常**；超限在 stderr 追加 `OUTPUT_LIMIT_MARKER`）→ `shared/src/engine-limits.ts`（`METADATA_MAX_STDOUT_BYTES = 16 MiB` / `METADATA_MAX_STDERR_BYTES = 1 MiB`）；`assertSafeSpawnOptions()` 拒绝非正整数上限。**正常下载一个字节上限都不加**（`spawnStreaming` 路径一行未改），长下载照旧可流式吐兆字节进度。超限与超时**都走 `killTree()`**（`taskkill /PID /T /F`，见 §9 坑 21）。D-133 |
 | 产物校验、错误码与中文提示、错误报告 | `core/src/artifact-verifier/`、`shared/src/errors.ts`、`core/src/error-mapper/`、`error-report/`；列表页一句话失败简报（D-109）：`core/src/failure-summary/`（稳定码→分类）→ `main/m5-channels.ts::toTaskListItem`（`failureKind`）→ `ui/src/pages/queue/queue.js::failureKeyOf`（`queue.failure.<kind>`），详情 DTO 不动 |
 | 队列调度、并发、暂停、历史快照 | `core/src/task-queue/`、`task-store/`；数据目录判定在 `data-dir.ts` |
 | 详情页、日志页、设置页、M3 三个对话框 | `packages/ui/src/pages/*`、`packages/ui/src/dialogs/*` |
@@ -154,6 +155,8 @@ ui（零依赖） ← preload ← apps/desktop
 | **TXT 清单批量导入（选文件 / 预览 / 确认入队）** | `packages/core/src/txt-import/parse.ts`（纯解析，URL 校验由外层注入）→ `apps/desktop/src/main/txt-import-service.ts`（一次性票据 + 真实计数）→ `apps/desktop/src/main/adapters/txt-file-picker.ts`（原生选择器 + 读）→ `main/txt-import-file.ts`（扩展名 / 大小 / 严格 UTF-8 纯解码）→ `m5-channels.ts::TXT_IMPORT_PICK/ENQUEUE` → `m4-host.ts::enqueueTxtBatch` → `TaskQueue.enqueueBatch()`；UI 在 `packages/ui/src/txt-import/txt-import.js`（**仅 live 模式注入**，静态基线不受影响） |
 | **播放列表批量下载（自动识别 / 预览 / 默认全选 / 一次确认）** | `core/src/playlist/preview-cache.ts`（票据）→ `apps/desktop/src/main/playlist-preview-service.ts`（真 `engine.probePlaylist()` + 脱敏 DTO）→ `m5-channels.ts::PLAYLIST_PREVIEW / PREVIEW_CANCEL / BATCH_ENQUEUE` → `m4-host.ts::runPlaylistBatch` → `buildPlaylistBatchRecordsByUrl()` → `TaskQueue.enqueueBatch()`；UI 在 `packages/ui/src/playlists/playlist-import.js`（**仅 live 模式注入**）。M3 fixture 对话框 `dialogs/playlist-selector.js` 与 `pages/queue/playlist-batch.html` 保持冻结不动 |
 | **内嵌字幕后按 `keepSubtitleFile` 清理外置副本** | `core/src/task-queue/task-queue.ts::discardEmbeddedSubtitleArtifacts`（本任务字幕清单 + 媒体归属 / 语言段 / 其它任务引用三重校验）→ `main/m5-host.ts::makeSubtitleRecycler` → `main/adapters/local-file-status-port.ts::createTrashFilesPort` → `shell.trashItem`（D-131；**删除只进回收站**） |
+| **支持的网站列表（引擎自述 / 搜索 / 排序 / GenericIE 说明）** | `engine-ytdlp/src/extractor-list.ts::parseExtractorList`（纯解析 `--list-extractors`，**唯一事实来源，无兜底名单**）→ `engine-ytdlp/src/yt-dlp-engine.ts::listExtractors` → `engine-ytdlp/src/site-discovery.ts`（可选能力接口 `SiteDiscovery` + `supportsSiteDiscovery()`，**不扩冻结的 5 方法 `DownloadEngine`**）→ `main/site-support-service.ts`（缓存身份 = 引擎路径 + 版本，自更新后 key 变化即失效）→ `m5-channels.ts::SUPPORTED_SITES`（投影 DTO，**丢 `enginePath`**）→ `ui/src/sites/supported-sites.js`（**仅 live 模式注入**，静态基线不受影响；文件内无任何写死站点名）。D-134 |
+| **URL 支持状态预检（六态模型，仅「明确不支持」拦截）** | `engine-ytdlp/src/extractor-list.ts::classifySupportFailure` / `extractorClaimedUrl`（纯函数，按真实 stderr 分类）→ `engine-ytdlp/src/yt-dlp-engine.ts::checkUrlSupport`（`--simulate`，默认 20 s，**永不抛异常**）→ `main/site-precheck-gate.ts::precheckBatch`（**三个入口共用的唯一定义**：worker 池并发 3、in-flight 去重、重复不折叠、超预算放行并记 `skipped`）→ `m5-channels.ts`（单 URL 在 `DOWNLOAD_START` **花掉字幕票据之前**拦截；`PLAYLIST_BATCH_ENQUEUE` 按条目预检）与 `main/txt-import-service.ts`（TXT 批量预检）。六态：`SUPPORTED / UNSUPPORTED / NO_MEDIA / INDETERMINATE / TIMEOUT / CANCELLED`，**只有 `UNSUPPORTED` 拦截**（`shared/src/site-support.ts::blocksEnqueue`），**门禁 fail open**。⚠️ `generic`（GenericIE）会认领一切 http(s) URL，故引擎的裸 `ERROR: Unsupported URL:` 是「认领了但无媒体」= **NO_MEDIA（放行）**，不是 UNSUPPORTED。D-134 |
 
 ---
 
@@ -210,6 +213,7 @@ ui（零依赖） ← preload ← apps/desktop
 14. **导入预览的统计必须来自真实解析结果**（D-129）：部分入队失败按 `requested / enqueued / failed` 如实回报，禁止把 `PARTIAL_SUCCESS` 写成全部成功；无效、重复、播放列表行不进入批量。
 15. **`PLAYLIST_PREVIEW` 只收 url / previousPreviewId，`PLAYLIST_BATCH_ENQUEUE` 不收 PlaylistInfo**（D-130）：完整 `PlaylistInfo`（含条目 URL）只留在主进程 `PlaylistPreviewCache`；Renderer 拿到的 DTO 无任何 URL。票据绑定 URL、5 分钟 TTL、单次消费，取消 / 关闭 / 退出清理。M3 冻结的 `PLAYLIST_ENQUEUE` 仍在 fixture gateway，两条链路共用 `m4-host.ts::runPlaylistBatch()`。
 16. **播放列表生产 taskId 不用 `defaultBatchTaskId()`**（D-130）：`<playlistId>-<entryId>` 会让同一合集二次入队覆盖旧记录。新票据链路注入唯一 `makeTaskId`；旧 M3 链路和纯函数保持原样。预览显示「声明总数 / 实际解析 / 可下载 / 不可访问」四个数，只解析到 20 条不得写成 65 条。
+17. **`SUPPORTED_SITES` 只收 `refresh`、`URL_SUPPORT_CHECK` 只收 `url` / `refresh`**（D-134）：渲染层不得指定引擎路径、引擎版本、argv、cookies、质量或提取器——名单必须来自**当前实际运行的引擎**，这是整个功能存在的理由（写死或可被渲染层指定的名单与陈旧列表无法区分）。`SUPPORTED_SITES` 的 DTO **不含 `enginePath`**（含用户名绝对路径，无需求且属泄露），取不到就以稳定 code（`ENGINE_TIMEOUT` / `ENGINE_FAILED` / `ENGINE_EMPTY` / `OUTPUT_LIMIT_EXCEEDED` / `ENGINE_UNAVAILABLE`）报失败，**绝不编造列表**。`URL_SUPPORT_CHECK` 由**主进程算好 `blocks` 下发**，渲染层不得自行推导「什么状态算不支持」；`NO_MEDIA` 是提示不是拦截，**门禁 fail open**——误拦用户无法绕过，误放只是让下载按引擎自己的准确错误失败。
 
 ---
 
@@ -341,7 +345,13 @@ ui（零依赖） ← preload ← apps/desktop
 
 22. **`shell.trashItem` 对不存在的文件抛 `ENOENT`，那不是删除失败**（D-120）：把它计入「部分失败」会让任务历史永远删不掉。清理必须幂等——先 `stat` 判存在，存在才回收；`ENOENT`/`ENOTDIR` 视为已完成；`EACCES`/`EPERM`/`EBUSY`/`EIO`/卷不可用才保留记录并回报真实原因。`stat` 到 `trashItem` 之间文件仍可能被外部删掉，catch 里要按 errno 再兜一次，别吞掉所有异常。同理：队列里的 `Completed` 说的是「当初下载成功」，不是「文件现在还在」，两者别互相覆盖。
 
+23. **元数据子进程的 stdout 必须有上限，且上限要按字节而不是字符算**（D-133）：`probe` / `probePlaylist` 的 JSON 用无上限的 `stdout += chunk` 累积，一个病态播放列表或持续流式返回的站点能把主进程撑到卡死。两个容易踩的点：① **用 `text.length` 设限会低估最多 3 倍**——CJK 标题一个字形占 3 个 UTF-8 字节却只有 1–2 个 JS 字符，中文用户最容易先撞上；计数一律按字节。**实现细节别写错**：适配层（真正执行上限的地方，`output-limiter.ts::createBoundedOutput`）拿的是原始 `Buffer`，累加的是分片实例属性 `chunk.byteLength`，**仓库里没有 `Buffer.byteLength(...)` 这行代码**——那只是 `tests/unit/probe-output-limit.test.ts` 用来对账的对照基准；引擎侧另有一个对**已解码字符串**估算的 `utf8ByteLength()`（`yt-dlp-engine.ts`，仅供日志记 `receivedBytes`，**不参与上限判定**）。照文档 grep `Buffer.byteLength` 会一无所获，别被坑。② **超限不能按「网络类错误」报**，否则用户拿到的是误导性的 `UNKNOWN`/`NETWORK_TIMEOUT`；适配器在 stderr 追加一个**不含任何关键词表触发词**的标记，引擎识别后按「输出超限」解释，并把 `exitCode` 置 `null`。**截断的 JSON 绝不能拿去解析**——截断的播放列表会静默长成「列表就是短」，比探测失败更危险。上限只在有界元数据任务上开，正常下载一字节都不加（`spawnStreaming` 不受影响）。
+
+24. **`generic`（GenericIE）会认领一切 http(s) URL，「无提取器」与「无媒体」在引擎措辞里是同一句话**（D-134）：随包引擎对 `/nomedia.html`、无 `src` 的 `/video-nosrc.html` 都先打 `[generic] Extracting URL` + `Looking for embeds`，再以 `ERROR: Unsupported URL: ...` 收尾且真实下载写零文件（`[debug] Loaded 1747 extractors`）。所以这句**必须读成「提取器认领了但页面无媒体」= NO_MEDIA（放行）**，读成「站点不支持」会拦掉普通「此页面无视频」的下载，正是「网站支持 ≠ 视频可用」的混淆。真正 UNSUPPORTED 的只有引擎**连路由都拒绝**的情形（`'wat' is not a valid URL`、`Unsupported url scheme: "mailto"`、`file:// URLs are disabled`），这类在 http(s) 输入上几乎不可达。判定顺序上 `unsupported url scheme` **必须先于** `unsupported url` 检查，否则路由级结论会被子串误吞。门禁的不对称性决定默认值：**误拦用户无法绕过且无补救，误放只是让下载按引擎自己更准确的错误失败 → 一律 fail open**，预检自身抛异常也算「未检查」放行。
+25. **`--extractor-descriptions` 的输出不是 UTF-8**（D-134）：实测同一二进制上它是 Windows ANSI 代码页（`BaiduVideo: 百度视频` 到达时是 `B0 D9 B6 C8 CA D3 C6 B5` = cp936），按 UTF-8 解码必成 mojibake，按 cp936 解又在非中文 Windows 上出错。名单只用 `--list-extractors`（纯 ASCII，实测 1755 行 / 23,500 B）；`(CURRENTLY BROKEN)` 是引擎自己的判断，**逐字保留、不重新推导也不隐藏**，且标记**具有粘性**（同名两行无论顺序都保留坏标记，结果不依赖行序）。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
+
 
 ---
 
@@ -363,9 +373,13 @@ ui（零依赖） ← preload ← apps/desktop
 | **删除任务不回收其 `work/<taskId>` 目录**：目录里的 `.part` / `.ytdl` 是续传凭据，递归删除要先有租约判断，现阶段只保留不动 | `engine-ytdlp/src/yt-dlp-engine.ts`（成功后只删空目录） |
 | **跨卷的中间文件落点未实测**：本机只有 C:，`resolveDownloadTempDir` 的跨卷分支只经过单元测试 | `core/src/path-resolver/volume.ts` |
 | **字幕边界**：独立字幕重试、内嵌保留 MP4、同语言人工/自动分别下载未实现 | `core/src/task-queue/task-queue.ts`、`core/src/decision/download-plan.ts`、`core/src/subtitle-planner/subtitle-choice.ts`；验收口径见 `docs/DELIVERY-REPORT.md` 已知边界 3–5 与 D-132 |
-| **「最低画质」是空选项**：`RESOLUTION_QUALITIES` 没有 `lowest`，选它仍会拉最高分辨率 | `core/src/decision/download-plan.ts`（先定 `res:360` / `+res` 语义再改） |
+| **URL 预检与「支持的网站」只在 main 进程边界验证过**：真实站点已在线跑通（播放列表 20/20 + 3 条下载、自动字幕内嵌、预检对 YouTube 返回 `SUPPORTED`），但**没有在真机 Electron 窗口里点开面板**，也**没有用真实 Cookie 跑过「预检与下载同配置」的正向对照**（proxy 那一路已实测，`cookiesFile` / `userAgent` 只有单测透传证明） | `main/site-support-network.ts`、`main/site-precheck-gate.ts`；口径见 D-135「未覆盖」 |
 
 > 这张表会随开发推进变短。**完成一项就删一行**，不要留着写「已做」——那是本手册最容易腐烂的地方。
+>
+> 已删除的行（留存最近一次的移除记录，便于回溯）：
+> - **「最低画质」是空选项** —— 由 D-133 修复（`RESOLUTION_QUALITIES` 补 `lowest → '+res'` 相对排序，绝不硬编码分辨率）。
+> - **「URL 预检未做真实站点验证」的「未验证」部分** —— 由 D-135 在线补跑（`npm run test:online` 2/2、预检对 YouTube 实测 `SUPPORTED`）；该行**没有整行删除**，因为「真机窗口 / 真实 Cookie 对照」仍未做，改为上面那一行。
 
 ---
 

@@ -1,0 +1,140 @@
+/* Supported-sites panel (D-134 A) — live mode only.
+ * Never loaded by the frozen static pages, so the 1280x800 screenshot baselines
+ * are untouched. Uses the shared theme tokens; fallbacks keep it readable when a
+ * token is absent. The panel is deliberately taller than the other dialogs: it
+ * lists ~1,750 engine rows and a short scroll box would misrepresent the size. */
+.sites-entry {
+  margin-left: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 8px;
+  background: var(--panel, #ffffff);
+  color: var(--ink, #1c2733);
+  font: 13px/1.4 "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+}
+.sites-entry:hover { border-color: var(--accent, #2f6fed); color: var(--accent, #2f6fed); }
+
+.sites-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 92;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(9, 16, 24, 0.55);
+}
+.sites-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 100%);
+  max-height: min(84vh, 800px);
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 14px;
+  background: var(--panel, #ffffff);
+  color: var(--ink, #1c2733);
+  box-shadow: var(--shadow, 0 12px 32px rgba(0, 0, 0, 0.28));
+  font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+  padding: 16px 20px 20px;
+}
+.sites-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line, #d7dee7);
+}
+.sites-title { margin: 0; font-size: 17px; font-weight: 650; flex: 1 1 auto; }
+.sites-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sites-controls input[type="search"],
+.sites-controls select {
+  padding: 5px 8px;
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 7px;
+  background: var(--panel, #ffffff);
+  color: var(--ink, #1c2733);
+  font: inherit;
+}
+.sites-controls input[type="search"] { min-width: 200px; }
+.sites-refresh {
+  padding: 5px 12px;
+  border: 1px solid var(--line, #d7dee7);
+  border-radius: 7px;
+  background: var(--panel, #ffffff);
+  color: var(--ink, #1c2733);
+  font: inherit;
+  cursor: pointer;
+}
+.sites-refresh[disabled] { opacity: 0.55; cursor: default; }
+.sites-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted, #6b7785);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+.sites-summary {
+  margin: 10px 0 0;
+  color: var(--muted, #6b7785);
+  font-size: 13px;
+}
+/* The GenericIE note is a distinct callout, not muted body text: it corrects the
+ * reading a naive list produces ("generic is listed, so everything works"). */
+.sites-note {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent, #2f6fed);
+  border-radius: 0 6px 6px 0;
+  background: var(--surface, #f4f7fb);
+  color: var(--ink, #1c2733);
+  font-size: 13px;
+}
+.sites-note[hidden] { display: none; }
+.sites-status { margin: 10px 0 0; color: var(--muted, #6b7785); font-size: 13px; }
+.sites-status:empty { display: none; }
+.sites-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 120px;
+}
+.sites-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--line, #d7dee7);
+  font-size: 13px;
+}
+.sites-name { font-weight: 560; word-break: break-all; }
+.sites-parent { color: var(--muted, #6b7785); font-size: 12px; }
+.sites-broken {
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #fde8e8;
+  color: #a12622;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.sites-generic {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line, #d7dee7);
+  color: var(--muted, #6b7785);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.sites-row[data-broken="1"] .sites-name { color: var(--muted, #6b7785); }
+.sites-more {
+  padding: 8px 6px;
+  color: var(--accent, #2f6fed);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: center;
+}

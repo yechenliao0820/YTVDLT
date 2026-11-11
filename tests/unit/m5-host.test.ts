@@ -62,6 +62,10 @@ async function host() {
     ports: ports.ports,
     engine,
     verifier,
+    // R1-02: required host option — the pre-check's cache identity.
+    enginePath: 'C:/runtime/yt-dlp.exe',
+    // R1-01: required host option — the pre-check's network context.
+    siteSupportNetwork: () => ({}),
     jsRuntimePath: 'C:/runtime/node.exe',
     videoFixturePath: 'C:/fixtures/info-video.json',
     playlistFixturePath: 'C:/fixtures/info-flat-playlist.json',
@@ -91,8 +95,9 @@ describe('m5 host · gateway composition', () => {
     // 11 (M5) + the four 0.2.1 channels (D-93 / D-94 / D-98) + THUMBNAIL_CACHE (D-103)
     // + the two subtitle-preview channels (stage 2, append-only)
     // + the two TXT import channels (D-129, append-only)
-    // + the three playlist batch channels (D-130, append-only).
-    expect(built.channels).toHaveLength(24);
+    // + the three playlist batch channels (D-130, append-only)
+    // + the two supported-sites / URL pre-check channels (D-134, append-only).
+    expect(built.channels).toHaveLength(26);
     expect(new Set(channels).size).toBe(channels.length);
     built.dispose();
   });
@@ -184,6 +189,10 @@ describe('m5 host · about box payload', () => {
       ports: ports.ports,
       engine,
       verifier,
+      // R1-02: required host option — the pre-check's cache identity.
+      enginePath: 'C:/runtime/yt-dlp.exe',
+      // R1-01: required host option — the pre-check's network context.
+      siteSupportNetwork: () => ({}),
       jsRuntimePath: 'C:/runtime/node.exe',
       videoFixturePath: 'C:/fixtures/info-video.json',
       playlistFixturePath: 'C:/fixtures/info-flat-playlist.json',
@@ -205,6 +214,10 @@ describe('m5 host · about box payload', () => {
       ports: ports.ports,
       engine,
       verifier,
+      // R1-02: required host option — the pre-check's cache identity.
+      enginePath: 'C:/runtime/yt-dlp.exe',
+      // R1-01: required host option — the pre-check's network context.
+      siteSupportNetwork: () => ({}),
       jsRuntimePath: 'C:/runtime/node.exe',
       videoFixturePath: 'C:/fixtures/info-video.json',
       playlistFixturePath: 'C:/fixtures/info-flat-playlist.json',
@@ -213,6 +226,69 @@ describe('m5 host · about box payload', () => {
       systemAppearance: { prefersDark: () => false, prefersReducedMotion: () => false, accent: () => null },
     });
     expect(built.aboutInfo().dataDir).toBe(ports.ports.env.appDataDir());
+    built.dispose();
+  });
+});
+
+/**
+ * R1-01 — the network context must reach the ENGINE, not just the options type.
+ *
+ * This is the pass-through half of the fix: `readSiteSupportNetwork()` (unit
+ * tested separately) reads the config, and this host must hand that function to
+ * the pre-check service so a real `--simulate` run gets the same proxy / cookies
+ * / UA the download will use. Without it, a pre-check on a network that needs a
+ * proxy answers `INDETERMINATE` for every URL — the feature is present, wired,
+ * and useless.
+ */
+describe('m5 host · pre-check network context reaches the engine (R1-01)', () => {
+  it('forwards proxy / cookiesFile / userAgent from the live config', async () => {
+    const ports = createInMemoryPorts();
+    const seen: Record<string, unknown>[] = [];
+    const discoveryEngine = {
+      ...engine,
+      async listExtractors() {
+        return {
+          ok: true as const,
+          cached: false,
+          catalog: {
+            engineVersion: '2026.11.06', enginePath: 'C:/runtime/yt-dlp.exe',
+            extractors: [], siteCount: 0, subExtractorCount: 0, brokenCount: 0,
+            empty: false, fetchedAt: '2026-11-11T00:00:00.000Z',
+          },
+        };
+      },
+      async checkUrlSupport(url: string, opts: Record<string, unknown>) {
+        seen.push({ url, ...opts });
+        return { url, state: 'SUPPORTED' as const, extractor: 'generic', reason: 'ok', cached: false };
+      },
+    };
+    const built = await createM5Host({
+      ports: ports.ports,
+      engine: discoveryEngine as unknown as DownloadEngine,
+      verifier,
+      enginePath: 'C:/runtime/yt-dlp.exe',
+      // Exactly what `electron-entry.ts` now passes: a THUNK over the live config,
+      // so a settings change inside one session is picked up.
+      siteSupportNetwork: () => ({
+        proxy: 'http://127.0.0.1:7890',
+        cookiesFile: 'C:/cfg/cookies.txt',
+        userAgent: 'UA/1.0',
+      }),
+      jsRuntimePath: 'C:/runtime/node.exe',
+      videoFixturePath: 'C:/fixtures/info-video.json',
+      playlistFixturePath: 'C:/fixtures/info-flat-playlist.json',
+      appVersion: '0.1.0',
+      engineVersion: '2026.11.06',
+      systemAppearance: { prefersDark: () => false, prefersReducedMotion: () => false, accent: () => null },
+    });
+    await built.gateway.dispatch(IPC_CHANNELS.URL_SUPPORT_CHECK, { url: 'https://example.org/watch?v=1' });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      proxy: 'http://127.0.0.1:7890',
+      cookiesFile: 'C:/cfg/cookies.txt',
+      userAgent: 'UA/1.0',
+      jsRuntimePath: 'C:/runtime/node.exe',
+    });
     built.dispose();
   });
 });

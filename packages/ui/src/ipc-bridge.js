@@ -28,7 +28,12 @@
     // dialog / renderer caller from being silently rejected with
     // `command-not-allowed` (the classic "button does nothing" failure).
     'TXT_IMPORT_PICK', 'TXT_IMPORT_ENQUEUE',
-    'PLAYLIST_PREVIEW', 'PLAYLIST_PREVIEW_CANCEL', 'PLAYLIST_BATCH_ENQUEUE'
+    'PLAYLIST_PREVIEW', 'PLAYLIST_PREVIEW_CANCEL', 'PLAYLIST_BATCH_ENQUEUE',
+    // D-134 (append-only): supported-site discovery + per-URL pre-check. §5
+    // requires all THREE cable tables to agree; the panel lives on the queue
+    // page today, but registering the names here keeps a future dialog or
+    // renderer caller from being rejected with `command-not-allowed`.
+    'SUPPORTED_SITES', 'URL_SUPPORT_CHECK'
   ];
 
   function bridge() {
@@ -68,7 +73,10 @@
     TXT_IMPORT_ENQUEUE: 'ytvdlt:txtImport:enqueue',
     PLAYLIST_PREVIEW: 'ytvdlt:playlist:preview',
     PLAYLIST_PREVIEW_CANCEL: 'ytvdlt:playlist:previewCancel',
-    PLAYLIST_BATCH_ENQUEUE: 'ytvdlt:playlist:batchEnqueue'
+    PLAYLIST_BATCH_ENQUEUE: 'ytvdlt:playlist:batchEnqueue',
+    // D-134: exact wire strings from shared/src/ipc.ts (append-only).
+    SUPPORTED_SITES: 'ytvdlt:sites:list',
+    URL_SUPPORT_CHECK: 'ytvdlt:sites:check'
   };
 
   /** Whitelisted, synchronous-safe command dispatch. Never builds a command. */

@@ -13,17 +13,20 @@
  *     `maskUrlSecrets()` (same rule as the error report, D-32);
  *   - no `electron` / `node:*` import — the services arrive injected.
  */
-import { IPC_CHANNELS, MAX_PLAYLIST_ITEMS } from '@ytvdlt/shared';
+import { IPC_CHANNELS, MAX_PLAYLIST_ITEMS, blocksEnqueue } from '@ytvdlt/shared';
 import type {
   AppUpdateAction, AppUpdateActionResult, AppUpdateState, DownloadKind, FormatDomain, TaskRecord,
   MediaInfo, SubtitleDomain, SubtitlePreviewConsumeResult, SubtitlePreviewResult,
   SubtitleArtifactSource, SubtitleOutcome, PlaylistInfo, PlaylistPreviewCode,
   PlaylistPreviewDto, PlaylistPreviewCancelDto, PlaylistBatchEnqueueDto,
+  PlaylistPrecheckReport,
+  ExtractorCatalogResult, UrlSupportResult, ExtractorCatalogFailure,
+  SupportedSitesDto, UrlSupportCheckDto,
 } from '@ytvdlt/shared';
 import {
-  ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES, buildTaskListSnapshot,
-  classifyFailure, maskUrlSecrets, mergeSubtitleChoice, normalizeHexColor, normalizeLanguageCode,
-  normalizeThemeMode, normalizeMotionMode, parseAccent,
+  ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES,
+  buildTaskListSnapshot, classifyFailure, maskUrlSecrets, mergeSubtitleChoice,
+  normalizeHexColor, normalizeLanguageCode, normalizeThemeMode, normalizeMotionMode, parseAccent,
   type SubtitleChoice,
 } from '@ytvdlt/core';
 import type {
@@ -42,6 +45,7 @@ import {
   type PlaylistPreviewPortLike,
 } from './playlist-preview-service.js';
 import type { PlaylistBatchReport, PlaylistEnqueueInput } from './m4-host.js';
+import { precheckBatch } from './site-precheck-gate.js';
 
 /** Minimal slice of the queue this layer needs (tests inject a fake). */
 export interface TaskListPort {
@@ -139,6 +143,19 @@ export function normalizeTrashOutcomes(
   return results.map((entry) => (typeof entry === 'string'
     ? { path: entry, status: 'trashed' as const }
     : entry));
+}
+
+/**
+ * D-134: the supported-site surface this layer needs.
+ *
+ * `catalog` may resolve to a failure — that is a value, not an exception, so a
+ * build without the capability renders "unknown" instead of a fabricated list.
+ * `check` is advisory; only `UNSUPPORTED` may block an enqueue (§3.4).
+ */
+export interface SiteSupportPortLike {
+  readonly available: boolean;
+  catalog(force?: boolean): Promise<ExtractorCatalogResult>;
+  check(url: string, force?: boolean): Promise<UrlSupportResult>;
 }
 
 /** Windows path equality: case-insensitive, slash-insensitive. */
@@ -263,6 +280,12 @@ export interface M5ChannelDeps {
   readonly playlistPreview?: PlaylistPreviewPortLike;
   /** The ONE M4Host batch implementation, shared with the frozen M3 channel. */
   readonly playlistBatch?: (input: PlaylistEnqueueInput) => Promise<PlaylistBatchReport>;
+  /**
+   * D-134: supported sites + URL pre-check. Absent = both channels answer
+   * "unavailable" with a stable code, never a fabricated list and never a
+   * silent "supported".
+   */
+  readonly siteSupport?: SiteSupportPortLike;
 }
 
 /** D-114: what `APP_INFO` answers. `version` is `''` when it is unknown. */
@@ -425,6 +448,14 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   [IPC_CHANNELS.PLAYLIST_BATCH_ENQUEUE]: [
     'previewId', 'url', 'selectedIds', 'kind', 'quality', 'audioQuality', 'audioFormat',
   ],
+  // D-134: supported-site discovery. LIST takes an optional `refresh` boolean
+  // and NOTHING else — the renderer can ask "ask the engine again", never
+  // "here is the list". CHECK takes the url being submitted (or, for a batch
+  // entry, the one line about to be enqueued) plus an optional `refresh`.
+  // Deliberately absent: enginePath, engineVersion, argv, cookies, a format
+  // selection, an extractor name — none of them are the renderer's to choose.
+  [IPC_CHANNELS.SUPPORTED_SITES]: ['refresh'],
+  [IPC_CHANNELS.URL_SUPPORT_CHECK]: ['url', 'refresh'],
 };
 
 /** Opaque, main-process-issued import ticket. */
@@ -992,6 +1023,33 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       return { accepted: false, enqueued: false, taskIds: [], reason: '当前构建未启用单视频下载' };
     }
 
+    // ---- D-134 §3.4: the ONE gate that may refuse an enqueue ----------------
+    // Runs BEFORE a subtitle ticket is spent, so a refused URL does not burn the
+    // user's preview. Only a settled UNSUPPORTED blocks; anything else — a
+    // timeout, a network blip, an absent port, our own exception — passes
+    // through and lets the download be the authority. The asymmetry is
+    // deliberate: a wrong block is unfixable by the user, a wrong pass costs
+    // one failed download that the engine then explains accurately.
+    if (deps.siteSupport !== undefined && deps.siteSupport.available) {
+      const verdict = await deps.siteSupport.check(url).catch(() => null);
+      if (verdict !== null && blocksEnqueue(verdict.state)) {
+        return {
+          accepted: false,
+          enqueued: false,
+          taskIds: [],
+          code: verdict.extractor === '' ? 'SITE_UNSUPPORTED' : 'ITEM_UNSUPPORTED',
+          // No stderr, no argv, no cookie: a fixed sentence plus the engine's
+          // own extractor name (which the user could see in a download anyway).
+          reason: '下载引擎不支持该链接或站点',
+          support: {
+            state: verdict.state,
+            extractor: verdict.extractor,
+            blocks: true,
+          },
+        };
+      }
+    }
+
     // ---- Stage 3: spend the preview ticket exactly once ---------------------
     // The ticket is OPTIONAL for a plain download (it only saves the queue's own
     // probe). It is MANDATORY for a subtitle choice: the languages must be
@@ -1179,8 +1237,79 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       ? playlist.entries.filter(isPlaylistEntryAvailable).map((entry) => entry.id).slice(0, MAX_PLAYLIST_ITEMS)
       : rawIds as readonly string[];
     if (selected.length === 0) return playlistEnqueueUnavailable('EMPTY_SELECTION');
+
+    // ---- D-134 §3.4: pre-check the SELECTED entries -------------------------
+    // Per ENTRY, not per playlist: §3.1's rule is that one dead item must never
+    // condemn the whole collection. Entry URLs exist only in this
+    // main-process-private `PlaylistInfo`, which is why this runs here rather
+    // than in the page. Only a settled UNSUPPORTED removes an entry, and it is
+    // reported as an ordinary per-item failure so the batch still runs for the
+    // rest — with the counts staying honest.
+    const entryUrlOf = new Map<string, string>();
+    for (const entry of playlist.entries) {
+      if (typeof entry.url === 'string' && entry.url !== '') entryUrlOf.set(entry.id, entry.url);
+    }
+    let enqueueIds: readonly string[] = selected;
+    const precheckFailures: { id: string; reason: string }[] = [];
+    // R1-03: the tally the dialog reports back. Undefined when this build has no
+    // pre-check port, so an absent tally can never be read as "all supported".
+    let playlistPrecheck: PlaylistPrecheckReport | undefined;
+    if (deps.siteSupport !== undefined && deps.siteSupport.available) {
+      const withUrl = selected.filter((id) => entryUrlOf.has(id));
+      const outcome = await precheckBatch(
+        withUrl.map((id) => entryUrlOf.get(id) as string),
+        deps.siteSupport,
+      );
+      const stillAllowed = new Set(outcome.allowed);
+      for (const block of outcome.blocked) {
+        const id = withUrl.find((candidate) => entryUrlOf.get(candidate) === block.url);
+        if (id !== undefined) precheckFailures.push({ id, reason: block.code });
+      }
+      // Ids, never URLs: the DTO is display-safe by contract (playlist-preview.ts).
+      const idsForUrls = (urls: readonly string[]): string[] =>
+        withUrl.filter((id) => urls.includes(entryUrlOf.get(id) as string));
+      const summary = outcome.summary;
+      playlistPrecheck = {
+        examined: summary.examined,
+        supported: summary.supported,
+        unsupported: summary.unsupported,
+        noMedia: summary.noMedia,
+        indeterminate: summary.indeterminate,
+        // Entries with no URL of their own are not checkable at all, so they are
+        // reported as NOT CHECKED next to the budget-skipped ones: folding them
+        // into any other bucket would inflate a number the user is reconciling
+        // against `requested`.
+        skipped: summary.skipped + (selected.length - withUrl.length),
+        unsupportedIds: idsForUrls(summary.unsupportedUrls),
+        noMediaIds: idsForUrls(summary.noMediaUrls),
+        indeterminateIds: idsForUrls(summary.indeterminateUrls),
+      };
+      enqueueIds = selected.filter((id) => {
+        const url = entryUrlOf.get(id);
+        // An entry with no URL of its own is already handled downstream as
+        // unavailable; it is not this gate's business.
+        return url === undefined ? true : stillAllowed.has(url);
+      });
+    }
+    if (enqueueIds.length === 0) {
+      // Every selected entry was refused by the pre-check. Reported as a real
+      // batch outcome WITH the per-entry reasons — collapsing this into
+      // `EMPTY_SELECTION` would tell the user they picked nothing, which is the
+      // opposite of what happened.
+      return {
+        ok: false,
+        code: 'ENQUEUE_FAILED',
+        requested: precheckFailures.length,
+        enqueued: 0,
+        failed: precheckFailures.length,
+        taskIds: [],
+        failures: precheckFailures,
+        ...(playlistPrecheck === undefined ? {} : { precheck: playlistPrecheck }),
+      };
+    }
+
     const report = await deps.playlistBatch({
-      selectedIds: selected,
+      selectedIds: enqueueIds,
       playlistUrl: url,
       kind: record['kind'] === 'audio' ? 'audio' : 'video',
       playlist,
@@ -1188,14 +1317,16 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       ...(rawAudioQuality === undefined ? {} : { audioQuality: rawAudioQuality as AudioQualityChoice }),
       ...(rawAudioFormat === undefined ? {} : { audioFormat: rawAudioFormat as AudioFormatChoice }),
     });
+    const failures = [...precheckFailures, ...report.failures];
     return {
-      ok: report.failed === 0 && report.enqueued > 0,
-      code: report.failed === 0 ? '' : (report.enqueued > 0 ? 'PARTIAL_SUCCESS' : 'ENQUEUE_FAILED'),
-      requested: report.requested,
+      ok: failures.length === 0 && report.enqueued > 0,
+      code: failures.length === 0 ? '' : (report.enqueued > 0 ? 'PARTIAL_SUCCESS' : 'ENQUEUE_FAILED'),
+      requested: report.requested + precheckFailures.length,
       enqueued: report.enqueued,
-      failed: report.failed,
+      failed: report.failed + precheckFailures.length,
       taskIds: report.taskIds,
-      failures: report.failures,
+      failures,
+      ...(playlistPrecheck === undefined ? {} : { precheck: playlistPrecheck }),
     };
   });
 
@@ -1336,6 +1467,98 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     };
   });
 
+  // D-134 (A): "which sites can this engine parse?" — a page-level read.
+  // The answer is a DTO with counts + rows; `enginePath` is intentionally
+  // dropped (absolute local path, not needed by the UI). A failure is a CODE,
+  // never a fallback list: §3.1 forbids inventing one, because a stale list is
+  // indistinguishable from a correct one.
+  handlers.set(IPC_CHANNELS.SUPPORTED_SITES, async (payload): Promise<SupportedSitesDto> => {
+    const record = validateM5Payload(IPC_CHANNELS.SUPPORTED_SITES, payload);
+    const refresh = record['refresh'];
+    if (refresh !== undefined && typeof refresh !== 'boolean') {
+      throw new Error('[m5-ipc] refresh must be a boolean');
+    }
+    const port = deps.siteSupport;
+    if (port === undefined) {
+      return {
+        ok: false, code: 'ENGINE_UNAVAILABLE', engineVersion: '', siteCount: 0,
+        subExtractorCount: 0, brokenCount: 0, hasGeneric: false, fetchedAt: '',
+        rows: [], cached: false,
+      };
+    }
+    const result = await port.catalog(refresh === true);
+    if (!result.ok) {
+      return {
+        ok: false, code: result.reason, engineVersion: '', siteCount: 0,
+        subExtractorCount: 0, brokenCount: 0, hasGeneric: false, fetchedAt: '',
+        rows: [], cached: false,
+      };
+    }
+    const catalog = result.catalog;
+    return {
+      ok: true,
+      code: '',
+      engineVersion: catalog.engineVersion,
+      siteCount: catalog.siteCount,
+      subExtractorCount: catalog.subExtractorCount,
+      brokenCount: catalog.brokenCount,
+      hasGeneric: catalog.extractors.some((entry) => entry.isGeneric),
+      fetchedAt: catalog.fetchedAt,
+      // The engine's own order is preserved: re-sorting here would hide an
+      // engine change from the diff, and the page does its own sorting.
+      rows: catalog.extractors,
+      // R1-06: the flag comes from the layer that knows — the catalog cache —
+      // and is forwarded verbatim. It used to be guessed here from "did the
+      // caller pass refresh", which labelled the very first load of a session
+      // as cached (and, after the cache-key fix, would have labelled every load
+      // that way), telling the user a stale-looking story that was not true.
+      cached: result.cached,
+    };
+  });
+
+  // D-134 (B): the six-state pre-check for ONE url (§3.3/§3.4).
+  // Only `UNSUPPORTED` sets `blocks: true`; the renderer must never re-derive
+  // that rule, so it is computed here from the single frozen predicate.
+  handlers.set(IPC_CHANNELS.URL_SUPPORT_CHECK, async (payload): Promise<UrlSupportCheckDto> => {
+    const record = validateM5Payload(IPC_CHANNELS.URL_SUPPORT_CHECK, payload);
+    const rawUrl = record['url'];
+    if (typeof rawUrl !== 'string' || rawUrl.trim() === ''
+      || rawUrl.length > MAX_PREVIEW_URL_LENGTH || /[\u0000-\u001f\u007f]/.test(rawUrl)) {
+      throw new Error('[m5-ipc] URL_SUPPORT_CHECK requires a bounded string url');
+    }
+    if (!/^https?:\/\//i.test(rawUrl.trim())) {
+      throw new Error('[m5-ipc] URL_SUPPORT_CHECK requires an http(s) url');
+    }
+    const refresh = record['refresh'];
+    if (refresh !== undefined && typeof refresh !== 'boolean') {
+      throw new Error('[m5-ipc] refresh must be a boolean');
+    }
+    const url = rawUrl.trim();
+    const unavailable: UrlSupportCheckDto = {
+      url, state: 'INDETERMINATE', extractor: '', cached: false, blocks: false,
+      code: 'PREVIEW_UNAVAILABLE', reason: 'pre-check unavailable in this build',
+    };
+    const port = deps.siteSupport;
+    if (port === undefined) return unavailable;
+    const result = await port.check(url, refresh === true);
+    return {
+      url: result.url,
+      state: result.state,
+      extractor: result.extractor,
+      reason: result.reason,
+      cached: result.cached,
+      blocks: blocksEnqueue(result.state),
+      // Stable code so the renderer resolves the sentence in the active
+      // locale; `reason` is the English fallback an old UI can print.
+      code: result.state === 'UNSUPPORTED' && result.extractor === ''
+        ? 'SITE_UNSUPPORTED'
+        : result.state === 'UNSUPPORTED' ? 'ITEM_UNSUPPORTED'
+          : result.state === 'NO_MEDIA' ? 'NO_MEDIA'
+            : result.state === 'TIMEOUT' ? 'PRECHECK_TIMEOUT'
+              : result.state === 'INDETERMINATE' ? 'INDETERMINATE' : '',
+    };
+  });
+
   handlers.set(IPC_CHANNELS.SETTINGS_GET, async (payload) => {
     validateM5Payload(IPC_CHANNELS.SETTINGS_GET, payload);
     return readAppearance(deps);
@@ -1422,4 +1645,7 @@ export const M5_CHANNELS: readonly string[] = [
   IPC_CHANNELS.PLAYLIST_PREVIEW,
   IPC_CHANNELS.PLAYLIST_PREVIEW_CANCEL,
   IPC_CHANNELS.PLAYLIST_BATCH_ENQUEUE,
+  // D-134 (append-only): supported-site discovery + per-url pre-check.
+  IPC_CHANNELS.SUPPORTED_SITES,
+  IPC_CHANNELS.URL_SUPPORT_CHECK,
 ];

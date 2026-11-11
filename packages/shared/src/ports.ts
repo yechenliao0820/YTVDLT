@@ -48,6 +48,20 @@ export interface SpawnOptions {
   cwd?: string;
   env?: Record<string, string | undefined>;
   timeoutMs?: number;
+  /**
+   * D-133 (TASK-02, append-only): hard ceiling on collected stdout, in BYTES
+   * (not characters — a CJK playlist title is 3 bytes per glyph).
+   *
+   * Absent/0 means "unbounded", which is what a normal download keeps: a long
+   * transfer legitimately streams megabytes of progress and killing it would
+   * be a regression. It is set for BOUNDED metadata jobs only — the playlist
+   * JSON probe — where the output is proportional to the item count and an
+   * unbounded `+=` on a huge playlist is what grows the main process without
+   * limit.
+   */
+  maxStdoutBytes?: number;
+  /** D-133: independent ceiling for collected stderr, in bytes. */
+  maxStderrBytes?: number;
 }
 
 export interface SpawnResult {

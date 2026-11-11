@@ -306,6 +306,39 @@ describe('Playlist selector · confirm, cancel and honest results', () => {
     expect(h.notices[0]).toContain('成功加入 60 个任务');
   });
 
+  /**
+   * R1-03 - the same tally on the playlist surface.
+   *
+   * The DTO carries IDS, not urls (the whole file is display-safe by contract),
+   * so the buckets are rendered by id - the same identifier the selection list
+   * already shows. The point of the assertion is that the numbers reach the
+   * dialog at all: before this the batch reported only the refusals, so entries
+   * that came back unconfirmed looked exactly like confirmed ones.
+   */
+  it('renders the pre-check tally and the ids it could not confirm', async () => {
+    const h = await open(harness({
+      enqueue: {
+        ok: true, code: '', requested: 65, enqueued: 65, failed: 0,
+        taskIds: [], failures: [],
+        precheck: {
+          examined: 65, supported: 60, unsupported: 0, noMedia: 2, indeterminate: 3,
+          skipped: 0,
+          unsupportedIds: [], noMediaIds: ['ep7', 'ep8'],
+          indeterminateIds: ['ep11', 'ep12', 'ep13'],
+        },
+      },
+    }));
+    h.doc.getElementById('pl-confirm')?.click();
+    await tick();
+    const text = h.doc.getElementById('pl-body')?.textContent ?? '';
+    expect(text).toContain('链接预检');
+    expect(text).toContain('支持 60');
+    expect(text).toContain('无媒体 2');
+    expect(text).toContain('未确认 3');
+    expect(text).toContain('无媒体 — ep7');
+    expect(text).toContain('未确认 — ep13');
+  });
+
   it('a failed probe shows an error and offers the single-download fallback', async () => {
     const h = await open(harness({
       preview: { ok: false, code: 'NOT_PLAYLIST', previewId: '', entries: [] },
