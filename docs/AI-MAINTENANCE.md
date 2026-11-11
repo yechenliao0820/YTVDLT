@@ -362,6 +362,8 @@ ui（零依赖） ← preload ← apps/desktop
 | 删本地文件、只读目录安装的在线下载，仍待目标环境真机复测 | §4 分诊表对应行 |
 | **删除任务不回收其 `work/<taskId>` 目录**：目录里的 `.part` / `.ytdl` 是续传凭据，递归删除要先有租约判断，现阶段只保留不动 | `engine-ytdlp/src/yt-dlp-engine.ts`（成功后只删空目录） |
 | **跨卷的中间文件落点未实测**：本机只有 C:，`resolveDownloadTempDir` 的跨卷分支只经过单元测试 | `core/src/path-resolver/volume.ts` |
+| **字幕边界**：独立字幕重试、内嵌保留 MP4、同语言人工/自动分别下载未实现 | `core/src/task-queue/task-queue.ts`、`core/src/decision/download-plan.ts`、`core/src/subtitle-planner/subtitle-choice.ts`；验收口径见 `docs/DELIVERY-REPORT.md` 已知边界 3–5 与 D-132 |
+| **「最低画质」是空选项**：`RESOLUTION_QUALITIES` 没有 `lowest`，选它仍会拉最高分辨率 | `core/src/decision/download-plan.ts`（先定 `res:360` / `+res` 语义再改） |
 
 > 这张表会随开发推进变短。**完成一项就删一行**，不要留着写「已做」——那是本手册最容易腐烂的地方。
 
