@@ -50,17 +50,22 @@ describe('queue.js · playlist auto-detection', () => {
     const { factory, opened } = selector();
     const h = harness({ live: true, playlistFactory: factory, elements: withPasteForm() });
     h.queue.startRealDownload(SINGLE_URL);
-    await Promise.resolve();
+    // D-139: the single-URL path now asks URL_SUPPORT_CHECK first, so the
+    // enqueue lands one macrotask later. The assertion itself is unchanged.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(opened).toEqual([]);
     const sent = h.calls.find((call) => call.channel === 'ytvdlt:download:start');
     expect(sent).toBeDefined();
     expect(sent?.payload).toMatchObject({ url: SINGLE_URL, kind: 'video' });
   });
 
-  it('without the selector (static preview) the original path is unchanged', () => {
+  it('without the selector (static preview) the original path is unchanged', async () => {
     const h = harness({ live: true });
     expect(h.queue.playlistImport()).toBeNull();
     h.queue.startRealDownload(PLAYLIST_URL);
+    // Same reason as above: the pre-check is asynchronous, the destination is
+    // still DOWNLOAD_START once it answers `unavailable`.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(h.calls.some((call) => call.channel === 'ytvdlt:download:start')).toBe(true);
   });
 

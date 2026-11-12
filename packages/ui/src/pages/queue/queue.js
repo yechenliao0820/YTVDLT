@@ -800,16 +800,97 @@
     return key === '' ? '' : t(key);
   }
 
-  function enqueueSingleDownload(url) {
-    if (enqueueing) return;
-    if (!/^https?:\/\//i.test(url)) {
-      notify(t('queue.notify.invalidUrl'));
-      return;
+  /**
+   * D-139 (待改清单 #1/#2): the single-URL pre-check now has a visible
+   * lifecycle and a real caller.
+   *
+   * `URL_SUPPORT_CHECK` existed with a handler and payload validation but no
+   * production caller, so the six-state verdict only surfaced AFTER
+   * `DOWNLOAD_START` had already enqueued the task. This path asks FIRST:
+   *
+   *   SUPPORTED / unavailable  -> enqueue exactly as before;
+   *   UNSUPPORTED              -> refuse in the active locale, never enqueue;
+   *   NO_MEDIA / INDETERMINATE / TIMEOUT / CANCELLED
+   *                            -> ask the user before creating a task.
+   *
+   * `DOWNLOAD_START` keeps its own gate; this is advisory and fail-open. The
+   * modal is built on the fly, not declared in `index.html`, so the frozen DOM
+   * baselines of the static preview cases stay byte-identical.
+   */
+  var precheckConfirm = null;
+
+  function needsPrecheckConfirm(verdict) {
+    if (!verdict || verdict.blocks === true) return false;
+    // A build without the capability must behave exactly like the old path.
+    if (verdict.code === 'PREVIEW_UNAVAILABLE') return false;
+    var state = String(verdict.state || '');
+    return state === 'NO_MEDIA' || state === 'INDETERMINATE'
+      || state === 'TIMEOUT' || state === 'CANCELLED';
+  }
+
+  function precheckConfirmReason(verdict) {
+    var state = String((verdict && verdict.state) || '');
+    if (state === 'NO_MEDIA') return t('queue.precheck.confirm.noMedia');
+    if (state === 'TIMEOUT') return t('queue.precheck.confirm.timeout');
+    return t('queue.precheck.confirm.indeterminate');
+  }
+
+  function closePrecheckConfirm() {
+    if (precheckConfirm !== null && precheckConfirm.parentNode !== null) {
+      precheckConfirm.parentNode.removeChild(precheckConfirm);
     }
-    var payload = downloadPayload(url);
-    if (payload === null) return;
-    enqueueing = true;
-    notify(t('queue.notify.enqueuing'));
+    precheckConfirm = null;
+  }
+
+  function showPrecheckConfirm(verdict, onContinue) {
+    closePrecheckConfirm();
+    var backdrop = doc.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.setAttribute('role', 'dialog');
+    backdrop.setAttribute('aria-modal', 'true');
+
+    var modal = doc.createElement('div');
+    modal.className = 'modal';
+
+    var title = doc.createElement('h2');
+    title.textContent = t('queue.precheck.confirm.title');
+
+    var message = doc.createElement('p');
+    message.textContent = precheckConfirmReason(verdict);
+
+    var actions = doc.createElement('div');
+    actions.className = 'modal-actions';
+
+    var cancel = doc.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = t('queue.precheck.confirm.cancel');
+    cancel.addEventListener('click', function () {
+      closePrecheckConfirm();
+      enqueueing = false;
+    });
+
+    var proceed = doc.createElement('button');
+    proceed.type = 'button';
+    proceed.className = 'primary';
+    proceed.textContent = t('queue.precheck.confirm.continue');
+    proceed.addEventListener('click', function () {
+      closePrecheckConfirm();
+      onContinue();
+    });
+
+    actions.appendChild(cancel);
+    actions.appendChild(proceed);
+    modal.appendChild(title);
+    modal.appendChild(message);
+    modal.appendChild(actions);
+    backdrop.appendChild(modal);
+    doc.body.appendChild(backdrop);
+    precheckConfirm = backdrop;
+    proceed.focus();
+  }
+
+  /** The actual enqueue, shared by the direct and the confirmed path. */
+  function startDownload(payload) {
     call('DOWNLOAD_START', payload).then(function (result) {
       enqueueing = false;
       // A one-shot ticket is spent on success; a dead ticket must be forgotten
@@ -830,6 +911,41 @@
       notify(t('queue.notify.enqueued', { n: Array.isArray(result.taskIds) ? result.taskIds.length : 0 })
         + (note === '' ? '' : ' · ' + note));
       refresh();
+    });
+  }
+
+  function enqueueSingleDownload(url) {
+    if (enqueueing) return;
+    if (!/^https?:\/\//i.test(url)) {
+      notify(t('queue.notify.invalidUrl'));
+      return;
+    }
+    var payload = downloadPayload(url);
+    if (payload === null) return;
+    enqueueing = true;
+
+    // No bridge = static preview; keep the byte-identical legacy path.
+    if (taskBridge() === null) {
+      notify(t('queue.notify.enqueuing'));
+      startDownload(payload);
+      return;
+    }
+
+    notify(t('queue.precheck.checking'));
+    call('URL_SUPPORT_CHECK', { url: url }).then(function (verdict) {
+      if (verdict && verdict.blocks === true) {
+        enqueueing = false;
+        notify(enqueueFailureText(verdict));
+        return;
+      }
+      if (needsPrecheckConfirm(verdict)) {
+        showPrecheckConfirm(verdict, function () { startDownload(payload); });
+        return;
+      }
+      startDownload(payload);
+    }).catch(function () {
+      // A pre-check that cannot answer must never block a download (fail-open).
+      startDownload(payload);
     });
   }
 

@@ -707,6 +707,121 @@
     paint();
   }
 
+  // ---- D-139: command templates (待改清单 #3) -----------------------------
+  // The store, validation, IPC handlers and tests all existed; only a renderer
+  // entry point was missing. This is the minimal closed loop: list, create,
+  // delete — no in-place edit yet (the backend already supports it via `id`).
+  // Static previews have no bridge, so the list stays empty and the note says
+  // the feature is unavailable; the frozen screenshot baselines are rebuilt
+  // only for the two settings cases (see D-139).
+  var TEMPLATE_CHANNELS = {
+    list: 'ytvdlt:template:list',
+    save: 'ytvdlt:template:save',
+    remove: 'ytvdlt:template:delete'
+  };
+
+  function templateNote(text) {
+    var node = doc.getElementById('settings-template-note');
+    if (node !== null) node.textContent = text;
+  }
+
+  /** One argument per line: no shell parsing, no quoting rules to get wrong. */
+  function parseArgsText(text) {
+    return String(text || '').split(/\r?\n/)
+      .map(function (line) { return line.trim(); })
+      .filter(function (line) { return line !== ''; });
+  }
+
+  function renderTemplates(templates) {
+    var list = doc.getElementById('settings-template-list');
+    var empty = doc.getElementById('settings-template-empty');
+    if (list === null) return;
+    list.textContent = '';
+    var items = Array.isArray(templates) ? templates : [];
+    if (empty !== null) empty.hidden = items.length > 0;
+    items.forEach(function (template) {
+      var row = doc.createElement('div');
+      row.className = 'template-item';
+      var name = doc.createElement('b');
+      name.textContent = String(template.name || '');
+      var args = doc.createElement('code');
+      args.textContent = Array.isArray(template.args) ? template.args.join(' ') : '';
+      var remove = doc.createElement('button');
+      remove.type = 'button';
+      remove.textContent = t('settings.templates.delete');
+      remove.addEventListener('click', function () { removeTemplate(String(template.id || '')); });
+      row.appendChild(name);
+      row.appendChild(args);
+      row.appendChild(remove);
+      list.appendChild(row);
+    });
+  }
+
+  function loadTemplates() {
+    var pending = invokeBridge(TEMPLATE_CHANNELS.list, {});
+    if (pending === null) {
+      templateNote(t('settings.templates.unavailable'));
+      return;
+    }
+    Promise.resolve(pending).then(function (result) {
+      if (!result || !Array.isArray(result.templates)) {
+        templateNote(t('settings.templates.unavailable'));
+        return;
+      }
+      renderTemplates(result.templates);
+      var rejected = Array.isArray(result.rejectedAtLoad) ? result.rejectedAtLoad.length : 0;
+      if (rejected > 0) templateNote(t('settings.templates.rejected', { n: rejected }));
+    }).catch(function () { templateNote(t('settings.templates.unavailable')); });
+  }
+
+  function saveTemplate() {
+    var nameField = doc.getElementById('settings-template-name');
+    var argsField = doc.getElementById('settings-template-args');
+    if (nameField === null || argsField === null) return;
+    var name = String(nameField.value || '').trim();
+    var args = parseArgsText(argsField.value);
+    if (name === '' || args.length === 0) {
+      templateNote(t('settings.templates.missing'));
+      return;
+    }
+    var pending = invokeBridge(TEMPLATE_CHANNELS.save, { name: name, args: args });
+    if (pending === null) { templateNote(t('settings.templates.unavailable')); return; }
+    Promise.resolve(pending).then(function (result) {
+      if (!result || result.created === undefined) {
+        var reason = result && (result.message || result.reason) ? String(result.message || result.reason) : '';
+        templateNote(t('settings.templates.invalid', { reason: reason }));
+        return;
+      }
+      nameField.value = '';
+      argsField.value = '';
+      templateNote(t('settings.templates.saved'));
+      loadTemplates();
+    }).catch(function (error) {
+      templateNote(t('settings.templates.invalid', { reason: String(error).slice(0, 120) }));
+    });
+  }
+
+  function removeTemplate(id) {
+    if (id === '') return;
+    var pending = invokeBridge(TEMPLATE_CHANNELS.remove, { id: id });
+    if (pending === null) { templateNote(t('settings.templates.unavailable')); return; }
+    Promise.resolve(pending).then(function (result) {
+      if (!result || result.removed !== true) {
+        templateNote(t('settings.templates.invalid', { reason: '' }));
+        return;
+      }
+      templateNote(t('settings.templates.deleted'));
+      loadTemplates();
+    }).catch(function () { templateNote(t('settings.templates.unavailable')); });
+  }
+
+  function installTemplatePanel() {
+    var save = doc.getElementById('settings-template-save');
+    if (save === null) return;
+    save.addEventListener('click', saveTemplate);
+    loadTemplates();
+  }
+
   function wire() {
     doc.querySelectorAll('#settings-theme [data-theme]').forEach(function (button) {
       button.addEventListener('click', function () { persistTheme(button.getAttribute('data-theme')); });
@@ -798,6 +913,7 @@
     readAppState();
     installCacheControls();
     installSectionNav();
+    installTemplatePanel();
     // The queue dialog polls the same state; here it only has to keep the card
     // honest while a download is in flight.
     setInterval(function () {

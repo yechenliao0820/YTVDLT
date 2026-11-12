@@ -357,6 +357,9 @@ ui（零依赖） ← preload ← apps/desktop
 
 28. **`file:` 的 `origin` 恒为 `'null'`，不能用来区分「应用页面」与「任意本地文件」**（D-138）：`new URL('file:///C:/x/evil.html').origin` 和 `new URL('file:///app/pages/queue/index.html').origin` 都是字符串 `'null'`。可信页面必须走**规范化路径白名单**：`decodeURIComponent` → 按 `/` 分段 → 消 `..` → 反斜杠归一 → **按段**比较前缀（`pages-other` 不能命中 `pages`）→ 末段限 `.html`/`.htm`。注意 WHATWG URL **不解码** `%2e%2e`，`pathname` 会原样保留，只靠 URL 解析挡不住编码穿越。同一族的地址坑：`new URL('https://[::ffff:127.0.0.1]/')` 的 hostname 是 `[::ffff:7f00:1]`，任何「点分字符串前缀」匹配都永不命中；IPv6 必须先展开成 8 组再判 `fc00::/7` / `fe80::/10` / `::ffff:0:0/96`（取末 32 位复用 IPv4 段判断），并且**先判断是不是 IP 字面量**——否则 `fc`/`fd` 开头的公开域名会被误拒。
 
+29. **「通道 / handler / 单测都在，功能却不存在」时先查前端调用方**（D-139）：IPC 通道、payload 白名单、handler、甚至单测全绿，不代表有界面能触发它。`grep -rn "CHANNEL_NAME" packages/ui/src` 为 0 命中，就是前后端断裂——本项目已出现两次（`URL_SUPPORT_CHECK`、`TEMPLATE_*`）。接线时三张表必须同时改：`shared/src/ipc.ts` 的通道值、`preload/bridge.ts` 的全量放行（它取 `Object.values(IPC_CHANNELS)`，通常无需改）、以及 `ui/src/ipc-bridge.js` 的 `ALLOWED_COMMANDS` + `CHANNEL_STRINGS`；漏掉最后一张表的表现是点击静默无反应（`command-not-allowed`）。
+30. **动态创建的弹窗不改静态截图基线**（D-139）：需要在页面加确认框又不想动冻结基线时，用 `doc.createElement` 挂到 `body` 上、用完移除，而不是写进 `index.html`。静态用例没有 bridge、不会触发该分支，PNG/DOM 基线保持不变。反过来说，**静态 HTML 里新增可见元素一定会改基线**，必须按 §7 的按 case 重建流程做。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 

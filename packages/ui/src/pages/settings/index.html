@@ -129,6 +129,12 @@
   html[data-theme="dark"] .about-licence-full pre { background: #0a1119; color: #cfe3f7; }
   #ytvdlt-output { background: #f3f4f6; padding: 8px 10px; border-radius: 6px; font-size: 12px; max-height: 90px; overflow: auto; }
   html[data-theme="dark"] #ytvdlt-output { background: #0a1119; color: #cfe3f7; }
+  .template-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 10px; }
+  .template-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+  .template-item b { font-weight: 600; white-space: nowrap; }
+  .template-item code { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .template-item button { margin-left: auto; height: 26px; padding: 0 10px; font-size: 12px; }
+  .template-args-row textarea { width: 100%; min-height: 80px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--ink); font-family: inherit; font-size: 13px; resize: vertical; }
   [hidden="true"] { display: none !important; }
 </style>
 </head>
@@ -146,6 +152,7 @@
       <a href="#section-paths" data-nav-target="section-paths" aria-current="false" data-i18n="settings.nav.paths" data-fit>下载位置</a>
       <a href="#section-cache" data-nav-target="section-cache" aria-current="false" data-i18n="settings.nav.cache" data-fit>封面缓存</a>
       <a href="#section-about" data-nav-target="section-about" aria-current="false" data-i18n="settings.nav.about" data-fit>关于</a>
+      <a href="#section-templates" data-nav-target="section-templates" aria-current="false" data-i18n="settings.nav.templates" data-fit>命令模板</a>
     </nav>
 
     <div class="settings-scroll" id="settings-scroll" tabindex="0">
@@ -416,6 +423,25 @@ use, modify or replace those components under their own licenses.</pre>
       <div class="about-line" data-i18n="about.license.thirdParty" data-fit>各组件完整许可全文与源码获取方式见 docs/THIRD_PARTY_NOTICES.md；FFmpeg 采用 LGPL-3.0，随包另有 FFMPEG-LICENSE.txt 与 ARIA2-COPYING.txt。</div>
       <div class="about-line" data-i18n="about.haptics">触觉反馈：桌面端无等价硬件，明确省略。</div>
       <div class="about-line" data-i18n="about.transitions">转场动效仅用于状态切换与弹窗，遵循「减少动态效果」。</div>
+    </section>
+
+    <section class="section" id="section-templates">
+      <h2 data-i18n="settings.templates.title" data-fit>命令模板</h2>
+      <p class="note" data-i18n="settings.templates.hint" data-fit>每行一个 yt-dlp 参数；只允许白名单内的选项，危险参数会被拒绝。</p>
+      <div class="template-list" id="settings-template-list"></div>
+      <p class="note" id="settings-template-empty" data-i18n="settings.templates.empty" data-fit>还没有模板。</p>
+      <div class="row">
+        <span class="label" data-i18n="settings.templates.name" data-fit>模板名称</span>
+        <input id="settings-template-name" type="text" maxlength="80" data-i18n-placeholder="settings.templates.namePlaceholder" placeholder="例如：仅字幕">
+      </div>
+      <div class="row template-args-row">
+        <textarea id="settings-template-args" rows="4" data-i18n-placeholder="settings.templates.argsPlaceholder" placeholder="每行一个参数，例如：&#10;--write-subs&#10;--sub-langs en"></textarea>
+      </div>
+      <div class="row">
+        <button type="button" id="settings-template-save" class="primary" data-i18n="settings.templates.save" data-fit>保存模板</button>
+        <span class="spacer"></span>
+        <span class="note" id="settings-template-note"></span>
+      </div>
     </section>
     </div>
   </div>

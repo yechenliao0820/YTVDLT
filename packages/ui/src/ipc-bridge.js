@@ -33,7 +33,11 @@
     // requires all THREE cable tables to agree; the panel lives on the queue
     // page today, but registering the names here keeps a future dialog or
     // renderer caller from being rejected with `command-not-allowed`.
-    'SUPPORTED_SITES', 'URL_SUPPORT_CHECK'
+    'SUPPORTED_SITES', 'URL_SUPPORT_CHECK',
+    // D-139 (append-only): command templates. The settings page calls the wire
+    // strings directly today; §5 requires all three cable tables to agree so a
+    // future caller is never rejected with `command-not-allowed`.
+    'TEMPLATE_LIST', 'TEMPLATE_SAVE', 'TEMPLATE_DELETE'
   ];
 
   function bridge() {
@@ -76,7 +80,11 @@
     PLAYLIST_BATCH_ENQUEUE: 'ytvdlt:playlist:batchEnqueue',
     // D-134: exact wire strings from shared/src/ipc.ts (append-only).
     SUPPORTED_SITES: 'ytvdlt:sites:list',
-    URL_SUPPORT_CHECK: 'ytvdlt:sites:check'
+    URL_SUPPORT_CHECK: 'ytvdlt:sites:check',
+    // D-139: exact wire strings from shared/src/ipc.ts (append-only).
+    TEMPLATE_LIST: 'ytvdlt:template:list',
+    TEMPLATE_SAVE: 'ytvdlt:template:save',
+    TEMPLATE_DELETE: 'ytvdlt:template:delete'
   };
 
   /** Whitelisted, synchronous-safe command dispatch. Never builds a command. */

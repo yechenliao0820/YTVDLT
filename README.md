@@ -222,10 +222,14 @@ Stated plainly rather than glossed over:
 - The installer is unsigned; `Engine: unknown` can still appear in an error
   report; post-processing stages have no speed / ETA because the engine does
   not report one.
-- The supported-sites panel and the URL pre-check have been exercised against
-  the real engine **offline** (local fixtures, `127.0.0.1`, the shipped
-  binaries). Their behaviour on live third-party sites — and how *lowest*
-  resolves against a real resolution table — has not been verified online yet.
+- The supported-sites panel and the URL pre-check have been run against the
+  real engine **both offline and online**: a two-round live audit (2026-11-12)
+  covered a dedicated extractor, two GenericIE pages, a media-less page, an
+  age-gated video and an unavailable one, with **0 misclassifications**, and
+  confirmed that *lowest* selects the minimum available video height (144p on
+  the 144/240/360/480/720/1080 source). Real Electron-window verification and
+  installer acceptance are still pending, and DNS rebinding is still not
+  defended against — see `DECISIONS.md` D-137 / D-138.
 - App updates download the whole installer (no delta), and the portable build
   does not participate in self-update.
 - No real-device, all-sites coverage is claimed; the verification numbers
@@ -253,7 +257,7 @@ moved or deleted outside the app.
 Unreleased work sitting on top of 0.2.9 — subtitles, batch import, playlist
 batch, supported sites and the URL support pre-check — is described in
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) (up to D-134) and has not been packaged
+[`docs/DECISIONS.md`](docs/DECISIONS.md) (up to D-139) and has not been packaged
 or versioned yet.
 
 ## Engineering and verification
