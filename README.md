@@ -24,7 +24,7 @@ dialog on first launch.
 | | |
 |---|---|
 | Released | 2026-11-12 |
-| Artifact | `YTVDLT Setup 0.3.0.exe` — NSIS installer, Windows x64, 226,282,986 B |
+| Artifact | `YTVDLT.Setup.0.3.0.exe` — NSIS installer, Windows x64, 226,282,986 B |
 | SHA-256 | `5d93f92307e3b91ac72e5fa372332caa8766e265d0709254dd87d38287940af3` |
 | Tag / release baseline | `v0.3.0` |
 | Downloads | [Release 0.3.0](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.0) · [all releases](https://github.com/yechenliao0820/YTVDLT/releases) |

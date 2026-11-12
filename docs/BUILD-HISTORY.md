@@ -77,5 +77,5 @@
 | 运行时 | `resources/runtime/` 含 `aria2c.exe` / `ffmpeg/` / `node.exe` / `runtime-manifest.json` / `SHA2-256SUMS` |
 | 签名 | 未签名（无证书），SmartScreen 首次运行会提示 |
 | 未做 | **没有启动真机窗口点选**（安装包已产出但未运行）；未打便携版；未上传任何 Release 资产 |
-| 产物命名差异 | 本次是 `YTVDLT Setup 0.3.0.exe`（**空格**），历史 Release 写作 `YTVDLT.Setup.0.2.9.exe`（点号）。`electron-builder.yml` 只给便携版设了 `artifactName`，NSIS 走默认模板，所以**发布时按实际文件名上传，不要凭历史名推断** |
+| 产物命名差异 | 本地产物是 `YTVDLT Setup 0.3.0.exe`（**空格**），但 **GitHub 会把资产名里的空格规范化成点号**，上传后实际是 `YTVDLT.Setup.0.3.0.exe`。`latest.yml` 首次上传时仍写空格名，会导致 electron-updater 拼出 404；已改成点号并重传，三条下载链接 HEAD 全部 200。**以后发版：以 GitHub 返回的资产名为准，`latest.yml` 必须写资产名而不是本地文件名** |
 

@@ -22,7 +22,7 @@ aria2c 全部随包，不需要预装 Python / Node / FFmpeg，不用配 `PATH`�
 | | |
 |---|---|
 | 发布日期 | 2026-11-12 |
-| 安装包 | `YTVDLT Setup 0.3.0.exe` —— NSIS 安装版，Windows x64，226,282,986 B |
+| 安装包 | `YTVDLT.Setup.0.3.0.exe` —— NSIS 安装版，Windows x64，226,282,986 B |
 | SHA-256 | `5d93f92307e3b91ac72e5fa372332caa8766e265d0709254dd87d38287940af3` |
 | 标签 / 发版基准 | `v0.3.0` |
 | 下载 | [Release 0.3.0](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.0) · [全部版本](https://github.com/yechenliao0820/YTVDLT/releases) |
