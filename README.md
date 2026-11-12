@@ -243,8 +243,11 @@ Stated plainly rather than glossed over:
   age-gated video and an unavailable one, with **0 misclassifications**, and
   confirmed that *lowest* selects the minimum available video height (144p on
   the 144/240/360/480/720/1080 source). Real Electron-window verification and
-  installer acceptance are still pending, and DNS rebinding is still not
-  defended against — see `DECISIONS.md` D-137 / D-138.
+  installer acceptance are still pending. The DNS-rebinding gap is now closed
+  (D-143): every outbound connection is pinned to a policy-verified resolved
+  address, re-resolved and re-checked on every redirect hop; residual limits
+  (such as a fully controlled resolver) are recorded under D-143. The
+  hardening history lives in `DECISIONS.md` D-137 / D-138 / D-143.
 - App updates download the whole installer (no delta), and the portable build
   does not participate in self-update.
 - No real-device, all-sites coverage is claimed; the verification numbers
@@ -270,10 +273,15 @@ moved or deleted outside the app.
 | **0.2.9** | **2026-11-10** | Native right-click edit menu in editable fields; settings placeholder shows `—` instead of a made-up path | D-122 / D-123 | [v0.2.9](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.9) |
 | 0.3.0 | 2026-11-12 | Subtitle pipeline; TXT / playlist batch import; bounded engine output; dynamic supported-sites list and the six-state URL pre-check; HTTP / IPC / process-termination hardening; command templates | D-124…D-139 | [v0.3.0](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.0) |
 
-0.3.0 is published. Work landing on top of it — including the version-jump
-release-notes fix (D-140, see *Staying current*) — is described in
+0.3.0 is published. Work landing on top of it, **not yet released** — the
+version-jump release-notes fix (D-140, see *Staying current*), the live-mode
+fixture guard (D-141), honest cancel-failure handling (D-142), and four
+external-audit fixes: DNS-pinned outbound connections (D-143), bounded
+download output (D-144), truly atomic config writes (D-145), and a
+detail-page cancel button aligned with what the queue can actually do
+(D-146) — is described in
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
-[`docs/DECISIONS.md`](docs/DECISIONS.md).
+[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-146).
 
 ## Engineering and verification
 
@@ -299,6 +307,17 @@ was gated separately by:
 | Screenshot E2E | 31/31 cases + 5/5 negative checks; only the two settings baselines were rebuilt (PNG + DOM), the other 58 baseline files byte-identical |
 | `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
 | Engine self-report provenance | Which extractors exist, and how failures are classified, are read back from the shipped `yt-dlp` — never from a checked-in list |
+
+The audit-and-repair round after 0.3.0 (D-140…D-146, not yet released) passed
+the same gates:
+
+| Gate | Result |
+|---|---|
+| Typecheck | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
+| Unit / contract / integration tests | **1,871 passed across 132 files, 0 failed** |
+| Coverage | statements 88.3% / branches 86.3% / functions 91.4% / lines 88.3% (floor 70, not raised) |
+| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** (the detail-page cancel fix applies to live mode only) |
+| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
 
 Design invariants worth knowing if you plan to modify the code:
 
