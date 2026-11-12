@@ -32,6 +32,9 @@ interface Harness {
     trayDestroyed: number;
     appMenu: unknown;
     contextMenus: MenuItemLike[][];
+    /** D-137: captured so the sender guard can be exercised without Electron. */
+    ipcListeners: Map<string, (event: unknown, payload: unknown) => unknown>;
+    windowOpenHandler: ((details: { readonly url: string }) => { readonly action: 'deny' }) | null;
   };
 }
 
@@ -39,7 +42,7 @@ function fakeElectron(options: { lock?: boolean; theme?: 'dark' | 'light' } = {}
   const log: Harness['log'] = {
     quit: 0, handlers: [], windows: [], urls: [], trayToolTip: [], trayMenus: [],
     appEvents: new Map(), windowEvents: new Map(), shown: 0, focused: 0, destroyed: 0, trayDestroyed: 0,
-    appMenu: null, contextMenus: [],
+    appMenu: null, contextMenus: [], ipcListeners: new Map(), windowOpenHandler: null,
   };
 
   class FakeWindow implements BrowserWindowLike {
@@ -51,6 +54,9 @@ function fakeElectron(options: { lock?: boolean; theme?: 'dark' | 'light' } = {}
       this.webContents = {
         loadURL: async (url: string) => { log.urls.push(url); },
         on: (event: string, listener: () => void) => { events.set(`wc:${event}`, listener); },
+        setWindowOpenHandler: (
+          handler: (details: { readonly url: string }) => { readonly action: 'deny' },
+        ) => { log.windowOpenHandler = handler; },
       };
     }
     on(event: string, listener: () => void): void { log.windowEvents.set(event, listener); }
@@ -80,7 +86,10 @@ function fakeElectron(options: { lock?: boolean; theme?: 'dark' | 'light' } = {}
       isPackaged: false,
     },
     ipcMain: {
-      handle: (channel: string) => { log.handlers.push(channel); },
+      handle: (channel: string, listener: (event: unknown, payload: unknown) => unknown) => {
+        log.handlers.push(channel);
+        log.ipcListeners.set(channel, listener);
+      },
     },
     BrowserWindow: FakeWindow as unknown as ElectronLike['BrowserWindow'],
     nativeTheme: {
@@ -263,6 +272,52 @@ describe('bootstrap · 中文应用菜单（D-82）', () => {
     const template = log.appMenu as readonly { label?: string }[];
     expect(template.map((item) => item.label))
       .toEqual(['文件(&F)', '编辑(&E)', '视图(&V)', '窗口(&W)', '设置(&S)']);
+    handle?.dispose();
+  });
+});
+
+describe('bootstrap · IPC trust boundary (D-137)', () => {
+  it('refuses another webContents, a subframe and an untrusted page', async () => {
+    const { electron, log } = fakeElectron();
+    const { host } = fakeHost();
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
+    const wc = handle?.window.webContents;
+    const invoke = log.ipcListeners.get(IPC_CHANNELS.PROBE);
+    expect(invoke).toBeDefined();
+    const frame = (url: string, parent: unknown = null) => ({
+      sender: wc, senderFrame: { url, parent },
+    });
+
+    // The legitimate main-frame call still reaches the real handler.
+    await expect(Promise.resolve(invoke!(frame(baseOptions.pageUrl), null)))
+      .resolves.toMatchObject({ ok: true });
+    expect(() => invoke!({
+      sender: { other: true }, senderFrame: { url: baseOptions.pageUrl, parent: null },
+    }, null)).toThrow(/sender is not the application window/);
+    expect(() => invoke!(frame(baseOptions.pageUrl, {}), null)).toThrow(/subframe/);
+    expect(() => invoke!(frame('https://evil.test/'), null)).toThrow(/untrusted page/);
+    expect(() => invoke!({ sender: wc }, null)).toThrow(/no sender frame/);
+    handle?.dispose();
+  });
+
+  it('blocks remote navigation while keeping local page switches working', async () => {
+    const { electron, log } = fakeElectron();
+    const { host } = fakeHost();
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
+    const navigate = log.windowEvents.get('wc:will-navigate') as unknown as (
+      event: { preventDefault(): void }, url: string,
+    ) => void;
+    expect(navigate).toBeDefined();
+    const event = { preventDefault: vi.fn() };
+    navigate(event, 'file:///app/pages/settings/index.html');
+    navigate(event, `${baseOptions.pageUrl}?lang=en`);
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    navigate(event, 'https://evil.test/');
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+
+    // The renderer may not open a window that inherits the preload bridge.
+    expect(log.windowOpenHandler).not.toBeNull();
+    expect(log.windowOpenHandler?.({ url: 'https://evil.test/' })).toEqual({ action: 'deny' });
     handle?.dispose();
   });
 });

@@ -31,6 +31,10 @@ export async function fetchLatestRelease(
 ): Promise<AppRelease | null> {
   const text = await http.getText(latestReleaseApiUrl(source), {
     timeoutMs: options.timeoutMs ?? 15_000,
+    // D-137: the release JSON is untrusted input. Keep every redirect hop on a
+    // GitHub host too, instead of letting the network stack decide the final
+    // address after we validated only the initial URL.
+    urlPolicy: isTrustedReleaseHost,
   });
   let payload: unknown;
   try {

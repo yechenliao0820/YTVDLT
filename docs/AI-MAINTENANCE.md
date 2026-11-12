@@ -118,6 +118,8 @@ ui（零依赖） ← preload ← apps/desktop
 
 | 要改的功能 | 先打开 |
 |---|---|
+| **所有出站 HTTP（重定向逐跳校验 / 有界读取 / 私网拦截）** | `apps/desktop/src/main/adapters/http-policy.ts`（纯 URL 策略 + 手工跟随重定向，**唯一事实来源**）→ `adapters/node-ports.ts::httpPort()`（流式字节上限 + 全程单一 deadline）→ `adapters/http-download.ts`（安装包下载）；`shared/src/ports.ts::HttpFetchOptions` 是 append-only 的可选参数契约。缩略图在 `main/thumbnail-cache.ts::fetchAndStore` 传 `maxBytes` + `isPublicHttpsUrl`，更新器在 `main/app-update-service.ts` 传 `hostPolicy: isTrustedReleaseHost`。D-137 |
+| **IPC 调用者 / 导航信任边界** | `main/bootstrap.ts::assertTrustedIpcSender`（纯函数：sender === 本窗口 webContents、主 frame、可信本地页）、`isTrustedLocalPage`、`will-navigate` 与 `setWindowOpenHandler`；单测在 `tests/unit/ipc-trust-boundary.test.ts`。D-137 |
 | 队列页：渲染、轮询、按钮、语言切换、任务管理、全屏 | `packages/ui/src/pages/queue/queue.js` + 同目录 `index.html`（版式与内联 CSS） |
 | 所有界面文案（中/英） | `packages/ui/src/i18n/messages.js`（双语键集合必须一致）、`i18n/i18n.js` |
 | 版本号 / 关于弹窗 / 许可声明 | `apps/desktop/src/main/main.ts`（首帧 `?v=` 提示）、`packages/ui/src/shell/app-version.js`（**唯一真相链**：`?v=` 提示 → `APP_INFO` 覆盖 → 无值显示 `v—`）、`packages/ui/src/about/about.js`（紧凑弹窗）、`packages/ui/src/pages/settings/index.html`（`#section-about`：主许可 + 组件许可表 + 根 `LICENSE` 英文部分**逐字内嵌**）、`LICENSE`（主许可唯一真相，改它必须同步内嵌副本，`about-licence.test.ts` 会拦）；**本软件是 source-available 非商业许可，不是开源、不是 MIT，文案不得写成「开源许可」** |
@@ -350,6 +352,9 @@ ui（零依赖） ← preload ← apps/desktop
 24. **`generic`（GenericIE）会认领一切 http(s) URL，「无提取器」与「无媒体」在引擎措辞里是同一句话**（D-134）：随包引擎对 `/nomedia.html`、无 `src` 的 `/video-nosrc.html` 都先打 `[generic] Extracting URL` + `Looking for embeds`，再以 `ERROR: Unsupported URL: ...` 收尾且真实下载写零文件（`[debug] Loaded 1747 extractors`）。所以这句**必须读成「提取器认领了但页面无媒体」= NO_MEDIA（放行）**，读成「站点不支持」会拦掉普通「此页面无视频」的下载，正是「网站支持 ≠ 视频可用」的混淆。真正 UNSUPPORTED 的只有引擎**连路由都拒绝**的情形（`'wat' is not a valid URL`、`Unsupported url scheme: "mailto"`、`file:// URLs are disabled`），这类在 http(s) 输入上几乎不可达。判定顺序上 `unsupported url scheme` **必须先于** `unsupported url` 检查，否则路由级结论会被子串误吞。门禁的不对称性决定默认值：**误拦用户无法绕过且无补救，误放只是让下载按引擎自己更准确的错误失败 → 一律 fail open**，预检自身抛异常也算「未检查」放行。
 25. **`--extractor-descriptions` 的输出不是 UTF-8**（D-134）：实测同一二进制上它是 Windows ANSI 代码页（`BaiduVideo: 百度视频` 到达时是 `B0 D9 B6 C8 CA D3 C6 B5` = cp936），按 UTF-8 解码必成 mojibake，按 cp936 解又在非中文 Windows 上出错。名单只用 `--list-extractors`（纯 ASCII，实测 1755 行 / 23,500 B）；`(CURRENTLY BROKEN)` 是引擎自己的判断，**逐字保留、不重新推导也不隐藏**，且标记**具有粘性**（同名两行无论顺序都保留坏标记，结果不依赖行序）。
 
+26. **`redirect: 'follow'` 会让「初始 URL 校验」整个失效**（D-137）：`fetch` 自己决定最终地址，所以校验过 `https://github.com/…` 之后，一个 302 仍能把它带到任意主机或 http 明文，而应用层只看得到结果。所有出站请求一律走 `adapters/http-policy.ts::fetchFollowingRedirects`（`redirect:'manual'` + 逐跳 `allow` + 跳数上限 + 环检测），**同一个 AbortSignal 覆盖整条链**。同理，`HttpPort.getBytes()` 曾用 `arrayBuffer()` 读完整 body 才比大小，且计时器在拿到响应头就被 `clearTimeout`——无 `Content-Length` 的大流和慢流各能独立把主进程拖垮；现在按字节流累计、`maxBytes` 立即取消、单一 deadline 覆盖到最后一片。**DNS 重绑定不在此列**：URL 字面量检查看不见解析后的 IP，别把「主机名不是内网 IP」写成「已防 SSRF」。
+27. **「发出 kill」不等于「进程已退出」**（D-137）：`taskkill /T` 是外部进程、可能失败；超时/超限若在 kill 发出的瞬间就 resolve，调用方拿到的是「我认为它停了」而不是「我看到它停了」。`node-ports.spawn()` 现在有界等待 `killTree()` 的布尔结果，只有 `close`/`error` 事件才是退出证据；两者都没有时 stderr 追加中性的 `TERMINATION_UNCONFIRMED_MARKER`，且 `exitCode` 对**超时与超限**一律置 `null`（否则 `taskkill` 的退出码 1 会伪装成一次正常运行）。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 
@@ -374,6 +379,11 @@ ui（零依赖） ← preload ← apps/desktop
 | **跨卷的中间文件落点未实测**：本机只有 C:，`resolveDownloadTempDir` 的跨卷分支只经过单元测试 | `core/src/path-resolver/volume.ts` |
 | **字幕边界**：独立字幕重试、内嵌保留 MP4、同语言人工/自动分别下载未实现 | `core/src/task-queue/task-queue.ts`、`core/src/decision/download-plan.ts`、`core/src/subtitle-planner/subtitle-choice.ts`；验收口径见 `docs/DELIVERY-REPORT.md` 已知边界 3–5 与 D-132 |
 | **URL 预检与「支持的网站」只在 main 进程边界验证过**：真实站点已在线跑通（播放列表 20/20 + 3 条下载、自动字幕内嵌、预检对 YouTube 返回 `SUPPORTED`），但**没有在真机 Electron 窗口里点开面板**，也**没有用真实 Cookie 跑过「预检与下载同配置」的正向对照**（proxy 那一路已实测，`cookiesFile` / `userAgent` 只有单测透传证明） | `main/site-support-network.ts`、`main/site-precheck-gate.ts`；口径见 D-135「未覆盖」 |
+| **DNS 重绑定未防护**：`http-policy.ts` 只校验 URL 字面量（协议 / 私网 IP / 数字写法），没有钉住解析后的 IP；真正防住要自定义 dispatcher 的 `lookup` | `main/adapters/http-policy.ts`；口径见 D-137「未覆盖」 |
+| **预检没有用户级取消**：`CANCELLED` 仍是前瞻占位（D-135 已记），`AbortSignal` 未贯穿 `ProcessPort.spawn`；本版只把非拦截态做成可解释的提示，不假装能中止引擎子进程 | `shared/src/site-support.ts`、`main/adapters/node-ports.ts`；口径见 D-137「未覆盖」 |
+| **更新器首次下载没有独立可信签名基准**：信任根是 TLS + GitHub 域；发布端缺 `digest` 时本地 `.sha256` sidecar 只保证「后来没变」，不认证首次来源 | `main/app-update-service.ts`、`main/adapters/http-download.ts`；口径见 D-137「未覆盖」 |
+| **IPC / 导航边界未做真机窗口验证**：sender、主 frame、`will-navigate`、`setWindowOpenHandler` 目前只有假 Electron 单测；打包后真机点一遍待业主指令（铁律 9） | `main/bootstrap.ts`、`tests/unit/ipc-trust-boundary.test.ts` |
+| **本轮加固缺在线 / 安装包证据**：HTTP 逐跳、有界读取、IPC 边界全部是离线受控测试（127.0.0.1 + 假 Electron）；真实站点预检六态矩阵与 Windows 安装包验收需业主放行国际网并点名打包（铁律 9） | `tests/unit/http-network-boundary.test.ts`；口径见 D-137「未覆盖」 |
 
 > 这张表会随开发推进变短。**完成一项就删一行**，不要留着写「已做」——那是本手册最容易腐烂的地方。
 >

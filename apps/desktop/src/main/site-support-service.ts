@@ -27,7 +27,7 @@ import type {
 } from '@ytvdlt/shared';
 import {
   DEFAULT_PLUGIN_SIGNATURE, EXTRACTOR_CACHE_TTL_MS, extractorCacheKey, isCacheableSupport,
-  isCatalogFresh, supportCacheKey, URL_PRECHECK_TIMEOUT_MS,
+  isCatalogFresh, networkContextSignature, supportCacheKey, URL_PRECHECK_TIMEOUT_MS,
 } from '@ytvdlt/shared';
 import type { SiteDiscovery, UrlSupportCheckOptions } from '@ytvdlt/engine-ytdlp';
 import { supportsSiteDiscovery } from '@ytvdlt/engine-ytdlp';
@@ -235,7 +235,13 @@ export class SiteSupportService {
       };
     }
     const version = await this.identity();
-    const key = supportCacheKey(url, this.options.enginePath, version, this.plugins());
+    const network = this.options.network?.() ?? {};
+    // D-137 (F-08): the SAME lazily-resolved context that is forwarded to the
+    // engine below also identifies the verdict. Changing a proxy / cookie file
+    // / UA can no longer serve a verdict produced under the old one.
+    const key = supportCacheKey(
+      url, this.options.enginePath, version, this.plugins(), networkContextSignature(network),
+    );
 
     if (!force) {
       const hit = this.verdicts.get(key);
@@ -251,7 +257,10 @@ export class SiteSupportService {
     const opts: UrlSupportCheckOptions = {
       jsRuntimePath: this.options.jsRuntimePath,
       timeoutMs: URL_PRECHECK_TIMEOUT_MS,
-      ...(this.options.network?.() ?? {}),
+      // Reuse the SAME snapshot that produced the cache key: resolving it twice
+      // would let a config change between the two reads make the key describe a
+      // different argv than the one actually spawned.
+      ...network,
     };
     const task = engine.checkUrlSupport(url, opts)
       .then((result) => {

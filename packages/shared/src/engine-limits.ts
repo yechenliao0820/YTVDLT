@@ -59,3 +59,17 @@ export const METADATA_MAX_STDERR_BYTES = 1 * 1024 * 1024;
  * mislabelled as a network or permission problem.
  */
 export const OUTPUT_LIMIT_MARKER = '[ytvdlt] output limit exceeded: child terminated';
+
+/**
+ * D-137 (F-03): appended to `stderr` when an overflow/timeout kill was issued
+ * but the process tree's exit could NOT be confirmed within the bounded grace
+ * period. Emitting a kill is not the same as having stopped the child (§9 坑 21:
+ * `child.kill()` leaves a onefile bootloader running), and the old path simply
+ * resolved the promise without ever looking at the kill result.
+ *
+ * Like OUTPUT_LIMIT_MARKER this is a neutral, fixed string with no keyword from
+ * `error-mapper/rules.ts`, so it cannot be mislabelled as a network failure.
+ * It is a DIAGNOSTIC, not a guarantee: `exitCode: null` is what keeps every
+ * success path closed.
+ */
+export const TERMINATION_UNCONFIRMED_MARKER = '[ytvdlt] child tree termination unconfirmed';

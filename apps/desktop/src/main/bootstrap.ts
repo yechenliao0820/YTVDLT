@@ -45,6 +45,10 @@ export interface WebContentsLike {
   on(event: string, listener: () => void): void;
   /** D-91: optional so the unit-test fake needs no change; real Electron has it. */
   executeJavaScript?(code: string): Promise<unknown>;
+  /** D-137 (F-04): optional for the same reason; absent = no new-window policy. */
+  setWindowOpenHandler?(
+    handler: (details: { readonly url: string }) => { readonly action: 'deny' },
+  ): void;
 }
 
 export interface BrowserWindowLike {
@@ -141,6 +145,73 @@ export interface BootstrapHandle {
 
 const EMPTY_STATS: TrayStats = { active: 0, pending: 0, completed: 0, failed: 0 };
 
+/**
+ * D-137 (F-04) — the ONLY definition of "a page we trust with the bridge".
+ *
+ * The renderer is a LOCAL static page (`file://` in dev, the app scheme when
+ * packaged). Menu navigation swaps between local pages and `?lang=` reloads the
+ * same one, so the rule is about ORIGIN + SCHEME, not an exact URL: both of
+ * those must still work, while an embedded iframe, a remote page or a
+ * `javascript:`/`data:` navigation must never reach a bridge channel.
+ *
+ * `webContents.loadURL()` does not emit `will-navigate`, so this check cannot
+ * interfere with the menu's own page switches.
+ */
+export function isTrustedLocalPage(candidate: string, pageUrl: string): boolean {
+  try {
+    const actual = new URL(candidate);
+    const expected = new URL(pageUrl);
+    if (actual.protocol !== expected.protocol || actual.origin !== expected.origin) return false;
+    return actual.protocol === 'file:' || !/^https?:$/.test(actual.protocol);
+  } catch {
+    return false;
+  }
+}
+
+/** The slice of Electron's `IpcMainInvokeEvent` this boundary needs. */
+export interface IpcInvokeEventLike {
+  readonly sender?: unknown;
+  readonly senderFrame?: {
+    readonly url?: string;
+    /** `null` on the main frame; a non-null parent means a subframe. */
+    readonly parent?: unknown;
+  } | null;
+}
+
+/**
+ * Reject an invocation that did not come from the application window's MAIN
+ * frame on a trusted local page. Throwing is deliberate: every renderer call
+ * already treats a rejected promise as a failure, and there is no channel whose
+ * "denied" reply shape could be invented here without lying about its type.
+ *
+ * Pure apart from the injected window reference, so both the allowed and the
+ * refused paths are unit-testable without an Electron binary (D-39).
+ */
+export function assertTrustedIpcSender(
+  event: unknown,
+  window: BrowserWindowLike | null,
+  pageUrl: string,
+): void {
+  const invocation = (event === null || typeof event !== 'object')
+    ? null : event as IpcInvokeEventLike;
+  if (invocation === null) throw new Error('[ipc] rejected: no invocation context');
+  if (window !== null) {
+    if (invocation.sender === undefined || invocation.sender !== window.webContents) {
+      throw new Error('[ipc] rejected: sender is not the application window');
+    }
+  }
+  const frame = invocation.senderFrame;
+  if (frame === undefined || frame === null) {
+    throw new Error('[ipc] rejected: no sender frame');
+  }
+  if (frame.parent !== null && frame.parent !== undefined) {
+    throw new Error('[ipc] rejected: subframe invocation');
+  }
+  if (!isTrustedLocalPage(frame.url ?? '', pageUrl)) {
+    throw new Error('[ipc] rejected: untrusted page');
+  }
+}
+
 /** `?prefill=` is how the renderer learns about `--url` before its JS runs. */
 export function pageUrlWithPrefill(pageUrl: string, url: string | null): string {
   if (url === null) return pageUrl;
@@ -198,10 +269,21 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
   const launchUrl = withLocale(options.pageUrl, menuLocale);
 
   // 2. Register every channel of the merged gateway (M3 + M5).
+  // D-137 (F-04): `_event` used to be discarded, so ANY webContents/frame that
+  // somehow obtained the bridge could invoke a sensitive channel. The window is
+  // created in step 3, so the guard reads it through a reference that is set
+  // before the first page load; registration ORDER and channel SET stay intact.
   const registeredChannels: string[] = [];
+  let windowRef: BrowserWindowLike | null = null;
+  const guarded = (event: unknown): void => {
+    assertTrustedIpcSender(event, windowRef, options.pageUrl);
+  };
   host.gateway.registerAll({
     register(channel, handler) {
-      ipcMain.handle(channel, (_event, payload) => handler(payload));
+      ipcMain.handle(channel, (event, payload) => {
+        guarded(event);
+        return handler(payload);
+      });
       registeredChannels.push(channel);
     },
   });
@@ -226,6 +308,18 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
       webSecurity: true,
     },
   });
+  windowRef = window;
+
+  // D-137 (F-04): keep the renderer on a trusted LOCAL page. A compromised
+  // page must not be able to navigate this window (which still holds the
+  // preload bridge) to a remote origin, and must not open new windows with it.
+  // `webContents.loadURL()` (menu navigation, `--url` prefill) does NOT emit
+  // `will-navigate`, so those paths are unaffected. External links are opened
+  // by the main process through `shell.openExternal`, never by the renderer.
+  window.webContents.on('will-navigate', ((event: { preventDefault(): void }, url: string) => {
+    if (!isTrustedLocalPage(url, options.pageUrl)) event.preventDefault();
+  }) as () => void);
+  window.webContents.setWindowOpenHandler?.(() => ({ action: 'deny' }));
 
   window.webContents.on('context-menu', ((_event: unknown, params: {
     isEditable: boolean;
@@ -261,7 +355,8 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
     pushFullscreenState(actual);
     return actual;
   }
-  ipcMain.handle(IPC_CHANNELS.WINDOW_FULLSCREEN, (_event, payload) => {
+  ipcMain.handle(IPC_CHANNELS.WINDOW_FULLSCREEN, (event, payload) => {
+    guarded(event);
     const record = payload !== null && typeof payload === 'object'
       ? payload as Record<string, unknown> : {};
     const action = record['action'] === 'get' || record['action'] === 'set'

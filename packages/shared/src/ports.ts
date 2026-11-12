@@ -137,10 +137,24 @@ export interface LogSinkPort {
  * Deliberately two methods and no streaming: component updates are small files
  * fetched whole, verified by SHA-256, then written atomically. Anything more
  * elaborate (resume, ranges, proxies) belongs in the update source, not here.
+ *
+ * D-137: the options are additive. `maxBytes` makes the body bounded even when
+ * Content-Length lies or is absent; `urlPolicy` is re-applied to every redirect
+ * hop, not just the initial URL. Both default to a safe-but-compatible floor so
+ * existing callers keep their behaviour while new ones can opt into a stricter
+ * policy (covers use `isPublicHttpsUrl`, the updater uses its GitHub allowlist).
  */
+export interface HttpFetchOptions {
+  readonly timeoutMs?: number;
+  /** Hard ceiling on the response body in bytes; a breach aborts the stream. */
+  readonly maxBytes?: number;
+  /** Per-hop predicate. Absent = accept any http(s) URL; the chain stays bounded. */
+  readonly urlPolicy?: (rawUrl: string) => boolean;
+}
+
 export interface HttpPort {
-  getText(url: string, opts?: { timeoutMs?: number }): Promise<string>;
-  getBytes(url: string, opts?: { timeoutMs?: number }): Promise<Uint8Array>;
+  getText(url: string, opts?: HttpFetchOptions): Promise<string>;
+  getBytes(url: string, opts?: HttpFetchOptions): Promise<Uint8Array>;
 }
 
 export interface CorePorts {

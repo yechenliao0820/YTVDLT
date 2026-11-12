@@ -215,6 +215,36 @@ export async function precheckBatch(
 }
 
 /**
+ * D-137 — map a URL-level gate outcome back onto ENTRIES.
+ *
+ * The gate works on URL strings (one engine run per unique link), but a
+ * playlist can legitimately contain the SAME url on several entries. Mapping
+ * with `entries.find(urlOf(entry) === block.url)` reported only the first id
+ * while the caller removed EVERY matching id — the batch silently lost entries
+ * and under-reported its failure count. This collapses the per-line blocks by
+ * url, then reports ONE failure per removed entry, in the caller's order.
+ *
+ * Pure, so the duplicate case is a unit test rather than a manual reconciliation.
+ */
+export function blockedEntriesByUrl<E>(
+  entries: readonly E[],
+  urlOf: (entry: E) => string | undefined,
+  blocked: readonly PrecheckBlock[],
+): readonly { readonly entry: E; readonly code: string }[] {
+  const codeByUrl = new Map<string, string>();
+  for (const block of blocked) {
+    if (!codeByUrl.has(block.url)) codeByUrl.set(block.url, block.code);
+  }
+  const result: { entry: E; code: string }[] = [];
+  for (const entry of entries) {
+    const url = urlOf(entry);
+    const code = url === undefined ? undefined : codeByUrl.get(url);
+    if (code !== undefined) result.push({ entry, code });
+  }
+  return result;
+}
+
+/**
  * R1-03 — fold the per-URL verdicts into the batch's counts.
  *
  * Counted LINE-WISE over `examined`, one entry per submitted URL, so that

@@ -10,7 +10,9 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
-import type { AppError, ErrorCode, TaskRecord } from '@ytvdlt/shared';
+import type {
+  AppError, ErrorCode, TaskRecord, UrlSupportResult, UrlSupportState,
+} from '@ytvdlt/shared';
 import { CommandTemplateStore, ConfigStore, maskUrlSecrets } from '@ytvdlt/core';
 import type { TaskDetailAction, TaskDetailResult } from '@ytvdlt/core';
 import {
@@ -356,6 +358,70 @@ describe('m5 ipc · DOWNLOAD_START carries the user choice (D-83)', () => {
     }) as { accepted: boolean; enqueued: boolean; reason: string };
     expect(result).toMatchObject({ accepted: false, enqueued: false });
     expect(result.reason).toContain('未启用');
+  });
+});
+
+describe('D-137 · single-link pre-check outcome (F-06 / F-07)', () => {
+  const supportPort = (state: UrlSupportState, extractor = '') => ({
+    available: true,
+    catalog: async () => ({ ok: false as const, reason: 'ENGINE_UNAVAILABLE' as const, detail: '' }),
+    check: async (url: string): Promise<UrlSupportResult> => ({
+      url, state, extractor, reason: 'fixed vocabulary', cached: false,
+    }),
+  });
+
+  it('returns a stable code, never a hard-coded Chinese sentence, when blocked', async () => {
+    const seen: SingleDownloadInput[] = [];
+    const { handlers } = await harness(undefined, {
+      enqueueSingle: async (input) => { seen.push(input); return ['single-x']; },
+      siteSupport: supportPort('UNSUPPORTED'),
+    });
+    const result = await handlers.get(IPC_CHANNELS.DOWNLOAD_START)?.({
+      url: 'https://example.org/v', kind: 'video',
+    }) as {
+      accepted: boolean; code: string; reason: string;
+      support: { state: string; blocks: boolean };
+    };
+    expect(result).toMatchObject({
+      accepted: false, code: 'SITE_UNSUPPORTED', support: { state: 'UNSUPPORTED', blocks: true },
+    });
+    // An English page must not receive a Chinese sentence to print verbatim.
+    expect(result.reason).not.toMatch(/[\u4e00-\u9fff]/);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('reports an ITEM-level refusal with its own stable code', async () => {
+    const { handlers } = await harness(undefined, {
+      enqueueSingle: async () => ['single-y'],
+      siteSupport: supportPort('UNSUPPORTED', 'youtube'),
+    });
+    const result = await handlers.get(IPC_CHANNELS.DOWNLOAD_START)?.({
+      url: 'https://example.org/v', kind: 'video',
+    }) as { code: string };
+    expect(result.code).toBe('ITEM_UNSUPPORTED');
+  });
+
+  it('surfaces a NON-blocking verdict so the page can explain it', async () => {
+    const { handlers } = await harness(undefined, {
+      enqueueSingle: async () => ['single-z'],
+      siteSupport: supportPort('NO_MEDIA'),
+    });
+    const result = await handlers.get(IPC_CHANNELS.DOWNLOAD_START)?.({
+      url: 'https://example.org/v', kind: 'video',
+    }) as { accepted: boolean; support: { state: string; blocks: boolean } };
+    expect(result.accepted).toBe(true);
+    expect(result.support).toMatchObject({ state: 'NO_MEDIA', blocks: false });
+  });
+
+  it('keeps the legacy shape when no pre-check ran at all', async () => {
+    const { handlers } = await harness(undefined, {
+      enqueueSingle: async () => ['single-w'],
+    });
+    const result = await handlers.get(IPC_CHANNELS.DOWNLOAD_START)?.({
+      url: 'https://example.org/v', kind: 'video',
+    }) as Record<string, unknown>;
+    expect(result).toMatchObject({ accepted: true, enqueued: true });
+    expect(result['support']).toBeUndefined();
   });
 });
 

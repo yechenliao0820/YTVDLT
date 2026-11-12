@@ -27,6 +27,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import type { HttpPort } from '@ytvdlt/shared';
+import { isPublicHttpsUrl } from './adapters/http-policy.js';
 import {
   normalizeThumbnailCachePolicy, planThumbnailPrune,
   type ThumbnailCacheEntry, type ThumbnailCachePolicy, type ILogger,
@@ -341,9 +342,19 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
 
   async function fetchAndStore(taskId: string, url: string): Promise<string | null> {
     if (http === undefined) return null;
-    if (!/^https:\/\//i.test(url)) return null;
+    // D-137: the same predicate is handed to the HTTP adapter as a PER-HOP
+    // policy, so a 302 to loopback/private or an http downgrade cannot slip past
+    // this initial check. The adapter also enforces `maxBytes` while streaming,
+    // instead of buffering the whole body and checking its length afterwards.
+    if (!isPublicHttpsUrl(url)) return null;
     try {
-      const bytes = await http.getBytes(url, { timeoutMs });
+      const bytes = await http.getBytes(url, {
+        timeoutMs,
+        maxBytes: maxBytesPerFile,
+        urlPolicy: isPublicHttpsUrl,
+      });
+      // Still checked here: an injected HttpPort (tests, future adapters) is not
+      // required to honour the ceiling itself.
       if (bytes.byteLength === 0 || bytes.byteLength > maxBytesPerFile) return null;
       const ext = signatureOf(bytes);
       if (ext === null) return null;

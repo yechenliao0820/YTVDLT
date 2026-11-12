@@ -201,8 +201,43 @@ export function supportCacheKey(
   enginePath: string,
   engineVersion: string,
   plugins: string = DEFAULT_PLUGIN_SIGNATURE,
+  /** D-137: omitted = byte-identical legacy key. See networkContextSignature. */
+  network: string = '',
 ): string {
-  return `${normalizeUrlForKey(url)}::${extractorCacheKey(enginePath, engineVersion, plugins)}`;
+  const base = `${normalizeUrlForKey(url)}::${extractorCacheKey(enginePath, engineVersion, plugins)}`;
+  return network === '' ? base : `${base}::${network}`;
+}
+
+/** The (only) network fields a real download can currently configure. */
+export interface SupportNetworkContext {
+  readonly proxy?: string;
+  readonly cookiesFile?: string;
+  readonly userAgent?: string;
+}
+
+/**
+ * D-137 (F-08): a verdict is a statement about "what THIS engine can do with
+ * this URL under THIS network configuration". Proxy, cookies and user agent can
+ * change whether a page resolves, so a verdict cached before such a change must
+ * not be served afterwards. The key must therefore see the configuration —
+ * WITHOUT storing a proxy credential or a cookie-file path in a cache key that
+ * ends up in memory dumps and logs.
+ *
+ * This is a non-cryptographic 32-bit FNV-1a digest used ONLY to detect a
+ * CHANGE. It is not authentication, it is not secrecy, and collisions are
+ * acceptable: the worst case is one extra engine run, which is fail-open.
+ *
+ * Pure JS on purpose — `shared` may never import `node:crypto` (§2 layering).
+ */
+export function networkContextSignature(context: SupportNetworkContext = {}): string {
+  const joined = [context.proxy ?? '', context.cookiesFile ?? '', context.userAgent ?? '']
+    .join('\u0000');
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < joined.length; index += 1) {
+    hash ^= joined.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `network:${hash.toString(16).padStart(8, '0')}`;
 }
 
 /** Lower-case scheme+host, keep the rest verbatim. Pure and defensive. */

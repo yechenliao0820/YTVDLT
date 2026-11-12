@@ -39,7 +39,7 @@ import {
 } from '../../apps/desktop/src/main/site-support-service.js';
 import { readSiteSupportNetwork } from '../../apps/desktop/src/main/site-support-network.js';
 import {
-  precheckBatch, MAX_PRECHECK_URLS_PER_BATCH,
+  blockedEntriesByUrl, precheckBatch, MAX_PRECHECK_URLS_PER_BATCH,
 } from '../../apps/desktop/src/main/site-precheck-gate.js';
 import {
   createM5Handlers, validateM5Payload, M5_CHANNELS, type M5ChannelDeps,
@@ -964,5 +964,39 @@ describe('R1-04 - geo-block / deleted wordings are INDETERMINATE, not NO_MEDIA',
     'ERROR: [youtube] abc: This video is not available',
   ])('%s', (stderr) => {
     expect(classifySupportFailure(stderr)).toBe('INDETERMINATE');
+  });
+});
+
+describe('D-137 - blocked URLs map back onto EVERY matching entry', () => {
+  it('reports one failure per removed entry when a playlist repeats a url', async () => {
+    const urls = [
+      'https://a.test/ok', 'https://a.test/bad', 'https://a.test/bad',
+      'https://a.test/also-bad', 'https://a.test/bad',
+    ];
+    const outcome = await precheckBatch(urls, {
+      check: async (url: string): Promise<UrlSupportResult> => ({
+        url,
+        state: url === 'https://a.test/ok' ? 'SUPPORTED' : 'UNSUPPORTED',
+        extractor: '', reason: 'fixed', cached: false,
+      }),
+    });
+    const ids = ['e0', 'e1', 'e2', 'e3', 'e4'];
+    const urlOf = new Map(ids.map((id, index) => [id, urls[index] as string]));
+    const reported = blockedEntriesByUrl(ids, (id) => urlOf.get(id), outcome.blocked);
+
+    // Four entries were removed by the caller's filter; all four must appear in
+    // the failure list. The old `find()` reported only e1/e3 (two entries).
+    expect(reported.map((item) => item.entry)).toEqual(['e1', 'e2', 'e3', 'e4']);
+    expect(reported.every((item) => item.code === 'SITE_UNSUPPORTED')).toBe(true);
+    expect(ids.filter((id) => outcome.allowed.includes(urlOf.get(id) as string))).toEqual(['e0']);
+    expect(outcome.summary.unsupported).toBe(4);
+  });
+
+  it('ignores entries with no url of their own', () => {
+    const reported = blockedEntriesByUrl(
+      ['a', 'b'], (entry) => entry === 'a' ? undefined : 'https://a.test/bad',
+      [{ url: 'https://a.test/bad', state: 'UNSUPPORTED', code: 'ITEM_UNSUPPORTED', reason: '' }],
+    );
+    expect(reported).toEqual([{ entry: 'b', code: 'ITEM_UNSUPPORTED' }]);
   });
 });

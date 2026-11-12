@@ -12,6 +12,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, rename, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { allowAnyHttpUrl, fetchFollowingRedirects, type RedirectPolicy } from './http-policy.js';
 
 export interface DownloadProgress {
   readonly downloadedBytes: number;
@@ -28,6 +29,12 @@ export interface DownloadRequest {
   readonly idleTimeoutMs?: number;
   /** Hard ceiling; a "installer" bigger than this is a bug or an attack. */
   readonly maxBytes?: number;
+  /**
+   * D-137 (F-05): applied to the initial URL AND to every redirect hop.
+   * Production passes `isTrustedReleaseHost`; omitted callers keep the bounded
+   * chain with the permissive default (used by offline cancellation tests).
+   */
+  readonly hostPolicy?: (url: string) => boolean;
   readonly signal?: AbortSignal;
   readonly trashPartial?: (path: string) => Promise<void>;
 }
@@ -64,11 +71,17 @@ export async function downloadToFile(request: DownloadRequest): Promise<Download
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   let created = false;
   try {
-    const response = await fetch(request.url, {
+    // D-137: the release JSON is untrusted input. `redirect: 'follow'` used to
+    // let a checked github.com URL bounce to an arbitrary host (or an http
+    // downgrade) without this layer ever seeing the final address. Every hop is
+    // now re-checked, the chain is capped, and the same AbortSignal covers it.
+    const redirectPolicy: RedirectPolicy = request.hostPolicy === undefined
+      ? allowAnyHttpUrl
+      : { allow: request.hostPolicy };
+    const response = await fetchFollowingRedirects(request.url, {
       signal: controller.signal,
-      redirect: 'follow',
       headers: { 'user-agent': 'YTVDLT-updater' },
-    });
+    }, redirectPolicy);
     if (!response.ok || response.body === null) {
       throw new Error(`HTTP ${response.status} for ${request.url}`);
     }

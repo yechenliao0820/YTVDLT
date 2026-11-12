@@ -594,6 +594,13 @@ const M3_TEST_FILE_MAP = {
   'update-dialog-cancel.test.ts': ['A-D114'],
   'volume.test.ts': ['A-D118'],
   'queue-failure.test.ts': ['A-4.4-16', 'A-4.4-21'],
+  // D-137 · 本轮新增的 4 个回归测试文件（受控本地 HTTP 服务器 / 真实子进程
+  // / 纯函数 / 真实 SiteSupportService），挂到新补的 A-D137；后两个另外挂到
+  // 语义最接近的既有断言，便于交叉追溯。判定逻辑与门禁口径未改。
+  'http-network-boundary.test.ts': ['A-D137'],
+  'ipc-trust-boundary.test.ts': ['A-D137'],
+  'site-support-context.test.ts': ['A-D137', 'A-TASK03'],
+  'termination-confirmation.test.ts': ['A-D137', 'A-TASK02'],
 };
 
 /** Honest, separately-listed deviations (never reported as PASS assertions). */
@@ -1308,6 +1315,12 @@ const M5_ASSERTIONS = [
   { id: 'A-TASK01', layer: 'L2', subject: '「最低画质」是相对排序（-S +res）：2160/1080/720/360 源选中 360p，480p 源不降到 360p，纯音频不伪造视频流', tests: ['lowest-quality-local'], needs: ['vitest'], evidence: ['reports/vitest-results.json::lowest-quality-local.test.ts', 'reports/task01-format-selection.json', 'core/src/decision/download-plan.ts::RESOLUTION_QUALITIES'] },
   { id: 'A-TASK02', layer: 'L1', subject: '有界元数据子进程：stdout/stderr 按字节设上限、超限终止子进程并标记、正常下载流不受影响', tests: ['probe-output-limit'], needs: ['vitest'], evidence: ['reports/vitest-results.json::probe-output-limit.test.ts', 'main/adapters/output-limiter.ts', 'main/adapters/node-ports.ts::OVERFLOW_SETTLE_GRACE_MS', 'shared/src/engine-limits.ts'] },
   { id: 'A-TASK03', layer: 'L1', subject: '动态支持网站列表（引擎自述、无兜底名单、GenericIE 单列）+ URL 六态预检（仅 UNSUPPORTED 拦截、fail open、批次三分类统计）', tests: ['site-support', 'supported-sites-panel'], needs: ['vitest'], evidence: ['reports/vitest-results.json::site-support.test.ts,supported-sites-panel.test.ts', 'engine-ytdlp/src/extractor-list.ts', 'main/site-precheck-gate.ts', 'main/site-support-service.ts'] },
+
+  // D-137 · 独立审计核实后的边界加固。同 D-135/R2-01 的做法：新增决策先补
+  // 真断言 id，再把测试文件登记进 M3_TEST_FILE_MAP，绝不把新文件硬挂到
+  // 不相关的旧断言上。状态仍由 findTestCount() 对真实 vitest 结果计数得出，
+  // 判定逻辑一行未改；测试文件真挂了或被跳过，这条断言就会红。
+  { id: 'A-D137', layer: 'L1', subject: '审计核实后的边界加固：出站 HTTP 逐跳策略与有界读取、IPC 调用者/导航信任、子进程终止有界确认、单链接状态本地化、预检缓存纳入网络上下文', tests: ['http-network-boundary', 'ipc-trust-boundary', 'site-support-context', 'termination-confirmation'], needs: ['vitest'], evidence: ['reports/vitest-results.json::http-network-boundary.test.ts,ipc-trust-boundary.test.ts,site-support-context.test.ts,termination-confirmation.test.ts', 'apps/desktop/src/main/adapters/http-policy.ts', 'apps/desktop/src/main/bootstrap.ts', 'docs/DECISIONS.md::D-137'] },
 ];
 
 /** M5 e2e cases that must exist and pass for the visual assertions. */

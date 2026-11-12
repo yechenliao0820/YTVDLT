@@ -45,7 +45,7 @@ import {
   type PlaylistPreviewPortLike,
 } from './playlist-preview-service.js';
 import type { PlaylistBatchReport, PlaylistEnqueueInput } from './m4-host.js';
-import { precheckBatch } from './site-precheck-gate.js';
+import { blockedEntriesByUrl, precheckBatch } from './site-precheck-gate.js';
 
 /** Minimal slice of the queue this layer needs (tests inject a fake). */
 export interface TaskListPort {
@@ -1030,23 +1030,31 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     // through and lets the download be the authority. The asymmetry is
     // deliberate: a wrong block is unfixable by the user, a wrong pass costs
     // one failed download that the engine then explains accurately.
+    // D-137 (F-06/F-07): keep the verdict so a NON-blocking outcome can also
+    // be explained to the user. `blocks` is still computed HERE from the frozen
+    // predicate — the renderer never decides what counts as unsupported.
+    let supportVerdict: { readonly state: string; readonly extractor: string } | null = null;
     if (deps.siteSupport !== undefined && deps.siteSupport.available) {
       const verdict = await deps.siteSupport.check(url).catch(() => null);
-      if (verdict !== null && blocksEnqueue(verdict.state)) {
-        return {
-          accepted: false,
-          enqueued: false,
-          taskIds: [],
-          code: verdict.extractor === '' ? 'SITE_UNSUPPORTED' : 'ITEM_UNSUPPORTED',
-          // No stderr, no argv, no cookie: a fixed sentence plus the engine's
-          // own extractor name (which the user could see in a download anyway).
-          reason: '下载引擎不支持该链接或站点',
-          support: {
-            state: verdict.state,
-            extractor: verdict.extractor,
-            blocks: true,
-          },
-        };
+      if (verdict !== null) {
+        supportVerdict = { state: verdict.state, extractor: verdict.extractor };
+        if (blocksEnqueue(verdict.state)) {
+          return {
+            accepted: false,
+            enqueued: false,
+            taskIds: [],
+            code: verdict.extractor === '' ? 'SITE_UNSUPPORTED' : 'ITEM_UNSUPPORTED',
+            // No stderr, no argv, no cookie. English is only a FALLBACK for an
+            // older UI: the current renderer resolves `code` in the active
+            // locale, so an English page no longer shows a Chinese sentence.
+            reason: 'This link or site is not supported by the download engine',
+            support: {
+              state: verdict.state,
+              extractor: verdict.extractor,
+              blocks: true,
+            },
+          };
+        }
       }
     }
 
@@ -1095,7 +1103,17 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       // enqueue, so TaskQueue does NOT probe a second time.
       ...(consumption === null ? {} : { mediaInfo: consumption.media }),
     });
-    return { accepted: true, enqueued: taskIds.length > 0, taskIds };
+    return {
+      accepted: true, enqueued: taskIds.length > 0, taskIds,
+      // D-137: fail-open outcomes are NOT silent any more. The page can say
+      // "未确认，仍已加入队列" in its own language instead of implying that a
+      // pre-check blessed the link. Absent when no pre-check ran.
+      ...(supportVerdict === null ? {} : { support: {
+        state: supportVerdict.state,
+        extractor: supportVerdict.extractor,
+        blocks: false,
+      } }),
+    };
   });
 
   // ---- TXT batch import ----------------------------------------------------
@@ -1261,9 +1279,13 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
         deps.siteSupport,
       );
       const stillAllowed = new Set(outcome.allowed);
-      for (const block of outcome.blocked) {
-        const id = withUrl.find((candidate) => entryUrlOf.get(candidate) === block.url);
-        if (id !== undefined) precheckFailures.push({ id, reason: block.code });
+      // D-137: ONE url can appear on SEVERAL entries. The old `find()` reported
+      // a single id while the filter below removes EVERY id with that url, so
+      // the batch silently lost entries and under-reported `failed`.
+      for (const item of blockedEntriesByUrl(
+        withUrl, (id) => entryUrlOf.get(id), outcome.blocked,
+      )) {
+        precheckFailures.push({ id: item.entry, reason: item.code });
       }
       // Ids, never URLs: the DTO is display-safe by contract (playlist-preview.ts).
       const idsForUrls = (urls: readonly string[]): string[] =>

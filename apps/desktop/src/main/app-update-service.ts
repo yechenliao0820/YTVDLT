@@ -296,6 +296,9 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
         url: asset.url,
         targetPath: target,
         expectedBytes: asset.sizeBytes > 0 ? asset.sizeBytes : null,
+        // D-137: the allowlist is checked again on EVERY redirect hop, not only
+        // on the `browser_download_url` we validated above.
+        hostPolicy: isTrustedReleaseHost,
         signal: controller.signal,
         ...(deps.trashPartial === undefined ? {} : { trashPartial: deps.trashPartial }),
         onProgress: (progress) => {

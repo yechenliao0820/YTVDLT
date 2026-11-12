@@ -15,10 +15,14 @@ import { release } from 'node:os';
 import { dirname, join } from 'node:path';
 import type {
   CorePorts, FileSystemPort, HashPort, ProcessPort, ClockPort,
-  EnvPort, LogSinkPort, SpawnResult, SpawnOptions, IShellPort, HttpPort,
+  EnvPort, LogSinkPort, SpawnResult, SpawnOptions, IShellPort, HttpPort, HttpFetchOptions,
 } from '@ytvdlt/shared';
+import { TERMINATION_UNCONFIRMED_MARKER } from '@ytvdlt/shared';
 import { createStreamingProcessPort } from './process-streaming.js';
 import { createBoundedOutput, OUTPUT_LIMIT_MARKER, type BoundedOutput } from './output-limiter.js';
+import {
+  allowAnyHttpUrl, fetchFollowingRedirects, type RedirectPolicy,
+} from './http-policy.js';
 import { createShellPort } from './shell-port.js';
 
 /**
@@ -195,11 +199,30 @@ function processPort(): ProcessPort {
       let timedOut = false;
       let settled = false;
       let overflowed = false;
+      /** D-137: a `close`/`error` event is the only PROOF that the tree exited. */
+      let exitObserved = false;
+      /** null = not attempted / still in flight; false = the tree kill failed. */
+      let killConfirmed: boolean | null = null;
 
       // The collector owns the accepted prefix once it exists; the plain string
       // is authoritative only on the unbounded path.
       const currentStdout = (): string => (outLimit === null ? stdout : outLimit.text());
       const currentStderr = (): string => (errLimit === null ? stderr : errLimit.text());
+      const overflowNote = (): string => (overflowed ? `\n${OUTPUT_LIMIT_MARKER}` : '');
+      /**
+       * D-137 (F-03): stamped only when we must settle WITHOUT having seen the
+       * child exit and the tree kill was not confirmed. It says "a process tree
+       * MAY still be alive"; it never turns the result into a success — the
+       * `exitCode: null` above keeps every success path closed.
+       *
+       * Deliberately a neutral fixed string, like OUTPUT_LIMIT_MARKER: no word
+       * from the error-mapper keyword table, so it cannot be mislabelled as a
+       * network/permission failure.
+       */
+      const terminationNote = (): string => (
+        (overflowed || timedOut) && !exitObserved && killConfirmed !== true
+          ? `\n${TERMINATION_UNCONFIRMED_MARKER}` : ''
+      );
 
       let timer: NodeJS.Timeout | null = null;
       /** R1-07: the overflow deadline, kept separate from the caller's timeout. */
@@ -217,11 +240,33 @@ function processPort(): ProcessPort {
         resolve(result);
       };
 
+      /**
+       * D-137 (F-03): issue a tree kill and WAIT — with a bound — for its answer.
+       * `killTree()` already checks liveness, retries once and falls back to a
+       * direct SIGKILL, but its own `taskkill` spawn has no deadline. Racing it
+       * against OVERFLOW_SETTLE_GRACE_MS keeps a stuck killer from hanging the
+       * pre-check forever while still returning an honest boolean.
+       */
+      const terminate = (): Promise<boolean> => {
+        let raceTimer: NodeJS.Timeout | null = null;
+        const bounded = new Promise<boolean>((resolve) => {
+          raceTimer = setTimeout(() => resolve(false), OVERFLOW_SETTLE_GRACE_MS);
+        });
+        const attempt = streaming.killTree(child.pid ?? null, child).catch(() => false);
+        return Promise.race([attempt, bounded]).then((ok) => {
+          if (raceTimer !== null) clearTimeout(raceTimer);
+          // If the child already emitted `close`, we SAW it exit — that is at
+          // least as strong as the killer's own liveness poll.
+          killConfirmed = exitObserved ? true : ok;
+          return killConfirmed;
+        });
+      };
+
       /** Kill the TREE on overflow; the flag decides how `close` is reported. */
       const killOnOverflow = (): void => {
         if (overflowed) return;
         overflowed = true;
-        void streaming.killTree(child.pid ?? null, child).catch(() => undefined);
+        void terminate();
         // R1-07: the kill is best-effort — `taskkill` can fail (already gone, an
         // access-denied zombie, a PID recycled between the spawn and the kill),
         // and when it does the `close` event may never arrive. Without this
@@ -233,7 +278,8 @@ function processPort(): ProcessPort {
         settleTimer = setTimeout(() => {
           settleTimer = null;
           finish({
-            exitCode: null, stdout: currentStdout(), stderr: `${currentStderr()}${overflowNote()}`,
+            exitCode: null, stdout: currentStdout(),
+            stderr: `${currentStderr()}${overflowNote()}${terminationNote()}`,
             timedOut,
           });
         }, OVERFLOW_SETTLE_GRACE_MS);
@@ -257,17 +303,19 @@ function processPort(): ProcessPort {
       if (opts.timeoutMs !== undefined) {
         timer = setTimeout(() => {
           timedOut = true;
-          // Tree-aware: a onefile bootloader survives a bare `child.kill()`.
-          void streaming.killTree(child.pid ?? null, child).catch(() => undefined);
-          finish({
-            exitCode: null, stdout: currentStdout(), stderr: currentStderr(), timedOut: true,
-          });
+          // D-137: wait for the bounded tree-kill answer instead of resolving
+          // the instant the kill is issued. A `close` event may already have
+          // settled the promise (finish() is idempotent); otherwise this is the
+          // honest report of whether the child actually stopped.
+          void terminate().then(() => finish({
+            exitCode: null, stdout: currentStdout(),
+            stderr: `${currentStderr()}${terminationNote()}`, timedOut: true,
+          }));
         }, opts.timeoutMs);
       }
 
-      const overflowNote = (): string => (overflowed ? `\n${OUTPUT_LIMIT_MARKER}` : '');
-
       child.on('error', (error: Error) => {
+        exitObserved = true;
         finish({
           exitCode: null,
           stdout: currentStdout(),
@@ -276,10 +324,14 @@ function processPort(): ProcessPort {
         });
       });
       child.on('close', (code: number | null) => {
+        exitObserved = true;
         finish({
-          // An overflow kill is NOT a clean exit: report a null code so the
-          // caller errors out instead of `JSON.parse`-ing a truncated blob.
-          exitCode: overflowed ? null : code,
+          // An overflow OR timeout kill is NOT a clean exit: report a null code
+          // so the caller errors out instead of `JSON.parse`-ing a truncated
+          // blob. D-137: the timeout path now waits for the tree kill, so
+          // `close` can legitimately arrive first with taskkill's exit code (1);
+          // without `timedOut` here that code would masquerade as a real run.
+          exitCode: (overflowed || timedOut) ? null : code,
           stdout: currentStdout(),
           stderr: `${currentStderr()}${overflowNote()}`,
           timedOut,
@@ -296,27 +348,91 @@ function processPort(): ProcessPort {
   };
 }
 
-/** M5 (D-67): global `fetch`, the only outbound network call in the app. */
+/**
+ * M5 (D-67): global `fetch`, the only outbound network call in the app.
+ *
+ * D-137 (F-02): `arrayBuffer()` used to read the WHOLE body before any size
+ * check — a hostile or simply endless cover-image stream could grow the main
+ * process without bound, and the timeout was cleared as soon as headers arrived,
+ * so a slow trickle was unbounded in TIME as well. The body is now read through
+ * a byte-counted stream under ONE deadline that covers headers + every chunk.
+ *
+ * `maxBytes` defaults are generous on purpose: `getBytes` also serves the
+ * bundled-engine binary (~tens of MiB). Callers with a tighter budget (the
+ * thumbnail cache) pass their own `maxBytes` and `urlPolicy`.
+ */
+const DEFAULT_TEXT_MAX_BYTES = 8 * 1024 * 1024;
+const DEFAULT_BINARY_MAX_BYTES = 64 * 1024 * 1024;
+
 function httpPort(): HttpPort {
-  const read = async (url: string, timeoutMs: number): Promise<Response> => {
+  const readBounded = async (
+    url: string,
+    opts: HttpFetchOptions | undefined,
+    defaults: { readonly maxBytes: number; readonly timeoutMs: number },
+  ): Promise<Uint8Array> => {
+    const maxBytes = opts?.maxBytes ?? defaults.maxBytes;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // ONE deadline for the whole operation. It is cleared in `finally`, i.e.
+    // only after the last byte (or an error) — never at the response headers.
+    const timer = setTimeout(() => controller.abort(), opts?.timeoutMs ?? defaults.timeoutMs);
     try {
-      const response = await fetch(url, { signal: controller.signal, redirect: 'follow' });
+      const policy: RedirectPolicy = opts?.urlPolicy === undefined
+        ? allowAnyHttpUrl
+        : { allow: opts.urlPolicy };
+      const response = await fetchFollowingRedirects(url, {
+        signal: controller.signal,
+        headers: { 'user-agent': 'YTVDLT' },
+      }, policy);
       if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-      return response;
+
+      // A declared length is a cheap early rejection, but it is NOT trusted:
+      // the stream counter below is what actually enforces the ceiling.
+      const declared = Number(response.headers.get('content-length') ?? '');
+      if (Number.isFinite(declared) && declared > maxBytes) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error(`response too large: ${declared} bytes`);
+      }
+      if (response.body === null) return new Uint8Array(0);
+
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value === undefined) continue;
+          total += value.byteLength;
+          if (total > maxBytes) {
+            controller.abort();
+            await reader.cancel().catch(() => undefined);
+            throw new Error(`response exceeded ${maxBytes} bytes`);
+          }
+          chunks.push(value);
+        }
+      } finally {
+        try { reader.releaseLock(); } catch { /* stream already closed */ }
+      }
+      controller.signal.throwIfAborted();
+      const joined = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+      return joined;
     } finally {
       clearTimeout(timer);
     }
   };
   return {
-    async getText(url: string, opts?: { timeoutMs?: number }): Promise<string> {
-      const response = await read(url, opts?.timeoutMs ?? 20_000);
-      return response.text();
+    async getText(url: string, opts?: HttpFetchOptions): Promise<string> {
+      const bytes = await readBounded(url, opts, {
+        maxBytes: DEFAULT_TEXT_MAX_BYTES, timeoutMs: 20_000,
+      });
+      return new TextDecoder().decode(bytes);
     },
-    async getBytes(url: string, opts?: { timeoutMs?: number }): Promise<Uint8Array> {
-      const response = await read(url, opts?.timeoutMs ?? 120_000);
-      return new Uint8Array(await response.arrayBuffer());
+    async getBytes(url: string, opts?: HttpFetchOptions): Promise<Uint8Array> {
+      return readBounded(url, opts, {
+        maxBytes: DEFAULT_BINARY_MAX_BYTES, timeoutMs: 120_000,
+      });
     },
   };
 }

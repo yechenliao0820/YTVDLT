@@ -771,6 +771,35 @@
     return payload;
   }
 
+  /**
+   * D-137 (F-07): the main process sends a stable CODE, never a sentence to
+   * print. An English page used to receive a hard-coded Chinese `reason` and
+   * show it verbatim; resolve the refusal in the active locale instead, and
+   * keep the raw reason only as a fallback for other failure kinds.
+   */
+  function enqueueFailureText(result) {
+    var code = (result && result.code) ? String(result.code) : '';
+    if (code === 'SITE_UNSUPPORTED') return t('queue.precheck.blocked.site');
+    if (code === 'ITEM_UNSUPPORTED') return t('queue.precheck.blocked.item');
+    return t('queue.notify.enqueueFailed', {
+      reason: (result && (result.reason || result.message)) || t('queue.notify.ipc')
+    });
+  }
+
+  /**
+   * D-137 (F-06): a NON-blocking verdict is now explained in one line appended
+   * to the success toast. Only live IPC carries `support`, so the frozen static
+   * previews never see this text and the screenshot baselines stay untouched.
+   */
+  function precheckNote(support) {
+    if (!support || support.blocks === true) return '';
+    var key = support.state === 'NO_MEDIA' ? 'queue.precheck.noMediaNotice'
+      : support.state === 'TIMEOUT' ? 'queue.precheck.timeoutNotice'
+        : (support.state === 'INDETERMINATE' || support.state === 'CANCELLED')
+          ? 'queue.precheck.indeterminateNotice' : '';
+    return key === '' ? '' : t(key);
+  }
+
   function enqueueSingleDownload(url) {
     if (enqueueing) return;
     if (!/^https?:\/\//i.test(url)) {
@@ -791,15 +820,15 @@
         return;
       }
       if (!result || result.accepted !== true || result.enqueued !== true) {
-        notify(t('queue.notify.enqueueFailed', {
-          reason: (result && (result.reason || result.message)) || t('queue.notify.ipc')
-        }));
+        notify(enqueueFailureText(result));
         return;
       }
       var field = doc.getElementById('queue-url');
       if (field !== null) field.value = '';
       if (subtitlePicker !== null) subtitlePicker.onUrlChanged('');
-      notify(t('queue.notify.enqueued', { n: Array.isArray(result.taskIds) ? result.taskIds.length : 0 }));
+      var note = precheckNote(result.support);
+      notify(t('queue.notify.enqueued', { n: Array.isArray(result.taskIds) ? result.taskIds.length : 0 })
+        + (note === '' ? '' : ' · ' + note));
       refresh();
     });
   }
