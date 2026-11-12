@@ -56,10 +56,18 @@ const coverage = readJson(join(ROOT, 'coverage', 'coverage-summary.json'));
 /**
  * 报告时间 vs 最后一次代码提交：报告更旧 → 证据是旧的。
  * 故意按「天」比较：同一天内的多次代码/文档提交不应互相报警，隔天才是信号。
+ *
+ * D-149: report JSON 里的 generatedAt 是 UTC ISO 串（带 Z），直接 slice(0,10)
+ * 取的是 UTC 日，而 codeDate（git --date=short）是本地日——本地早上 8 点前
+ * （UTC+8）跑出的证据会被误判成「昨天」而永远 STALE。先把报告时刻换算成与
+ * 提交日期同一个时区（本地）的日历日，再比「天」；解析失败回退旧的字面切片。
  */
 function staleness(reportIso) {
   if (!reportIso || !codeDate) return 'unknown';
-  const reportDay = String(reportIso).slice(0, 10);
+  const instant = new Date(String(reportIso));
+  const reportDay = Number.isNaN(instant.getTime())
+    ? String(reportIso).slice(0, 10)
+    : `${instant.getFullYear()}-${String(instant.getMonth() + 1).padStart(2, '0')}-${String(instant.getDate()).padStart(2, '0')}`;
   return reportDay < codeDate ? 'STALE（早于最后一次代码提交）' : 'fresh';
 }
 

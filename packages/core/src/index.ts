@@ -55,3 +55,5 @@ export * from './artifact-classify/index.js';
 // TXT batch import (append-only): pure line parsing, URL transport validation
 // is INJECTED so core never depends on the engine package.
 export * from './txt-import/index.js';
+// D-148 (append-only): pure frequency policy for the "Star on GitHub" prompt.
+export * from './star-prompt/index.js';

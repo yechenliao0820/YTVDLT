@@ -29,6 +29,7 @@ import { randomUUID } from 'node:crypto';
 import { PlaylistPreviewService } from './playlist-preview-service.js';
 import { SiteSupportService } from './site-support-service.js';
 import type { SiteSupportPortLike } from './m5-channels.js';
+import { createStarPromptService } from './star-prompt-service.js';
 
 export interface M5HostOptions extends M4HostOptions {
   /** OS probe (nativeTheme + registry accent); injected so tests stay offline. */
@@ -99,6 +100,12 @@ export interface M5HostOptions extends M4HostOptions {
     readonly cookiesFile?: string;
     readonly userAgent?: string;
   };
+  /**
+   * D-148: Electron `shell.openExternal`, injected by the entry file (the same
+   * wrapper the app updater already uses). Absent = the "去 Star" button still
+   * records its answer, just opens no page (unit-test builds).
+   */
+  readonly openExternal?: (url: string) => Promise<void>;
 }
 
 /**
@@ -234,6 +241,21 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     network: options.siteSupportNetwork,
   });
 
+  // D-148: the "Star on GitHub" nudge. TIMING NOTE: this runs after
+  // `createM4Host()` has awaited `config.load()` (task-host.ts), so the five
+  // `advanced.starPrompt*` keys are already the user's real stored values when
+  // `recordLaunch()` bumps the launch counter — the record happens during host
+  // assembly, i.e. before the window finishes loading, and never delays it
+  // (fire-and-forget: a failed config write must not block start-up).
+  const starPrompt = createStarPromptService({
+    config: m4.task.config,
+    clock: options.ports.clock,
+    appVersion: options.appVersion,
+    ...(options.openExternal === undefined ? {} : { openExternal: options.openExternal }),
+    ...(options.siteSupportLogger === undefined ? {} : { logger: options.siteSupportLogger }),
+  });
+  void starPrompt.recordLaunch().catch(() => undefined);
+
   const handlers = createM5Handlers({
     queue,
     taskDetail: detailPort(m4),
@@ -260,6 +282,8 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     playlistPreview,
     playlistBatch: (input) => m4.enqueuePlaylistBatchWithReport(input),
     siteSupport,
+    // D-148: assembled above (config + clock + version + injected openExternal).
+    starPrompt,
     // TXT import reuses the ENGINE's own URL whitelist (assertHttpUrl), the
     // same one `argv-builder-download.ts` calls before building argv. We do
     // not invent a site registry: whether yt-dlp supports a host is decided

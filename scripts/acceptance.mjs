@@ -454,7 +454,7 @@ const M3_TEST_FILE_MAP = {
   'argv-compliance.test.ts': ['A-4.4-26', 'A-4.6-04', 'A-4.5-04'],
   'artifact-manifest.test.ts': ['A-4.2-11', 'A-4.2-12'],
   'artifact-verifier.test.ts': ['A-4.2-11', 'A-4.2-06', 'A-4.5-07'],
-  'config-store.test.ts': ['A-4.4-01', 'A-4.4-02', 'A-4.4-03'],
+  'config-store.test.ts': ['A-4.4-01', 'A-4.4-02', 'A-4.4-03', 'A-D145', 'A-D147'],
   'download-flags.test.ts': ['A-4.2-11', 'A-4.3-06', 'A-M3-12'],
   'download-plan.test.ts': ['A-M3-10', 'A-4.2-03', 'A-4.3-01', 'A-4.4-27'],
   'electron-shell-port.test.ts': ['A-M3-12', 'A-4.6-02'],
@@ -502,7 +502,7 @@ const M3_TEST_FILE_MAP = {
   'task-view.test.ts': ['A-4.4-16'],
   'm5-channels.test.ts': ['A-M5-00', 'A-4.4-16'],
   'm5-host.test.ts': ['A-M5-00'],
-  'bootstrap.test.ts': ['A-M5-00', 'A-4.1-02'],
+  'bootstrap.test.ts': ['A-M5-00', 'A-4.1-02', 'A-D147'],
   'crash-guard.test.ts': ['A-4.5-08'],
   'platform-policy.test.ts': ['A-4.6-07'],
   // M5-4 frozen gate (D-61): one file, both frozen gates.
@@ -604,6 +604,16 @@ const M3_TEST_FILE_MAP = {
   'ipc-trust-boundary.test.ts': ['A-D137'],
   'site-support-context.test.ts': ['A-D137', 'A-TASK03'],
   'termination-confirmation.test.ts': ['A-D137', 'A-TASK02'],
+  // D-142…D-148 · 同 A-D137 的既定做法：每个新决策先补真断言 id，再把本轮
+  // 新增的测试文件登记进来，绝不硬挂到不相关的旧断言上。判定逻辑与门禁口径
+  // 未改；这些测试文件在 vitest 里真挂了或被跳过，对应断言就会红。
+  'task-queue-cancel-failure.test.ts': ['A-D142'],
+  'http-dns-pinning.test.ts': ['A-D143'],
+  'stream-tail-buffer.test.ts': ['A-D144'],
+  'node-ports-atomic-write.test.ts': ['A-D145'],
+  'star-prompt-policy.test.ts': ['A-D148'],
+  'star-prompt-ipc.test.ts': ['A-D148'],
+  'star-prompt-ui.test.ts': ['A-D148'],
 };
 
 /** Honest, separately-listed deviations (never reported as PASS assertions). */
@@ -1324,6 +1334,14 @@ const M5_ASSERTIONS = [
   // 不相关的旧断言上。状态仍由 findTestCount() 对真实 vitest 结果计数得出，
   // 判定逻辑一行未改；测试文件真挂了或被跳过，这条断言就会红。
   { id: 'A-D137', layer: 'L1', subject: '审计核实后的边界加固：出站 HTTP 逐跳策略与有界读取、IPC 调用者/导航信任、子进程终止有界确认、单链接状态本地化、预检缓存纳入网络上下文', tests: ['http-network-boundary', 'ipc-trust-boundary', 'site-support-context', 'termination-confirmation'], needs: ['vitest'], evidence: ['reports/vitest-results.json::http-network-boundary.test.ts,ipc-trust-boundary.test.ts,site-support-context.test.ts,termination-confirmation.test.ts', 'apps/desktop/src/main/adapters/http-policy.ts', 'apps/desktop/src/main/bootstrap.ts', 'docs/DECISIONS.md::D-137'] },
+  // D-142…D-148 · 同 A-D135/A-D137 的做法：每个新决策一条真断言，测试文件
+  // 登记进 M3_TEST_FILE_MAP，状态由 findTestCount() 对真实 vitest 结果计数。
+  { id: 'A-D142', layer: 'L1', subject: '取消失败不再谎报 Error：kill 失败保持 Running 占槽、restart 拒绝运行中任务、pump 不变量守卫、canceled 结算幂等、killTree 采信子进程退出态', tests: ['task-queue-cancel-failure', 'termination-confirmation'], needs: ['vitest'], evidence: ['reports/vitest-results.json::task-queue-cancel-failure.test.ts,termination-confirmation.test.ts', 'packages/core/src/task-queue/task-queue.ts', 'apps/desktop/src/main/adapters/process-streaming.ts', 'docs/DECISIONS.md::D-142'] },
+  { id: 'A-D143', layer: 'L1', subject: '出站连接钉扎到已验证解析地址：每跳解析全部地址、allowResolvedAddress 私网 fail-closed、lookup 钉扎（SNI/Host 保留原 hostname）、逐跳重解析关 TOCTOU、AbortSignal 覆盖 DNS', tests: ['http-dns-pinning', 'http-network-boundary'], needs: ['vitest'], evidence: ['reports/vitest-results.json::http-dns-pinning.test.ts,http-network-boundary.test.ts', 'apps/desktop/src/main/adapters/http-policy.ts', 'docs/DECISIONS.md::D-143'] },
+  { id: 'A-D144', layer: 'L1', subject: '下载进程输出有界尾部保留：诊断副本按字节 1 MiB 尾缓冲、截断标记恰一次在最前且中性、onChunk 实时全量不变、每分片 O(chunk)', tests: ['stream-tail-buffer', 'probe-output-limit'], needs: ['vitest'], evidence: ['reports/vitest-results.json::stream-tail-buffer.test.ts,probe-output-limit.test.ts', 'apps/desktop/src/main/adapters/process-streaming.ts', 'packages/shared/src/engine-limits.ts', 'docs/DECISIONS.md::D-144'] },
+  { id: 'A-D145', layer: 'L1', subject: '配置原子写入真替换：直接 rename 覆盖目标（Windows MoveFileEx REPLACE_EXISTING）、EPERM/EBUSY/EACCES 有界重试、rename 失败原文件完好、tmp 清理', tests: ['node-ports-atomic-write', 'config-store'], needs: ['vitest'], evidence: ['reports/vitest-results.json::node-ports-atomic-write.test.ts,config-store.test.ts', 'apps/desktop/src/main/adapters/node-ports.ts', 'docs/DECISIONS.md::D-145'] },
+  { id: 'A-D147', layer: 'L1', subject: '首次启动跟随系统语言并立即持久化：空串哨兵 → resolveStartupLanguage 检测一次（zh* → zh-CN，否则 en）→ SETTINGS_SET 写回，之后永不重检测、手动切换永远优先', tests: ['bootstrap', 'config-store'], needs: ['vitest'], evidence: ['reports/vitest-results.json::bootstrap.test.ts,config-store.test.ts', 'apps/desktop/src/main/bootstrap.ts', 'packages/core/src/config-store/defaults.ts', 'docs/DECISIONS.md::D-147'] },
+  { id: 'A-D148', layer: 'L1', subject: '「去 Star」引导：同版本第 3 次启动才问、每版本 ≤2 次、later 后 7 天间隔、star/never 永久安静、升级重置；CHECK 零 payload、ACTION 只收枚举、URL 只在主进程；live-only 动态弹窗不进基线', tests: ['star-prompt-policy', 'star-prompt-ipc', 'star-prompt-ui'], needs: ['vitest'], evidence: ['reports/vitest-results.json::star-prompt-policy.test.ts,star-prompt-ipc.test.ts,star-prompt-ui.test.ts', 'packages/core/src/star-prompt/policy.ts', 'apps/desktop/src/main/star-prompt-service.ts', 'docs/DECISIONS.md::D-148'] },
 ];
 
 /** M5 e2e cases that must exist and pass for the visual assertions. */

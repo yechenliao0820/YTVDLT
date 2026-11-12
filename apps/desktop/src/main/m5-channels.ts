@@ -24,7 +24,7 @@ import type {
   SupportedSitesDto, UrlSupportCheckDto,
 } from '@ytvdlt/shared';
 import {
-  ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES,
+  ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES, STAR_PROMPT_ACTIONS,
   buildTaskListSnapshot, classifyFailure, maskUrlSecrets, mergeSubtitleChoice,
   normalizeHexColor, normalizeLanguageCode, normalizeThemeMode, normalizeMotionMode, parseAccent,
   type SubtitleChoice,
@@ -46,6 +46,7 @@ import {
 } from './playlist-preview-service.js';
 import type { PlaylistBatchReport, PlaylistEnqueueInput } from './m4-host.js';
 import { blockedEntriesByUrl, precheckBatch } from './site-precheck-gate.js';
+import type { StarPromptPort } from './star-prompt-service.js';
 
 /** Minimal slice of the queue this layer needs (tests inject a fake). */
 export interface TaskListPort {
@@ -286,6 +287,12 @@ export interface M5ChannelDeps {
    * silent "supported".
    */
   readonly siteSupport?: SiteSupportPortLike;
+  /**
+   * D-148: the "Star on GitHub" nudge. Absent = CHECK answers `show: false`
+   * and ACTION reports `STAR_PROMPT_UNAVAILABLE` — the renderer must never see
+   * a fabricated "you may show" from a build without the service.
+   */
+  readonly starPrompt?: StarPromptPort;
 }
 
 /** D-114: what `APP_INFO` answers. `version` is `''` when it is unknown. */
@@ -456,6 +463,11 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   // selection, an extractor name — none of them are the renderer's to choose.
   [IPC_CHANNELS.SUPPORTED_SITES]: ['refresh'],
   [IPC_CHANNELS.URL_SUPPORT_CHECK]: ['url', 'refresh'],
+  // D-148: CHECK takes NOTHING (same zero-input rule as APP_INFO) so the page
+  // cannot forge a frequency decision; ACTION takes ONLY the action enum —
+  // never a URL (the repo page is resolved inside the main process).
+  [IPC_CHANNELS.STAR_PROMPT_CHECK]: [],
+  [IPC_CHANNELS.STAR_PROMPT_ACTION]: ['action'],
 };
 
 /** Opaque, main-process-issued import ticket. */
@@ -1582,6 +1594,31 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     };
   });
 
+  // D-148 (A): "may the Star prompt show now?" — a zero-payload read (same
+  // rule as APP_INFO). The whole frequency decision (launch count, per-version
+  // cap, 7-day retry gap, permanent silence) lives behind the port; the
+  // renderer only receives a boolean and can never inflate its own state.
+  handlers.set(IPC_CHANNELS.STAR_PROMPT_CHECK, async (payload): Promise<{ show: boolean }> => {
+    validateM5Payload(IPC_CHANNELS.STAR_PROMPT_CHECK, payload);
+    const port = deps.starPrompt;
+    if (port === undefined) return { show: false };
+    return port.check();
+  });
+
+  // D-148 (B): the user's answer. One validated enum, nothing else — the
+  // repository URL is a main-process constant, so the renderer has no way to
+  // point `shell.openExternal` anywhere else (D-98 spirit).
+  handlers.set(IPC_CHANNELS.STAR_PROMPT_ACTION, async (payload) => {
+    const record = validateM5Payload(IPC_CHANNELS.STAR_PROMPT_ACTION, payload);
+    const action = record['action'];
+    if (typeof action !== 'string' || !STAR_PROMPT_ACTIONS.includes(action as never)) {
+      throw new Error('[m5-ipc] unknown star prompt action');
+    }
+    const port = deps.starPrompt;
+    if (port === undefined) return { ok: false, action, code: 'STAR_PROMPT_UNAVAILABLE' };
+    return port.applyAction(action);
+  });
+
   handlers.set(IPC_CHANNELS.SETTINGS_GET, async (payload) => {
     validateM5Payload(IPC_CHANNELS.SETTINGS_GET, payload);
     return readAppearance(deps);
@@ -1671,4 +1708,7 @@ export const M5_CHANNELS: readonly string[] = [
   // D-134 (append-only): supported-site discovery + per-url pre-check.
   IPC_CHANNELS.SUPPORTED_SITES,
   IPC_CHANNELS.URL_SUPPORT_CHECK,
+  // D-148 (append-only): the "Star on GitHub" nudge.
+  IPC_CHANNELS.STAR_PROMPT_CHECK,
+  IPC_CHANNELS.STAR_PROMPT_ACTION,
 ];

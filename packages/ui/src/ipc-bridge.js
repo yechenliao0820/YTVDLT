@@ -37,7 +37,13 @@
     // D-139 (append-only): command templates. The settings page calls the wire
     // strings directly today; §5 requires all three cable tables to agree so a
     // future caller is never rejected with `command-not-allowed`.
-    'TEMPLATE_LIST', 'TEMPLATE_SAVE', 'TEMPLATE_DELETE'
+    'TEMPLATE_LIST', 'TEMPLATE_SAVE', 'TEMPLATE_DELETE',
+    // D-148 (append-only): the "Star on GitHub" nudge. §5 requires all THREE
+    // cable tables to agree; the prompt lives on the queue page today, but
+    // registering the names here keeps a future renderer caller from being
+    // silently rejected with `command-not-allowed` (the classic "click does
+    // nothing" failure).
+    'STAR_PROMPT_CHECK', 'STAR_PROMPT_ACTION'
   ];
 
   function bridge() {
@@ -84,7 +90,10 @@
     // D-139: exact wire strings from shared/src/ipc.ts (append-only).
     TEMPLATE_LIST: 'ytvdlt:template:list',
     TEMPLATE_SAVE: 'ytvdlt:template:save',
-    TEMPLATE_DELETE: 'ytvdlt:template:delete'
+    TEMPLATE_DELETE: 'ytvdlt:template:delete',
+    // D-148: exact wire strings from shared/src/ipc.ts (append-only).
+    STAR_PROMPT_CHECK: 'ytvdlt:starPrompt:check',
+    STAR_PROMPT_ACTION: 'ytvdlt:starPrompt:action'
   };
 
   /** Whitelisted, synchronous-safe command dispatch. Never builds a command. */

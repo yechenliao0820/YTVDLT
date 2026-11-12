@@ -51,7 +51,15 @@ export const DEFAULT_DOMAINS: Readonly<Record<ConfigDomainName, Record<string, u
   general: {
     concurrency: 3,
     theme: 'system',
-    language: 'zh-CN',
+    // D-147: `''` is the factory sentinel "language not determined yet". On the
+    // FIRST start-up the main process detects once from the OS locale
+    // (`resolveStartupLanguage`, bootstrap.ts) and immediately writes the
+    // concrete value back through the normal SETTINGS_SET path. From then on
+    // the stored value is never re-detected and never reset, so a manual switch
+    // always wins and survives restarts. The empty string exists only between
+    // config creation and that first write-back; every reader falls back to
+    // zh-CN until then.
+    language: '',
     privateMode: false,
     disablePreview: false,
   },
@@ -114,6 +122,20 @@ export const DEFAULT_DOMAINS: Readonly<Record<ConfigDomainName, Record<string, u
     downloadSections: null,
     splitChapters: false,
     customTitle: null,
+    // D-148 (append-only): "Star on GitHub" prompt bookkeeping. Five flat keys,
+    // same shape as `skippedAppVersion` above: plain values the main process
+    // reads/writes through `advanced.*` (no Settings-page toggle by design —
+    // the dialog's "不再提醒" button is the only opt-out the owner asked for).
+    //   starPromptVersion        app version the counters belong to
+    //   starPromptLaunches       1-based launch counter for that version
+    //   starPromptPromptedCount  prompts already shown for that version (max 2)
+    //   starPromptLastPromptedAt ISO timestamp of the last "later" answer
+    //   starPromptNever          permanent silence ("去 Star" / "不再提醒")
+    starPromptVersion: '',
+    starPromptLaunches: 0,
+    starPromptPromptedCount: 0,
+    starPromptLastPromptedAt: '',
+    starPromptNever: false,
   },
   saved_links: { items: [] },
 };

@@ -10,7 +10,7 @@ import { IPC_CHANNELS } from '@ytvdlt/shared';
 import type { M5Host } from '../../apps/desktop/src/main/m5-host.js';
 import type { IpcGateway } from '../../apps/desktop/src/main/ipc-gateway.js';
 import {
-  bootstrap, deepLinkFromArgv, pageUrlWithPrefill,
+  bootstrap, deepLinkFromArgv, pageUrlWithPrefill, resolveStartupLanguage,
   type BrowserWindowLike, type BrowserWindowOptionsLike, type ElectronLike,
   type MenuItemLike, type TrayLike,
 } from '../../apps/desktop/src/main/bootstrap.js';
@@ -38,7 +38,14 @@ interface Harness {
   };
 }
 
-function fakeElectron(options: { lock?: boolean; theme?: 'dark' | 'light' } = {}): Harness {
+function fakeElectron(options: {
+  lock?: boolean;
+  theme?: 'dark' | 'light';
+  /** D-147: `app.getLocale()`; absent = the fake has no locale (old shape). */
+  locale?: string;
+  /** D-147: shared timeline so tests can prove write-back happens before loadURL. */
+  trace?: string[];
+} = {}): Harness {
   const log: Harness['log'] = {
     quit: 0, handlers: [], windows: [], urls: [], trayToolTip: [], trayMenus: [],
     appEvents: new Map(), windowEvents: new Map(), shown: 0, focused: 0, destroyed: 0, trayDestroyed: 0,
@@ -52,7 +59,10 @@ function fakeElectron(options: { lock?: boolean; theme?: 'dark' | 'light' } = {}
       const events = new Map<string, () => void>();
       log.windowEvents = events;
       this.webContents = {
-        loadURL: async (url: string) => { log.urls.push(url); },
+        loadURL: async (url: string) => {
+          log.urls.push(url);
+          options.trace?.push('loadURL');
+        },
         on: (event: string, listener: () => void) => { events.set(`wc:${event}`, listener); },
         setWindowOpenHandler: (
           handler: (details: { readonly url: string }) => { readonly action: 'deny' },
@@ -83,6 +93,7 @@ function fakeElectron(options: { lock?: boolean; theme?: 'dark' | 'light' } = {}
       requestSingleInstanceLock: () => options.lock !== false,
       getVersion: () => '0.1.0',
       getPath: () => 'C:/Users/test/AppData/Roaming',
+      ...(options.locale === undefined ? {} : { getLocale: () => options.locale ?? '' }),
       isPackaged: false,
     },
     ipcMain: {
@@ -124,6 +135,65 @@ function fakeHost(): { host: M5Host; dispose: ReturnType<typeof vi.fn> } {
   return {
     host: { gateway, dispose, channels: [], appearance: async () => ({}) } as unknown as M5Host,
     dispose,
+  };
+}
+
+/**
+ * D-147: a host whose config port carries a real, mutable `general.language`
+ * and whose gateway MIRRORS the real SETTINGS_SET handler (validate + persist).
+ * Every `gateway.dispatch` is recorded — both for the write assertions and for
+ * the shared `trace`, which proves the write-back lands BEFORE the first
+ * loadURL. `appearance()` mirrors `readAppearance`'s normalization
+ * (anything not starting with "en" reads back as zh-CN).
+ */
+function fakeHostWithConfig(
+  initialLanguage: string,
+  trace: string[] = [],
+): {
+  host: M5Host;
+  dispatches: { channel: string; payload: unknown }[];
+  state: { language: string };
+} {
+  const state = { language: initialLanguage };
+  const dispatches: { channel: string; payload: unknown }[] = [];
+  const gateway: IpcGateway = {
+    handlers: new Map([
+      [IPC_CHANNELS.PROBE, async () => ({ ok: true })],
+      [IPC_CHANNELS.TASK_LIST, async () => ({ items: [] })],
+      [IPC_CHANNELS.SETTINGS_GET, async () => ({ language: state.language === 'en' ? 'en' : 'zh-CN' })],
+    ]),
+    async dispatch(channel: string, payload: unknown) {
+      dispatches.push({ channel, payload });
+      trace.push(channel);
+      if (channel === IPC_CHANNELS.SETTINGS_SET) {
+        const record = (payload ?? {}) as Record<string, unknown>;
+        if (record['language'] !== undefined) {
+          if (record['language'] !== 'zh-CN' && record['language'] !== 'en') {
+            throw new Error('[m5-ipc] invalid language');
+          }
+          state.language = record['language'];
+        }
+        return { language: state.language };
+      }
+      return null;
+    },
+    registerAll(registrar) {
+      for (const [channel, handler] of this.handlers) registrar.register(channel, handler);
+    },
+  };
+  const config = {
+    get: (_domain: string, key: string): unknown => (key === 'language' ? state.language : undefined),
+  };
+  return {
+    host: {
+      gateway,
+      dispose: vi.fn(),
+      channels: [],
+      appearance: async () => ({ language: state.language === 'en' ? 'en' : 'zh-CN' }),
+      m4: { task: { config } },
+    } as unknown as M5Host,
+    dispatches,
+    state,
   };
 }
 
@@ -318,6 +388,106 @@ describe('bootstrap · IPC trust boundary (D-137)', () => {
     // The renderer may not open a window that inherits the preload bridge.
     expect(log.windowOpenHandler).not.toBeNull();
     expect(log.windowOpenHandler?.({ url: 'https://evil.test/' })).toEqual({ action: 'deny' });
+    handle?.dispose();
+  });
+});
+
+describe('bootstrap · 首次启动语言检测（D-147）', () => {
+  it('resolveStartupLanguage: the "" sentinel follows the OS locale', () => {
+    expect(resolveStartupLanguage('', 'zh-CN')).toBe('zh-CN');
+    expect(resolveStartupLanguage('', 'zh-TW')).toBe('zh-CN');
+    expect(resolveStartupLanguage('', 'zh')).toBe('zh-CN');
+    expect(resolveStartupLanguage('', 'en-US')).toBe('en');
+    expect(resolveStartupLanguage('', 'fr-FR')).toBe('en');
+  });
+
+  it('resolveStartupLanguage: a concrete configured value wins over the OS locale', () => {
+    expect(resolveStartupLanguage('zh-CN', 'en-US')).toBe('zh-CN');
+    expect(resolveStartupLanguage('zh-CN', 'zh-HK')).toBe('zh-CN');
+    expect(resolveStartupLanguage('en', 'zh-CN')).toBe('en');
+    expect(resolveStartupLanguage('en', 'fr-FR')).toBe('en');
+  });
+
+  it('resolveStartupLanguage: unrecognized values, zh script/underscore forms, empty OS locale', () => {
+    // An unrecognized stored value is probed like the '' sentinel, so a
+    // hand-edited config cannot brick the choice.
+    expect(resolveStartupLanguage('fr', 'zh-Hans')).toBe('zh-CN');
+    expect(resolveStartupLanguage('fr', 'zh_Hant')).toBe('zh-CN');
+    expect(resolveStartupLanguage('fr', 'en-US')).toBe('en');
+    // Script / underscore variants all count as Chinese.
+    expect(resolveStartupLanguage('', 'zh-Hans')).toBe('zh-CN');
+    expect(resolveStartupLanguage('', 'zh_Hant')).toBe('zh-CN');
+    // No OS locale at all resolves to the non-Chinese default (English).
+    expect(resolveStartupLanguage('', '')).toBe('en');
+  });
+
+  it('first launch on a Chinese system: detect -> persist -> load with the detected language', async () => {
+    const trace: string[] = [];
+    const { electron, log } = fakeElectron({ locale: 'zh-CN', trace });
+    const { host, dispatches, state } = fakeHostWithConfig('', trace);
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
+    // Exactly one write, through the SAME SETTINGS_SET channel the settings
+    // page uses, carrying the detected value.
+    expect(dispatches).toEqual([
+      { channel: IPC_CHANNELS.SETTINGS_SET, payload: { language: 'zh-CN' } },
+    ]);
+    expect(state.language).toBe('zh-CN');
+    // The write-back is awaited BEFORE the first loadURL.
+    expect(trace).toEqual([IPC_CHANNELS.SETTINGS_SET, 'loadURL']);
+    // zh-CN pins no ?lang= (D-85 URL assertions stay byte-identical).
+    expect(log.urls[0]).toBe('file:///app/pages/queue/index.html');
+    // The native menu follows the detected language immediately.
+    expect((log.appMenu as readonly { label?: string }[]).map((item) => item.label))
+      .toEqual(['文件(&F)', '编辑(&E)', '视图(&V)', '窗口(&W)', '设置(&S)']);
+    handle?.dispose();
+  });
+
+  it('first launch on a non-Chinese system: English, persisted and pinned via ?lang=', async () => {
+    const trace: string[] = [];
+    const { electron, log } = fakeElectron({ locale: 'en-US', trace });
+    const { host, dispatches, state } = fakeHostWithConfig('', trace);
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
+    expect(dispatches).toEqual([
+      { channel: IPC_CHANNELS.SETTINGS_SET, payload: { language: 'en' } },
+    ]);
+    expect(state.language).toBe('en');
+    expect(trace).toEqual([IPC_CHANNELS.SETTINGS_SET, 'loadURL']);
+    expect(log.urls[0]).toBe('file:///app/pages/queue/index.html?lang=en');
+    expect((log.appMenu as readonly { label?: string }[]).map((item) => item.label))
+      .toEqual(['File(&F)', 'Edit(&E)', 'View(&V)', 'Window(&W)', 'Settings(&S)']);
+    handle?.dispose();
+  });
+
+  it('second launch: the persisted language is never re-detected nor rewritten', async () => {
+    // OS locale is English on purpose — the stored zh-CN must survive untouched.
+    const trace: string[] = [];
+    const { electron, log } = fakeElectron({ locale: 'en-US', trace });
+    const { host, dispatches, state } = fakeHostWithConfig('zh-CN', trace);
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
+    expect(dispatches).toEqual([]);
+    expect(state.language).toBe('zh-CN');
+    expect(log.urls[0]).toBe('file:///app/pages/queue/index.html');
+    handle?.dispose();
+  });
+
+  it('second launch: a persisted English choice keeps ?lang= without a write', async () => {
+    const { electron, log } = fakeElectron({ locale: 'zh-CN' });
+    const { host, dispatches, state } = fakeHostWithConfig('en');
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
+    expect(dispatches).toEqual([]);
+    expect(state.language).toBe('en');
+    expect(log.urls[0]).toBe('file:///app/pages/queue/index.html?lang=en');
+    handle?.dispose();
+  });
+
+  it('a non-empty unrecognized stored value is left alone (no detection write)', async () => {
+    const { electron, log } = fakeElectron({ locale: 'zh-CN' });
+    const { host, dispatches, state } = fakeHostWithConfig('fr');
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
+    expect(dispatches).toEqual([]);
+    expect(state.language).toBe('fr');
+    // The D-85 appearance fallback still governs such hosts: zh-CN pins no ?lang=.
+    expect(log.urls[0]).toBe('file:///app/pages/queue/index.html');
     handle?.dispose();
   });
 });

@@ -1611,3 +1611,33 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 决策 | ① `availability(model)` 改为 `availability(model, liveMode)`，与 `queue.js::actionsFor` 完全同构的双分支：live 分支 `cancel: Running \|\| Queued`（对齐 D-76）；静态 fixture 分支保留旧规则（语义上 `Running \|\| ReadyWithInfo \|\| FetchingInfo` ≡ 新静态分支 `running \|\| ReadyWithInfo`），`file://` 截图基线逐字节不变。② 三个调用点（`emit()` 的 accepted、`paint()` 的 enabled 与逐按钮 `aria-disabled`）全部带 `live`。③ **后端零改动**：`TaskQueue` / `queue.js` / 任何 `index.html` 未触碰。④「解析中也能取消」**刻意不做**：须先给 probe 设计进程取消接口（句柄登记 + 取消后的结算语义 + `FetchingInfo → Canceled` 是否对照 13 条合法迁移矩阵新增合法边），不允许只开按钮没有能力。 |
 | 验证 | `tests/unit/task-detail-live-fixture.test.ts` 并入 5 项断言（live 下 `FetchingInfo`/`ReadyWithInfo` 取消禁用且点击不派发 `TASK_ACTION`、`Running`/`Queued` 可用、`availability` 契约两分支各四态直测、SAMPLE 双分支同为禁用），8/8 通过；task-detail / task-detail-folder / queue-live-fixture / task-queue-cancel-failure 共 30 项通过；e2e 31/31 + 反例 5/5 全绿、detail 系列 case 像素 0 差异（基线零改动的实证）；另用最小 DOM 沙箱实测静态渲染七按钮 `aria-disabled` 与旧规则逐项一致。全量 1871 项 0 failed。 |
 | 未覆盖 | ① 「解析中取消」是下一轮后端工程：probe 子进程接进 `cancel()` 句柄表（D-133 的有界元数据子进程已有 `killTree()` 通道，坑 21/23），缺句柄登记、取消结算语义与合法迁移边核对；② 两页按钮各依赖 1.2 s 轮询，跨页切换瞬间状态可能短暂不同步（既有机制，未改）；③ 未发版：与 D-140~D-142 同批，等下一次打包一并带出。 |
+
+## D-147 · 2026-11-13 · 首次启动跟随系统语言并立即持久化（业主需求）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主要求：软件装完后首次启动，系统是简体/繁体中文就默认中文界面，否则默认英文；且结果必须持久——不能关掉再开就回跳默认。原实现出厂 `general.language` 固定 `'zh-CN'`，任何系统的首次启动都是中文界面，英文系统用户必须自己进设置切换。 |
+| 根因 | M1 起出厂值写死为 `'zh-CN'`，D-85 启动路径只读该值钉 `?lang=`、从不观察系统 locale；配置值恒非空，渲染层 `i18n.js` 的 `en*/zh*` 归一化无从触发。 |
+| 决策 | ① `general.language` 出厂值改为空串哨兵「尚未确定」（defaults.ts，D-147 注释；既有安装不受影响——它们已有具体值）。② 首次启动（`whenReady()` 后、第一次 `loadURL` 前）用纯函数 `resolveStartupLanguage('', app.getLocale())`（bootstrap.ts，导出供单测）检测一次：小写化后以 `zh` 开头的 locale（zh-CN/zh-TW/zh-HK/zh-Hans/zh_Hant）→ `'zh-CN'`，否则 → `'en'`。③ 检测结果**立即经与设置页相同的 `SETTINGS_SET` 通道 await 写回**（同一校验+持久化路径，不另起炉灶），随后 `menuLocale`/`?lang=`/菜单/托盘自然跟随。④ 哨兵写回后永久消失：之后每次启动读到具体值即不再检测、不再重写；写回失败不阻断启动（当次会话仍用检测值，哨兵保留下次重试）。⑤ `withLocale` 本体不改——zh-CN 不钉 `?lang=` 参数，静态 URL 断言逐字节不变；`readRawLanguage` 走 config 端口读原始值（`readAppearance` 会把 `''` 归一化成 zh-CN，哨兵只能从端口观察）。 |
+| 验证 | `resolveStartupLanguage` 全矩阵单测（`''`+zh-CN/zh-TW/zh/zh-Hans/zh_Hant/en-US/fr-FR/空 locale；`'zh-CN'`/`'en'` 直接短路；未认识值回落）；假端口时序测试证明「中文系统→SETTINGS_SET 写回 zh-CN→URL 无 `?lang=`→中文菜单」「英文系统→写回 en→`?lang=en`→英文菜单」「第二次启动已有值→零 dispatch 零重写」「手改未认识值 `'fr'` 不重写」；config-store 出厂哨兵测试；全量 135 文件 / 1917 项 0 failed；e2e 31/31 + 反例 5/5、像素 0 差异；tsc 5 包全过；`check-layering` 0 违规、`frozen-gate` PASS。 |
+| 未覆盖 | ① 繁体系统（zh-TW/zh_Hant）会选中 `'zh-CN'` 并显示**简体**文案——界面字典仅简中+英两套，业主需求「简体/繁体→中文界面」按「中文界面」落地即此行为；要繁体字典须业主点名（全量翻译 + i18n 键一致性工程）。② 真实多语言 Windows（显示语言 vs 区域格式不一致、企业 MUI 包）真机未实测，仅按 Electron 文档保证 `app.getLocale()` 在 ready 后可靠。③ portable 版只读目录写回失败仅逻辑层降级测试（写失败→哨兵保留下次重试），未做真机验证。 |
+
+## D-148 · 2026-11-13 · 「去 Star」引导：按版本最多两次、可永久安静（业主需求）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主要求：像常见软件一样向用户推送「觉得这个版本怎么样？喜欢的话去 GitHub 给个 Star」，但**推送不要太频繁，每个版本 1~2 次就行**。 |
+| 根因 | 无既有引导机制。两个设计红线：频率状态若由渲染层自持则页面可伪造；仓库 URL 若由渲染层传入即违反 D-98 的「主进程之外不构造外链」精神——因此策略与状态都必须在主进程，渲染层只拿「该不该问」和一个动作枚举。 |
+| 决策 | ① 频率策略纯函数化进 core（`star-prompt/policy.ts`，时间全部注入）：同版本**第 3 次启动**才可问（装完/升级后先安静两次）、每版本**最多 2 次**、「以后再说」后同版本内**间隔 7 天**才允许第二次、`star`/`never` **永久安静且跨版本保留**、应用升级到新版本计数重置（「以后再说」过的用户新版本仍会被问，符合「每版本 1~2 次」）。② 状态存 `advanced.starPrompt*` 五个扁平键（主进程独占读写，风格对齐 `skippedAppVersion`）。③ IPC 两通道 append-only：`STAR_PROMPT_CHECK` **零 payload**（对齐 `APP_INFO` 只读规则）、`STAR_PROMPT_ACTION` 只收 `{action: 'star'\|'later'\|'never'}` 且进 `PAYLOAD_KEYS` 白名单（枚举越界拒收）；`star` 由主进程 `openExternal` 打开仓库常量 `https://github.com/yechenliao0820/YTVDLT`——**渲染层绝不传 URL**。三张 IPC 表同步登记（坑 29）。④ 渲染层三道闸门：定时器只由**首个真实 `TASK_LIST` 回复**武装（D-141：绝不在假数据上布防）、加载后 45 s 且当时**无 Running/FetchingInfo 任务**（忙则 60 s 重试至空闲，不放弃本次会话）、**每会话恰一次 CHECK**；背景点击按 `'later'` 记账（保证「每版本最多 2 次」诚实）。⑤ UI 为 live-only 动态 `createElement` 弹窗（D-139 模式，挂 body 用完移除）——`index.html` 与截图基线零改动；三按钮 i18n 两字典同键（`starPrompt.*`）。 |
+| 验证 | 37 个新单测：策略全路径（假时钟：常量钉住、版本切换重置、第 3 次才可弹、上限 2、T+6d23h 拒 / T+7d 许、never 跨版本永久安静、later 后再弹、star/never 终止、手改 config 容错）；通道层（CHECK 零 payload 白名单、ACTION 枚举拒收、`{action:'star',url:…}` 被拒、无服务时 show:false）；三张 IPC 表一致性；createM5Host 组装级 dispatch；真 queue.js 动态注入（双语文案、三按钮、无 URL、弹后移除节点、静态预览零定时器零 DOM、Running 时不打扰）。全量 135 文件 / 1917 项 0 failed；e2e 31/31 + 反例 5/5、像素 0 差异；tsc 5 包全过；`check-layering` 0 违规、`frozen-gate` PASS。 |
+| 未覆盖 | ① 真实 7 天跨度行为仅经假时钟单测验证，未做真实时间观测；② **无遥测**——不追踪用户是否真的点了 Star（`shell.openExternal` 结果仅记日志），「去 Star」后永久安静是产品决策不是检测；③ Electron 真机路径（真实 shell、打包窗口）未实跑，与既有 entry 层缺口一致；④ 弹窗只挂队列页——用户停在设置/详情页跨过 45 s 窗口则本次会话不弹（预算留给下次启动）；⑤ 业主若将来要设置页开关，加 `advanced.starPromptEnabled` 走 `autoCheckAppUpdate` 同一 advancedPatch 循环即可（已预留路径，未实现）。 |
+
+## D-149 · 2026-11-13 · handoff-check 时区误报 STALE 修复 + 验收断言补登记（D-142…D-148）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 两轮维护后重跑 `handoff-check.mjs`：① e2e-summary 明明比最后一次代码提交**新**（07:25 vs 06:41）却被判 `STALE`；② `acceptance.mjs --milestone M5` 的 `M5-GATE-file-coverage` 门 FAIL，7 个两轮新增的测试文件未映射到任何验收断言（D-142 的测试文件也在其中——上轮验收跑在该文件创建之前，问题当时已存在未暴露）。 |
+| 根因 | ① `staleness()` 把报告的 UTC ISO 串 `slice(0,10)` 取 **UTC 日**，与 `git --date=short` 给出的**本地日**做字典序比较——本地（UTC+8）早上 8 点前的证据永远落在「昨天」，被误判过期。「按天比较、同日不报警」的设计原意被时区错位破坏。② 既有既定做法（A-D135/A-D137 注释写明）：每个新决策先补真断言 id、再把测试文件登记进 `M3_TEST_FILE_MAP`；两轮实现时只加了测试没跑验收，映射与断言欠账。 |
+| 决策 | ① `handoff-check.mjs::staleness()`：先把报告时刻 `new Date()` 换算成与提交日期同一时区（本地）的日历日再比「天」，解析失败回退旧的字面切片；「同日不报警」的原意保留。② `acceptance.mjs`：按既定模式补 6 条真断言 `A-D142` / `A-D143` / `A-D144` / `A-D145` / `A-D147` / `A-D148`（subject/evidence 对应各 DECISIONS 条目与产物文件），7 个测试文件登记进 `M3_TEST_FILE_MAP`（`bootstrap.test.ts` / `config-store.test.ts` **合并进既有键**而非重复键——对象字面量后键会静默覆盖 `A-4.4-01…03` / `A-M5-00` / `A-4.1-02` 旧映射）。判定逻辑一行未改。 |
+| 验证 | 重跑 `acceptance.mjs --milestone M5`：file-coverage 门转 PASS、新断言全 PASS（findTestCount 对真实 vitest 结果计数）、allGreen 恢复 true；重跑 e2e 31/31 + 反例 5/5；`handoff-check.mjs` 全部 fresh、决策编号推进正常。 |
+| 未覆盖 | ① `staleness` 的换算假定单机固定时区；跨时区迁移机器的场景未测（按天比较的粒度下无实际影响）；② 断言数量从 28 → 34 属既有机制的正常生长，`handoff-check` 对数字是动态读取、无硬编码。 |

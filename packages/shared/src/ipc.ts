@@ -88,6 +88,15 @@ export const IPC_CHANNELS = {
   // a "list" channel.
   SUPPORTED_SITES: 'ytvdlt:sites:list',
   URL_SUPPORT_CHECK: 'ytvdlt:sites:check',
+  // D-148 (append-only): the "Star on GitHub" nudge. Two channels on purpose:
+  //   CHECK  takes NO payload (same zero-input rule as APP_INFO) — the renderer
+  //          can only ask "may the prompt show now?", the frequency decision
+  //          and the state live in the main process;
+  //   ACTION takes ONLY the action enum. The renderer never names a URL: the
+  //          repository page is resolved and opened inside the main process
+  //          (D-98 spirit — the page is not trusted with link construction).
+  STAR_PROMPT_CHECK: 'ytvdlt:starPrompt:check',
+  STAR_PROMPT_ACTION: 'ytvdlt:starPrompt:action',
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

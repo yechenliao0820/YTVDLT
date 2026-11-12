@@ -325,6 +325,13 @@
       'update.error': '更新失败：{reason}',
       'update.manual': '该版本未提供安装包，请前往发布页手动下载。',
 
+      // D-148：GitHub Star 引导弹窗（仅 live 模式动态注入，queue 页挂载）
+      'starPrompt.title': '觉得这个版本怎么样？',
+      'starPrompt.body': '如果 YTVDLT 对你有用，去 GitHub 给个 Star 吧——这是对独立开发最直接的支持。',
+      'starPrompt.star': '去 Star',
+      'starPrompt.later': '以后再说',
+      'starPrompt.never': '不再提醒',
+
       'task.state.Idle': '空闲',
       'task.state.FetchingInfo': '解析中',
       'task.state.ReadyWithInfo': '待下载',
@@ -901,6 +908,13 @@
       'update.ready': 'Downloaded and verified. Click “Install now”.',
       'update.error': 'Update failed: {reason}',
       'update.manual': 'This release ships no installer; use the release page.',
+
+      // D-148: the "Star on GitHub" prompt (live-only dynamic dialog, queue page)
+      'starPrompt.title': 'How is this version treating you?',
+      'starPrompt.body': 'If YTVDLT is useful to you, a Star on GitHub is the best support an independent developer can get.',
+      'starPrompt.star': 'Star on GitHub',
+      'starPrompt.later': 'Maybe later',
+      'starPrompt.never': "Don't ask again",
 
       'task.state.Idle': 'Idle',
       'task.state.FetchingInfo': 'Fetching info',

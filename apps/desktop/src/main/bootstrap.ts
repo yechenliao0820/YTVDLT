@@ -19,6 +19,7 @@
  */
 import { IPC_CHANNELS } from '@ytvdlt/shared';
 import type { M5Host } from './m5-host.js';
+import type { M4Host } from './m4-host.js';
 import { buildTrayMenu, trayTooltip, shouldHideToTray, canQuit, type TrayStats } from './tray.js';
 import { buildAppMenu } from './app-menu.js';
 
@@ -91,6 +92,13 @@ export interface ElectronLike {
     requestSingleInstanceLock(): boolean;
     getVersion(): string;
     getPath(name: string): string;
+    /**
+     * D-147: OS locale for the one-time first-launch language detection.
+     * Optional so the existing unit-test fake stays valid; the real Electron
+     * app always has it, and it is reliable after `whenReady()` (the only
+     * place `bootstrap` reads it).
+     */
+    getLocale?(): string;
     readonly isPackaged: boolean;
   };
   readonly ipcMain: {
@@ -289,6 +297,45 @@ export function withLocale(pageUrl: string, locale: 'zh-CN' | 'en'): string {
   return `${pageUrl}${separator}lang=en`;
 }
 
+/**
+ * D-147: the FIRST launch must follow the OS language, and the result must be
+ * persisted immediately (see the wiring in `bootstrap`). Pure, so the whole
+ * matrix is unit-testable without an Electron binary (D-39).
+ *
+ * `configured` is the stored `general.language`; `systemLocale` is
+ * `app.getLocale()`. A concrete configured value always wins — `''` is the
+ * factory sentinel "not determined yet" (defaults.ts), and any other
+ * unrecognized string is probed the same way so a hand-edited value cannot
+ * brick the choice. Every locale that lowercases to a `zh` prefix — zh-CN,
+ * zh-TW, zh-HK, zh-Hans, zh_Hant — counts as Chinese; everything else (no OS
+ * locale included) resolves to English, the only other shipped UI language.
+ */
+export function resolveStartupLanguage(configured: string, systemLocale: string): 'zh-CN' | 'en' {
+  if (configured === 'en') return 'en';
+  if (configured === 'zh-CN') return 'zh-CN';
+  return systemLocale.trim().toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
+}
+
+/**
+ * D-147: the raw, UNNORMALIZED `general.language`. `readAppearance`
+ * (m5-channels.ts) maps the `''` sentinel to `'zh-CN'`, so the
+ * not-yet-determined state is only observable through the config port itself
+ * (`host.m4.task.config`). Returns `'zh-CN'` — the pre-D-147 fallback — when
+ * the port is unreachable (unit-test fakes without `m4`) or the stored value
+ * is not a string, so those hosts keep the plain D-85 behaviour instead of
+ * triggering a detection write.
+ */
+function readRawLanguage(host: M5Host): string {
+  const config = (host as { m4?: M4Host }).m4?.task?.config;
+  if (config === undefined) return 'zh-CN';
+  try {
+    const value: unknown = config.get('general', 'language');
+    return typeof value === 'string' ? value : 'zh-CN';
+  } catch {
+    return 'zh-CN';
+  }
+}
+
 export function deepLinkFromArgv(argv: readonly string[]): string | null {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = String(argv[index]);
@@ -322,8 +369,33 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
 
   // D-85: read the persisted language before the first page load. The unit-test
   // fake returns `{}`, which deliberately falls back to Chinese.
-  const appearance = typeof host.appearance === 'function' ? await host.appearance() : null;
-  let menuLocale: 'zh-CN' | 'en' = appearance?.language === 'en' ? 'en' : 'zh-CN';
+  //
+  // D-147: `''` is the factory sentinel "language not determined yet". On the
+  // FIRST launch, detect once from the OS locale (`app.getLocale()`, reliable
+  // after `whenReady()`) and write the concrete value back through the SAME
+  // SETTINGS_SET path the settings page uses — awaited, so the store is
+  // durable BEFORE the first loadURL and `menuLocale`, the `?lang=` pin, the
+  // app menu and the context menu all follow the detected value. A concrete
+  // stored value — the user's manual switch in particular — is never
+  // re-detected and never rewritten; every later reader (did-finish-load
+  // below included) sees exactly that persisted choice.
+  let menuLocale: 'zh-CN' | 'en';
+  const rawLanguage = readRawLanguage(host);
+  if (rawLanguage === '') {
+    const systemLocale = typeof app.getLocale === 'function' ? app.getLocale() : '';
+    const detected = resolveStartupLanguage('', systemLocale);
+    try {
+      await host.gateway.dispatch(IPC_CHANNELS.SETTINGS_SET, { language: detected });
+    } catch {
+      // A failed first-launch write must not abort start-up: this session
+      // still runs with the detected value and the sentinel stays in config,
+      // so the NEXT launch retries the write.
+    }
+    menuLocale = detected;
+  } else {
+    const appearance = typeof host.appearance === 'function' ? await host.appearance() : null;
+    menuLocale = appearance?.language === 'en' ? 'en' : 'zh-CN';
+  }
   const launchUrl = withLocale(options.pageUrl, menuLocale);
 
   // 2. Register every channel of the merged gateway (M3 + M5).

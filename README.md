@@ -201,6 +201,16 @@ disk are two different things:
 - The version label comes from the main process (`APP_INFO`); navigation and
   language switches no longer lose it, and an unknown version shows `v—`
   instead of a stale number. (D-114)
+- **First launch follows the OS language**: Simplified, Traditional or any
+  Chinese system starts in Chinese, everything else in English. The result is
+  persisted immediately — every later start reads the saved value, and only a
+  manual switch in Settings changes it. (D-147) The UI ships two languages,
+  Simplified Chinese and English, so Traditional-Chinese systems see
+  Simplified text.
+- **A gentle "How is this version treating you?"**: asked once on the third
+  launch of a version while no task is running — if you like YTVDLT, a Star
+  on GitHub helps. At most twice per version, with *Maybe later* and *Don't
+  ask again*; a new version may ask again. (D-148)
 
 ### Staying current
 

@@ -50,7 +50,26 @@ export class FakeNode {
 
   constructor(tagName: string) { this.tagName = tagName; }
 
-  appendChild(child: FakeNode): FakeNode { this.children.push(child); return child; }
+  /**
+   * D-148: parent linkage + removeChild. Previously appendChild was one-way,
+   * which was fine while every component mounted once and lived forever; the
+   * Star prompt is appended to <body> and REMOVED on answer, so the real
+   * parent/child relation is now mirrored. Purely additive: existing suites
+   * never read `parentNode` on these nodes.
+   */
+  private parent: FakeNode | null = null;
+  get parentNode(): FakeNode | null { return this.parent; }
+  appendChild(child: FakeNode): FakeNode {
+    child.parent = this;
+    this.children.push(child);
+    return child;
+  }
+  removeChild(child: FakeNode): FakeNode {
+    const index = this.children.indexOf(child);
+    if (index !== -1) this.children.splice(index, 1);
+    child.parent = null;
+    return child;
+  }
   setAttribute(key: string, value: unknown): void { this.attrs[key] = String(value); }
   getAttribute(key: string): string | null { return this.attrs[key] ?? null; }
   removeAttribute(key: string): void { delete this.attrs[key]; }
@@ -68,6 +87,8 @@ export class FakeNode {
 export interface QueuePageHarness {
   cards: FakeNode;
   root: FakeNode;
+  /** D-148: dynamic overlays (the Star prompt) attach here, not to static markup. */
+  body: FakeNode;
   queue: any;
   storage: Map<string, string>;
   calls: { channel: string; payload: unknown }[];
@@ -133,6 +154,11 @@ export function harness(options: {
   const doc = {
     visibilityState: 'visible',
     documentElement: new FakeNode('html'),
+    // D-148: the Star prompt is the first queue-page component appended to
+    // <body> (previous components mount into existing static anchors), so the
+    // harness now carries a body node. Additive: suites that never touch it
+    // see no difference.
+    body: new FakeNode('body'),
     getElementById: (id: string) => registry[id] ?? null,
     querySelector: () => null,
     querySelectorAll: (selector: string) => (selector.indexOf('#queue-lang') !== -1
@@ -200,6 +226,8 @@ export function harness(options: {
   return {
     cards,
     root,
+    // D-148: the dynamic Star-prompt dialog is appended here and removed on answer.
+    body: doc.body,
     queue: sandbox['YTVDLTQueue'],
     storage,
     calls,

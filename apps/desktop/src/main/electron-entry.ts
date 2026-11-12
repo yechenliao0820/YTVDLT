@@ -346,6 +346,10 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       subtitlePreview,
       // TXT batch import: native .txt picker + bounded read stay in main.
       txtImportFile: createTxtFilePicker(),
+      // D-148: the SAME `shell.openExternal` seam the app updater uses below —
+      // the Star prompt opens its repo URL inside the main process, never via
+      // a renderer-supplied link.
+      openExternal: async (url: string) => { await shell.openExternal(url); },
     });
     hostRef = host;
     configRef = host.m4.task.config;

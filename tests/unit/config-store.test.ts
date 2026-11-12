@@ -27,6 +27,18 @@ describe('A-4.4-19 ConfigStore · 分域 / schemaVersion / 原子写', () => {
     }
   });
 
+  it('D-147: the factory `general.language` is the "" sentinel ("not determined yet")', async () => {
+    const { ports } = createInMemoryPorts();
+    const store = new ConfigStore({ ports });
+    await store.load();
+    // Empty means the main process has not yet detected from the OS locale.
+    // After the first-launch write-back the stored value is concrete forever.
+    expect(store.get('general', 'language')).toBe('');
+    // The other general defaults are untouched by D-147.
+    expect(store.get('general', 'concurrency')).toBe(3);
+    expect(store.get('general', 'theme')).toBe('system');
+  });
+
   it('writes atomically via writeTextAtomic and persists a change across reload', async () => {
     const { ports, state } = createInMemoryPorts();
     const first = new ConfigStore({ ports });

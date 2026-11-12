@@ -248,7 +248,11 @@
     // D-134 (append-only): supported sites + the per-URL pre-check. Both read
     // the running engine; neither can start a download.
     SUPPORTED_SITES: 'ytvdlt:sites:list',
-    URL_SUPPORT_CHECK: 'ytvdlt:sites:check'
+    URL_SUPPORT_CHECK: 'ytvdlt:sites:check',
+    // D-148 (append-only): the "Star on GitHub" nudge. CHECK takes no payload
+    // and ACTION only the button enum; the repo URL never crosses IPC.
+    STAR_PROMPT_CHECK: 'ytvdlt:starPrompt:check',
+    STAR_PROMPT_ACTION: 'ytvdlt:starPrompt:action'
   };
 
   /** Thin wrapper over the preload surface: `{ok:false, code, message}` on failure
@@ -495,6 +499,10 @@
       var firstReply = live.tasks === null;
       live.error = false;
       live.tasks = (Array.isArray(result.items) ? result.items : []).map(toTask);
+      // D-148: the FIRST real TASK_LIST reply (never fake data) is what arms
+      // the Star-prompt timer. Before this point the queue is unknown, so the
+      // "no task in flight" guard could not be honest yet.
+      if (firstReply) scheduleStarPrompt(STAR_PROMPT_DELAY_MS);
       // Recovering from an error must always repaint, even if the data matches.
       if (firstReply || wasError || paintKey(live.tasks) !== lastPaint) { render(); return; }
       if (progressKey(live.tasks) === lastProgress) return;
@@ -754,6 +762,146 @@
   function currentSubtitleSelection() {
     return subtitlePicker === null ? null : subtitlePicker.getSelection();
   }
+
+  // ---- D-148: "Star on GitHub" prompt -------------------------------------
+  // Live-only, dynamic-DOM (D-139 pattern): built with createElement, appended
+  // to <body>, removed on close — index.html and the frozen screenshot
+  // baselines never gain a single node. Frequency is owned by the MAIN process
+  // (third launch of a version, max 2 asks per version, 7-day retry gap after
+  // "later", permanent silence after "star"/"never"); the renderer adds two
+  // guards of its own:
+  //   - the timer is armed by the FIRST real TASK_LIST reply (D-141: never on
+  //     fake/unknown data) and fires STAR_PROMPT_DELAY_MS later;
+  //   - at fire time the queue must have NO Running/FetchingInfo task — a task
+  //     in flight is never interrupted; the check waits for an idle moment.
+  // Exactly ONE CHECK happens per session, so the dialog can appear at most
+  // once per page load; across sessions the main-process config state decides.
+  var STAR_PROMPT_DELAY_MS = 45 * 1000;
+  var STAR_PROMPT_BUSY_RETRY_MS = 60 * 1000;
+  var starPromptTimer = null;
+  var starPromptChecked = false;
+  var starPromptShown = false;
+  var starPromptDialog = null;
+
+  /** True while a download is actually in flight (not queued, not settled). */
+  function starPromptBusy() {
+    if (!live.active || !Array.isArray(live.tasks)) return true;
+    return live.tasks.some(function (task) {
+      return task.state === 'Running' || task.state === 'FetchingInfo';
+    });
+  }
+
+  function scheduleStarPrompt(delay) {
+    if (!live.active || starPromptChecked || starPromptShown) return;
+    if (starPromptTimer !== null) return;
+    starPromptTimer = global.setTimeout(function () {
+      starPromptTimer = null;
+      maybeCheckStarPrompt();
+    }, delay);
+  }
+
+  function maybeCheckStarPrompt() {
+    if (!live.active || starPromptChecked || starPromptShown) return;
+    // Red line (D-148): never even ASK while a task is running. One CHECK per
+    // session, so the spend is bounded whether or not the queue is idle.
+    if (starPromptBusy()) { scheduleStarPrompt(STAR_PROMPT_BUSY_RETRY_MS); return; }
+    starPromptChecked = true;
+    call('STAR_PROMPT_CHECK', {}).then(function (result) {
+      if (starPromptShown) return;
+      if (result && result.show === true) showStarPrompt();
+    }).catch(function () { /* call() already normalizes IPC failures */ });
+  }
+
+  function starPromptEl(tag, style, text) {
+    var node = doc.createElement(tag);
+    if (style) node.style.cssText = style;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function closeStarPrompt() {
+    if (starPromptDialog === null) return;
+    var parent = starPromptDialog.parentNode;
+    // `parent` may be `undefined` (test sandbox without real DOM linkage);
+    // the dialog is then simply dropped, never thrown over.
+    if (parent !== null && parent !== undefined && typeof parent.removeChild === 'function') {
+      parent.removeChild(starPromptDialog);
+    }
+    starPromptDialog = null;
+  }
+
+  function answerStarPrompt(action, controls) {
+    // The user has spoken: whatever the IPC answer says, the dialog closes.
+    if (controls && controls.length > 0) {
+      for (var index = 0; index < controls.length; index += 1) controls[index].disabled = true;
+    }
+    call('STAR_PROMPT_ACTION', { action: action }).then(closeStarPrompt).catch(closeStarPrompt);
+  }
+
+  function showStarPrompt() {
+    if (starPromptShown || starPromptDialog !== null) return;
+    // A page without a real <body> (test sandbox) cannot host the dialog.
+    if (!doc.body || typeof doc.body.appendChild !== 'function') return;
+    starPromptShown = true;
+
+    var backdrop = starPromptEl('div', [
+      'position:fixed', 'inset:0', 'z-index:96', 'display:flex',
+      'align-items:center', 'justify-content:center',
+      'background:rgba(12,22,34,.52)', 'padding:20px'
+    ].join(';'));
+    backdrop.id = 'ytvdlt-star-prompt';
+    backdrop.setAttribute('role', 'dialog');
+    backdrop.setAttribute('aria-modal', 'true');
+
+    var box = starPromptEl('div', [
+      'width:min(420px,100%)', 'padding:18px 20px', 'border-radius:14px',
+      'background:var(--panel,#fff)', 'color:var(--ink,#1b2430)',
+      'border:1px solid var(--line,#d5dde5)',
+      'box-shadow:0 24px 70px rgba(10,20,32,.34)', 'font-family:inherit'
+    ].join(';'));
+    var title = starPromptEl('strong',
+      'display:block;font-size:16px;letter-spacing:.02em;margin-bottom:8px;',
+      t('starPrompt.title'));
+    title.id = 'ytvdlt-star-prompt-title';
+    backdrop.setAttribute('aria-labelledby', title.id);
+    box.appendChild(title);
+    box.appendChild(starPromptEl('p',
+      'margin:0 0 14px;font-size:12.5px;line-height:1.7;color:var(--ink,#1b2430);',
+      t('starPrompt.body')));
+
+    var actions = starPromptEl('div', 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;');
+    var buttonStyle = [
+      'height:32px', 'padding:0 13px', 'font-size:12px', 'font-family:inherit',
+      'border-radius:6px', 'cursor:pointer', 'white-space:nowrap',
+      'border:1px solid var(--line,#d5dde5)', 'background:var(--panel,#fff)', 'color:var(--ink,#1b2430)'
+    ].join(';');
+    var primaryStyle = buttonStyle
+      + ';background:var(--accent,#1d63b8);border-color:var(--accent,#1d63b8);color:#ffffff;font-weight:700';
+
+    var star = starPromptEl('button', primaryStyle, t('starPrompt.star'));
+    star.type = 'button';
+    var later = starPromptEl('button', buttonStyle, t('starPrompt.later'));
+    later.type = 'button';
+    var never = starPromptEl('button', buttonStyle, t('starPrompt.never'));
+    never.type = 'button';
+    var controls = [star, later, never];
+    star.addEventListener('click', function () { answerStarPrompt('star', controls); });
+    later.addEventListener('click', function () { answerStarPrompt('later', controls); });
+    never.addEventListener('click', function () { answerStarPrompt('never', controls); });
+    // Clicking the dimmed background counts as "later": every showing must be
+    // answered for the main-process per-version budget to stay honest.
+    backdrop.addEventListener('click', function (event) {
+      if (event && event.target === backdrop) answerStarPrompt('later', controls);
+    });
+    actions.appendChild(star);
+    actions.appendChild(later);
+    actions.appendChild(never);
+    box.appendChild(actions);
+    backdrop.appendChild(box);
+    doc.body.appendChild(backdrop);
+    starPromptDialog = backdrop;
+  }
+
 
   /** D-83：把界面上选好的类型/清晰度一起交给主进程。 */
   function downloadPayload(url) {
@@ -2102,6 +2250,20 @@
     ensurePlaylistImport: ensurePlaylistImport,
     startRealDownload: startRealDownload,
     enqueueSingleDownload: enqueueSingleDownload,
-    downloadPayload: downloadPayload
+    downloadPayload: downloadPayload,
+    // D-148: test/smoke surface for the Star-prompt wiring (same idea as the
+    // subtitle-picker / txt-import exposures above).
+    starPrompt: function () {
+      return {
+        shown: starPromptShown,
+        checked: starPromptChecked,
+        dialogOpen: starPromptDialog !== null,
+        scheduled: starPromptTimer !== null
+      };
+    },
+    scheduleStarPrompt: scheduleStarPrompt,
+    maybeCheckStarPrompt: maybeCheckStarPrompt,
+    showStarPrompt: showStarPrompt,
+    closeStarPrompt: closeStarPrompt
   };
 })(typeof window === 'undefined' ? this : window);
