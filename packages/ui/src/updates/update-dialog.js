@@ -17,6 +17,8 @@
   var CH_ACTION = 'ytvdlt:appUpdate:action';
   var DISMISS_KEY = 'ytvdlt.update.dismissed';
   var POLL_MS = 4000;
+  /** D-141: while bytes are moving, 4 s looks like "nothing is happening". */
+  var POLL_DOWNLOAD_MS = 800;
 
   var state = null;
   var nodes = null;
@@ -56,6 +58,12 @@
     if (style) node.style.cssText = style;
     if (text !== undefined && text !== null) node.textContent = String(text);
     return node;
+  }
+
+  /** `2026-11-10T08:08:07Z` → `2026-11-10`; anything else → '' (no empty label). */
+  function isoDay(value) {
+    var text = typeof value === 'string' ? value.slice(0, 10) : '';
+    return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
   }
 
   var LOGO = '<svg viewBox="0 0 40 40" width="38" height="38" aria-hidden="true" focusable="false">'
@@ -101,13 +109,16 @@
     box.appendChild(head);
 
     var notesTitle = el('div', 'font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--muted,#5c6b7a);margin:0 0 5px;', t('update.notes'));
+    notesTitle.id = 'ytvdlt-update-notes-title';
     box.appendChild(notesTitle);
-    var notes = el('pre', [
+    // D-140: a container, not a <pre>. A version jump prints one block per
+    // release; a single release prints exactly one block with no heading.
+    var notes = el('div', [
       'margin:0 0 12px', 'padding:10px 12px', 'border-radius:8px',
       'background:var(--accent-soft,#eef3fa)', 'color:var(--ink,#1b2430)',
       'font-family:inherit', 'font-size:12.5px', 'line-height:1.7',
-      'white-space:pre-wrap', 'word-break:break-word',
-      'max-height:240px', 'overflow-y:auto', 'overflow-x:hidden', 'flex:0 1 auto'
+      'display:flex', 'flex-direction:column', 'gap:12px',
+      'max-height:min(380px,48vh)', 'overflow-y:auto', 'overflow-x:hidden', 'flex:0 1 auto'
     ].join(';'), '');
     notes.id = 'ytvdlt-update-notes';
     box.appendChild(notes);
@@ -197,7 +208,8 @@
     doc.body.appendChild(backdrop);
 
     return {
-      backdrop: backdrop, sub: sub, notes: notes, progress: progress,
+      backdrop: backdrop, sub: sub, notes: notes, notesTitle: notesTitle,
+      progress: progress,
       bar: fill, progressText: progressText, hint: hint,
       primary: primary, page: page, skip: skipBox
     };
@@ -224,16 +236,107 @@
     nodes.backdrop.setAttribute('hidden', 'false');
   }
 
+  /**
+   * D-140: which release blocks the dialog prints.
+   *
+   * `state.releaseNotes` is authoritative: one entry per version, oldest first,
+   * covering `(current, latest]`. A main process that predates it sends no such
+   * field, in which case the single newest body is still shown.
+   */
+  function noteBlocks(latest) {
+    var list = state !== null && Array.isArray(state.releaseNotes) ? state.releaseNotes : [];
+    var usable = [];
+    for (var index = 0; index < list.length; index += 1) {
+      var block = list[index];
+      if (block && typeof block.version === 'string' && block.version !== '') usable.push(block);
+    }
+    if (usable.length > 0) return usable;
+    return [{
+      version: String(latest.version || ''),
+      publishedAt: latest.publishedAt,
+      notes: typeof latest.notes === 'string' ? latest.notes : ''
+    }];
+  }
+
+  function noteBody(text) {
+    return el('pre', [
+      'margin:0', 'font-family:inherit', 'font-size:12.5px', 'line-height:1.7',
+      'white-space:pre-wrap', 'word-break:break-word'
+    ].join(';'), text);
+  }
+
+  function noteHeading(block) {
+    var head = el('div', [
+      'display:flex', 'align-items:baseline', 'gap:8px', 'flex-wrap:wrap',
+      'font-size:12px', 'font-weight:700', 'letter-spacing:.05em',
+      'color:var(--accent,#1d63b8)'
+    ].join(';'));
+    head.appendChild(el('span', null, 'v' + String(block.version)));
+    var day = isoDay(block.publishedAt);
+    if (day !== '') {
+      head.appendChild(el('span',
+        'font-weight:400;letter-spacing:0;color:var(--muted,#5c6b7a);', day));
+    }
+    return head;
+  }
+
+  var notesKey = '';
+
+  function paintNotes(blocks, omitted) {
+    var key = blocks.map(function (block) {
+      return String(block.version) + '\u0001' + String(block.notes);
+    }).join('\u0002') + '\u0003' + String(omitted);
+    // The dialog is polled every 4 s. Repainting identical content would reset
+    // the scroll position of a long changelog mid-read, so only touch the DOM
+    // when something actually changed.
+    if (key === notesKey) return;
+    notesKey = key;
+
+    var multi = blocks.length > 1;
+    nodes.notesTitle.textContent = multi
+      ? t('update.notes.range', {
+        from: String(blocks[0].version),
+        to: String(blocks[blocks.length - 1].version),
+        count: blocks.length
+      })
+      : t('update.notes');
+    nodes.notes.textContent = '';
+    for (var index = 0; index < blocks.length; index += 1) {
+      var block = blocks[index];
+      var wrap = el('div', 'display:flex;flex-direction:column;gap:4px;');
+      if (multi) wrap.appendChild(noteHeading(block));
+      wrap.appendChild(noteBody(block.notes !== '' ? block.notes : t('update.notes.empty')));
+      nodes.notes.appendChild(wrap);
+    }
+    if (omitted > 0) {
+      nodes.notes.appendChild(el('div',
+        'font-size:11px;line-height:1.6;color:var(--muted,#5c6b7a);padding-top:2px;',
+        t('update.notes.omitted', { count: omitted })));
+    }
+  }
+
   function paint() {
     if (nodes === null || state === null) return;
     var latest = state.latest;
     if (latest === null) { hide(); return; }
 
-    nodes.sub.textContent = t('update.subtitle', {
-      version: latest.version,
-      current: state.currentVersion
-    });
-    nodes.notes.textContent = latest.notes !== '' ? latest.notes : t('update.notes.empty');
+    var blocks = noteBlocks(latest);
+    var omitted = typeof state.omittedReleaseNotes === 'number' && state.omittedReleaseNotes > 0
+      ? state.omittedReleaseNotes
+      : 0;
+    var skipped = blocks.length - 1 + omitted;
+
+    nodes.sub.textContent = skipped > 0
+      ? t('update.subtitle.jump', {
+        version: latest.version,
+        current: state.currentVersion,
+        skipped: skipped
+      })
+      : t('update.subtitle', {
+        version: latest.version,
+        current: state.currentVersion
+      });
+    paintNotes(blocks, omitted);
 
     var downloading = state.phase === 'downloading' || downloadPending;
     var ready = state.phase === 'ready';
@@ -349,15 +452,29 @@
     Promise.resolve(pending).then(function (next) { if (version === actionVersion && !cancelling) apply(next); }).catch(function () { /* offline */ });
   }
 
+  /**
+   * D-141: how long to wait before asking the main process again.
+   *
+   * `downloadPending` matters: the `download` action answers only when the
+   * transfer is over, so the in-memory phase is still `available` for the first
+   * moments after the click. Polling that window at 4 s made the bar appear to
+   * be frozen at 0 %.
+   */
+  function pollDelay() {
+    var downloading = downloadPending
+      || (state !== null && state.phase === 'downloading');
+    return downloading ? POLL_DOWNLOAD_MS : POLL_MS;
+  }
+
   function attach() {
     if (bridge() === null) return;
     // Give the startup check a head start, then poll at a human pace.
     setTimeout(function () {
-      poll();
-      setInterval(function () {
-        if (doc.visibilityState === 'hidden') return;
-        poll();
-      }, POLL_MS);
+      var tick = function () {
+        if (doc.visibilityState !== 'hidden') poll();
+        global.setTimeout(tick, pollDelay());
+      };
+      tick();
     }, 1500);
     doc.addEventListener('visibilitychange', function () {
       if (doc.visibilityState === 'visible') poll();

@@ -1,5 +1,7 @@
 /**
  * D-137 — one place for the outbound-URL policy of EVERY main-process fetch.
+ * D-143 — closes the DNS rebinding gap D-137 had to admit: the connection is
+ * now PINNED to policy-verified addresses at the socket layer.
  *
  * WHY THIS EXISTS: `fetch(url, { redirect: 'follow' })` makes the network stack
  * decide where the request ends up. An initial URL that passed a host check can
@@ -8,22 +10,70 @@
  * Both used `redirect: 'follow'` before D-137.
  *
  * The loop here follows redirects MANUALLY, so the caller's `allow` predicate is
- * applied to the initial URL AND to every hop. It is deliberately a pure URL
- * policy — it does not perform DNS resolution. DNS rebinding (a public name that
- * resolves to a private IP on the second lookup) is therefore NOT covered; the
- * only real fix is a pinned resolver/dispatcher at the socket layer, which this
- * app does not have. That limit is recorded in D-137 instead of being papered
- * over with a hostname check that cannot see the resolved address.
+ * applied to the initial URL AND to every hop. The transport is `node:http` /
+ * `node:https` (NOT global fetch, D-143). Before every hop:
+ *   1. `policy.allow(url)` gates the hop on the URL, as before;
+ *   2. the hop's hostname is resolved to ALL addresses (injectable
+ *      `RedirectPolicy.lookup`, default `dns.promises.lookup(host,
+ *      { all: true, verbatim: true })`);
+ *   3. every resolved address must pass the optional
+ *      `policy.allowResolvedAddress` hook — a single private/loopback answer
+ *      fails the whole hop (fail closed);
+ *   4. the socket is pinned to the verified addresses through the request's
+ *      `lookup` option, so the node resolver is never consulted again for that
+ *      connection.
+ * A hostname whose first resolution is public but whose second resolution is
+ * private (DNS rebinding / TOCTOU) is therefore rejected hop by hop. The URL
+ * always keeps its original hostname: TLS SNI (`servername`), certificate
+ * validation and the Host header stay correct — the pinned address is used for
+ * the TCP connection only.
+ *
+ * Residual limits (D-143, stated on purpose):
+ *   - a policy WITHOUT `allowResolvedAddress` (e.g. the permissive
+ *     `allowAnyHttpUrl` default) still pins the socket to what was resolved but
+ *     does not classify addresses — 127.0.0.1 test/dev traffic must keep working;
+ *   - the guard can only validate what the resolver returns: a fully hostile
+ *     resolver that hides a private answer behind a public one per connection is
+ *     resolver poisoning rather than rebinding, and for https the certificate
+ *     check remains the content gate.
  *
  * This is an adapter (main process). Core stays pure and never imports it.
  */
+import * as dns from 'node:dns';
+import * as http from 'node:http';
+import * as https from 'node:https';
+import type { IncomingMessage } from 'node:http';
+import { Readable } from 'node:stream';
 
 /** Bounded chain: a legitimate GitHub asset redirect is 1–2 hops. */
 export const MAX_HTTP_REDIRECTS = 5;
 
+/** One DNS answer for a hostname, with its address family (D-143). */
+export interface ResolvedAddress {
+  readonly address: string;
+  readonly family: 4 | 6;
+}
+
+/**
+ * Injectable resolver (D-143): hostname → ALL of its addresses, in resolver
+ * order. Tests inject a fake one; production uses the default
+ * `dns.promises.lookup(host, { all: true, verbatim: true })`.
+ */
+export type HostLookup = (hostname: string) => Promise<readonly ResolvedAddress[]>;
+
 export interface RedirectPolicy {
   /** Applied to the initial URL and to every resolved Location, before fetch. */
   readonly allow: (rawUrl: string) => boolean;
+  /**
+   * D-143: DNS rebinding guard. When present, EVERY address the hop's hostname
+   * resolves to must pass it — one private/loopback answer fails the hop
+   * (fail closed), and the connection is only ever pinned to addresses that
+   * passed. Absent = no address-level classification; the URL check above still
+   * runs and the socket is still pinned to the resolved addresses.
+   */
+  readonly allowResolvedAddress?: (address: string) => boolean;
+  /** D-143: injectable resolver, for tests. Defaults to the system resolver. */
+  readonly lookup?: HostLookup;
 }
 
 /** Default: accept any syntactically valid http(s) URL, still bound the chain. */
@@ -36,6 +86,9 @@ export const allowAnyHttpUrl: RedirectPolicy = {
       return false;
     }
   },
+  // D-143: deliberately NO `allowResolvedAddress` here — the permissive default
+  // also serves 127.0.0.1 test/dev traffic. Address classification is opt-in
+  // (`isPublicResolvedAddress`); the pinning itself always happens.
 };
 
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
@@ -174,21 +227,254 @@ export function isPublicHttpsUrl(raw: string): boolean {
   }
 }
 
-export const publicHttpsOnly: RedirectPolicy = { allow: isPublicHttpsUrl };
+/**
+ * D-143: address-side twin of a URL host policy. `isPrivateHost` already
+ * classifies address LITERALS correctly (RFC 1918 / loopback / link-local /
+ * CGNAT / TEST-NET / unique-local / IPv4-mapped IPv6, hex spellings included),
+ * so it is reused verbatim on the RESOLVED addresses — anything private or
+ * reserved that a hostname resolves to must be rejected.
+ */
+export function isPublicResolvedAddress(address: string): boolean {
+  return !isPrivateHost(address);
+}
+
+export const publicHttpsOnly: RedirectPolicy = {
+  allow: isPublicHttpsUrl,
+  // D-143: the URL check above only sees the hostname literal; this hook checks
+  // what the name ACTUALLY resolves to on every hop and pins the socket to it.
+  allowResolvedAddress: isPublicResolvedAddress,
+};
+
+const defaultLookup: HostLookup = async (hostname) => {
+  const records = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+  return records.map((record) => ({
+    address: record.address,
+    family: record.family === 6 ? 6 : 4,
+  }));
+};
+
+/** Reject with the caller's abort reason when the signal fires mid-resolution. */
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | null | undefined): Promise<T> {
+  if (signal === undefined || signal === null) return promise;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      // Keep the fetch-like `signal.reason`, but never reject with a non-Error.
+      reject(signal.reason instanceof Error ? signal.reason : new Error('The operation was aborted'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
 
 /**
- * Follow a redirect chain one hop at a time, re-checking `policy.allow` before
- * every fetch. The SAME AbortSignal covers the whole chain, so a redirect storm
+ * Resolve the hop's hostname and gate EVERY answer through the policy. Zero
+ * answers or ONE rejected answer throws — the security boundary fails closed
+ * (D-143). The SAME AbortSignal covers DNS: a deadline that fires while the
+ * resolver is pending fails the hop (the underlying query cannot be cancelled;
+ * its result is discarded).
+ */
+async function resolveVerifiedAddresses(
+  hostname: string,
+  policy: RedirectPolicy,
+  hop: number,
+  signal: AbortSignal | null | undefined,
+): Promise<readonly ResolvedAddress[]> {
+  const lookup = policy.lookup ?? defaultLookup;
+  const records = await raceAbort(lookup(hostname), signal);
+  if (records.length === 0) {
+    throw new Error(`no resolved address for ${hostname} at hop ${hop}`);
+  }
+  const guard = policy.allowResolvedAddress;
+  if (guard !== undefined) {
+    for (const record of records) {
+      if (!guard(record.address)) {
+        throw new Error(`blocked resolved address at hop ${hop}: ${record.address} (${hostname})`);
+      }
+    }
+  }
+  return records;
+}
+
+/**
+ * `RequestInit.headers` → a plain record for node:http. Callers pass a plain
+ * record today; `Headers` instances and header tuples are normalised anyway.
+ */
+function headersRecordOf(headers: RequestInit['headers']): Record<string, string> {
+  const record: Record<string, string> = {};
+  if (headers === undefined || headers === null) return record;
+  if (headers instanceof Headers) {
+    headers.forEach((value, key) => { record[key.toLowerCase()] = value; });
+  } else if (Array.isArray(headers)) {
+    for (const entry of headers) {
+      const [key, value] = entry;
+      if (key !== undefined && value !== undefined) record[key.toLowerCase()] = value;
+    }
+  } else {
+    for (const [key, value] of Object.entries(headers)) {
+      if (value !== undefined) record[key.toLowerCase()] = String(value);
+    }
+  }
+  return record;
+}
+
+/** Body-less statuses per RFC 7230: `new Response(body)` throws for these. */
+const NULL_BODY_STATUS = new Set([204, 205, 304]);
+
+/**
+ * Wrap a client `IncomingMessage` as a real fetch-style `Response`. The body is
+ * STREAMED (`Readable.toWeb`), so callers keep their byte-counted readers and
+ * backpressure; status / ok / headers behave exactly like the previous global
+ * fetch. A socket error mid-body surfaces through this stream, as with fetch.
+ */
+function toWebResponse(message: IncomingMessage): Response {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(message.headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(key, item);
+    } else if (typeof value === 'string') {
+      headers.append(key, value);
+    }
+  }
+  const status = message.statusCode ?? 0;
+  if (NULL_BODY_STATUS.has(status)) return new Response(null, { status, headers });
+  return new Response(
+    Readable.toWeb(message) as unknown as ReadableStream,
+    { status, headers },
+  );
+}
+
+interface PinnedResponseEntry {
+  readonly response: Response;
+  /** Kept so a consumed redirect hop can be torn down socket-level. */
+  readonly message: IncomingMessage;
+}
+
+/**
+ * ONE pinned connection attempt (D-143). `lookup` is overridden so the socket
+ * layer can never resolve anything by itself: it hands out EXACTLY the verified
+ * candidate — in the `all: true` shape the autoSelectFamily path uses and in the
+ * classic single-address shape. The URL keeps its original hostname, so TLS
+ * `servername` (SNI), certificate validation and the Host header all derive
+ * from it; the pinned address is used for the TCP connection only.
+ *
+ * `init.method` / `init.headers` / `init.signal` are forwarded (the only fields
+ * callers use — grep `fetchFollowingRedirects`). `init.body` is deliberately
+ * UNSUPPORTED: no caller sends one, and a silently dropped body would be worse
+ * than this explicit gap.
+ */
+function pinnedRequestOnce(
+  target: URL,
+  init: RequestInit,
+  candidate: ResolvedAddress,
+): Promise<PinnedResponseEntry> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const requestOptions: https.RequestOptions = {
+      method: init.method ?? 'GET',
+      headers: headersRecordOf(init.headers),
+      // Pin the family AND the address (see `lookup` below).
+      family: candidate.family,
+      lookup: (_hostname, lookupOptions, callback) => {
+        if (lookupOptions.all === true) {
+          callback(null, [{ address: candidate.address, family: candidate.family }]);
+        } else {
+          callback(null, candidate.address, candidate.family);
+        }
+      },
+      // D-143: no keep-alive pooling. A pooled socket would skip the pinned
+      // lookup on reuse and could outlive the policy's decision; the outbound
+      // traffic here is low-frequency (thumbnails, release checks, downloads).
+      agent: false,
+    };
+    if (init.signal !== undefined && init.signal !== null) requestOptions.signal = init.signal;
+    // https: make the SNI hostname explicit instead of relying on the default,
+    // so it is obvious it never becomes the pinned IP.
+    if (target.protocol === 'https:') requestOptions.servername = target.hostname;
+
+    const onMessage = (message: IncomingMessage): void => {
+      settled = true;
+      resolve({ response: toWebResponse(message), message });
+    };
+    const request = target.protocol === 'https:'
+      ? https.request(target, requestOptions, onMessage)
+      : http.request(target, requestOptions, onMessage);
+    request.on('error', (error) => {
+      // After `settled` the body belongs to the caller; a late socket error
+      // surfaces through the wrapped Response stream instead.
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    });
+    request.end();
+  });
+}
+
+/**
+ * Resolve → validate → connect for ONE hop (D-143). Verified addresses are
+ * tried in resolver order; only a connection-level failure (no response
+ * received yet) moves to the next candidate, and the first response wins.
+ */
+async function pinnedHopRequest(
+  target: URL,
+  init: RequestInit,
+  policy: RedirectPolicy,
+  hop: number,
+): Promise<PinnedResponseEntry> {
+  // `new URL()` keeps brackets on IPv6 literals ('[::1]'); the resolver and the
+  // policy want the bare address form.
+  const hostname = target.hostname.replace(/^\[|\]$/g, '');
+  const candidates = await resolveVerifiedAddresses(hostname, policy, hop, init.signal);
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    try {
+      return await pinnedRequestOnce(target, init, candidate);
+    } catch (error) {
+      lastError = error;
+      // An abort is not a bad address: stop instead of trying the next one.
+      if (init.signal?.aborted) throw error;
+    }
+  }
+  throw lastError ?? new Error(`request failed for ${target.href}`);
+}
+
+/** Cancel the web stream and hard-destroy the socket underneath it. */
+async function discardRedirectResponse(entry: PinnedResponseEntry): Promise<void> {
+  try {
+    await entry.response.body?.cancel();
+  } catch {
+    // Already errored or fully consumed — nothing left to free.
+  }
+  entry.message.destroy();
+}
+
+/**
+ * Follow a redirect chain one hop at a time, re-checking `policy.allow` AND
+ * re-resolving + re-pinning the DNS answer before every hop (D-143). The SAME
+ * AbortSignal covers the whole chain (DNS + request), so a redirect storm
  * cannot outlive the caller's deadline.
  *
- * Throws on: a rejected hop, a loop, more than MAX_HTTP_REDIRECTS hops, a
- * missing/invalid Location. Never mutates `init`.
+ * Throws on: a rejected hop (URL or resolved address), a loop, more than
+ * MAX_HTTP_REDIRECTS hops, a missing/invalid Location. Never mutates `init`.
  */
 export async function fetchFollowingRedirects(
   url: string,
   init: RequestInit,
   policy: RedirectPolicy = allowAnyHttpUrl,
 ): Promise<Response> {
+  if (init.body !== undefined && init.body !== null) {
+    throw new Error('fetchFollowingRedirects does not support a request body');
+  }
   const visited = new Set<string>();
   let current = url;
   for (let hop = 0; hop <= MAX_HTTP_REDIRECTS; hop += 1) {
@@ -198,11 +484,14 @@ export async function fetchFollowingRedirects(
     if (visited.has(current)) throw new Error('redirect loop detected');
     visited.add(current);
 
-    const response = await fetch(current, { ...init, redirect: 'manual' });
-    if (!REDIRECT_STATUS.has(response.status)) return response;
+    const entry = await pinnedHopRequest(new URL(current), init, policy, hop);
+    if (!REDIRECT_STATUS.has(entry.response.status)) return entry.response;
 
-    const location = response.headers.get('location');
-    // A 3xx with no body is still an open connection in some stacks; close it.
+    const location = entry.response.headers.get('location');
+    // D-143: consume/destroy the redirect body BEFORE the next hop. Under the
+    // raw http transport an unread body keeps the socket open; under the old
+    // global fetch the close this comment used to promise never happened.
+    await discardRedirectResponse(entry);
     if (location === null || location.trim() === '') {
       throw new Error(`redirect without Location at hop ${hop}`);
     }

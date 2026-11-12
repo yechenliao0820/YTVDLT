@@ -4,8 +4,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  compareVersions, flattenReleaseNotes, isNewerVersion, normalizeVersion,
-  parseGitHubRelease, parseVersionSegments, selectInstallerAsset, shouldPromptForUpdate,
+  collectReleaseNotes, compareVersions, flattenReleaseNotes, isNewerVersion,
+  isReleaseTitleLine, normalizeVersion, parseGitHubRelease, parseGitHubReleaseList,
+  parseVersionSegments, selectInstallerAsset, shouldPromptForUpdate, stripReleaseTitle,
 } from '@ytvdlt/core';
 import type { AppReleaseAsset, AppUpdateState } from '@ytvdlt/shared';
 
@@ -126,6 +127,120 @@ describe('app update · release notes', () => {
   });
 });
 
+describe('app update · cumulative notes across a version jump', () => {
+  const release = (version: string, body: string, over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    tag_name: `v${version}`,
+    name: `YTVDLT ${version}`,
+    body,
+    html_url: `https://github.com/yechenliao0820/YTVDLT/releases/tag/v${version}`,
+    published_at: '2026-11-10T00:00:00Z',
+    draft: false,
+    prerelease: false,
+    assets: [],
+    ...over,
+  });
+
+  const shipped = (): unknown[] => [
+    release('0.3.0', '## YTVDLT 0.3.0\n\nThe first release to carry everything that landed on top of 0.2.9.\n\n### URL pre-check'),
+    release('0.2.9', '## Fixed\n\n- native right-click edit menu'),
+    release('0.2.8', '## YTVDLT 0.2.8\n\n- idempotent local-file cleanup'),
+  ];
+
+  it('explains every skipped version, oldest first', () => {
+    const digest = collectReleaseNotes(parseGitHubReleaseList(shipped()), '0.2.8', '0.3.0');
+    expect(digest.blocks.map((block) => block.version)).toEqual(['0.2.9', '0.3.0']);
+    expect(digest.omitted).toBe(0);
+    expect(digest.blocks[0]?.notes).toContain('right-click edit menu');
+  });
+
+  it('drops the body title the dialog already prints above each block', () => {
+    const digest = collectReleaseNotes(parseGitHubReleaseList(shipped()), '0.2.8', '0.3.0');
+    expect(digest.blocks[1]?.notes.startsWith('The first release')).toBe(true);
+    expect(digest.blocks[1]?.notes).not.toContain('YTVDLT 0.3.0');
+    expect(digest.blocks[0]?.notes.startsWith('Fixed')).toBe(true);
+  });
+
+  it('only strips a line that is nothing but the product name and version', () => {
+    expect(isReleaseTitleLine('YTVDLT 0.3.0', '0.3.0')).toBe(true);
+    expect(isReleaseTitleLine('YTVDLT Desktop 0.2.6', '0.2.6')).toBe(true);
+    expect(isReleaseTitleLine('v0.3.0', '0.3.0')).toBe(true);
+    expect(isReleaseTitleLine('Fixed in 0.3.0', '0.3.0')).toBe(false);
+    expect(isReleaseTitleLine('0.3.1', '0.3.0')).toBe(false);
+    expect(stripReleaseTitle('YTVDLT 0.2.3\n\n- one', '0.2.3')).toBe('- one');
+  });
+
+  it('keeps one block when the user is only one version behind', () => {
+    const digest = collectReleaseNotes(parseGitHubReleaseList(shipped()), '0.2.9', '0.3.0');
+    expect(digest.blocks.map((block) => block.version)).toEqual(['0.3.0']);
+  });
+
+  it('ignores a release newer than the one being offered', () => {
+    const list = [...shipped(), release('0.3.1', 'published between the two calls')];
+    const digest = collectReleaseNotes(parseGitHubReleaseList(list), '0.2.8', '0.3.0');
+    expect(digest.blocks.map((block) => block.version)).toEqual(['0.2.9', '0.3.0']);
+  });
+
+  it('keeps a version that shipped no notes so the gap stays visible', () => {
+    const list = [release('0.3.0', 'big'), release('0.2.9', '   '), release('0.2.8', 'old')];
+    const digest = collectReleaseNotes(parseGitHubReleaseList(list), '0.2.8', '0.3.0');
+    expect(digest.blocks.map((block) => block.version)).toEqual(['0.2.9', '0.3.0']);
+    expect(digest.blocks[0]?.notes).toBe('');
+  });
+
+  it('caps one release body and says it was cut', () => {
+    const list = [release('0.3.0', 'y'.repeat(300))];
+    const digest = collectReleaseNotes(parseGitHubReleaseList(list), '0.2.9', '0.3.0', {
+      perReleaseChars: 100,
+    });
+    const notes = digest.blocks[0]?.notes ?? '';
+    expect(notes.length).toBeLessThanOrEqual(102);
+    expect(notes.endsWith('…')).toBe(true);
+  });
+
+  it('drops the oldest blocks when the budget runs out, never the newest', () => {
+    const list = [
+      release('0.3.0', 'c'.repeat(100)),
+      release('0.2.9', 'b'.repeat(100)),
+      release('0.2.7', 'a'.repeat(100)),
+    ];
+    const digest = collectReleaseNotes(parseGitHubReleaseList(list), '0.2.6', '0.3.0', {
+      perReleaseChars: 200, totalChars: 150,
+    });
+    expect(digest.blocks.map((block) => block.version)).toEqual(['0.3.0']);
+    expect(digest.omitted).toBe(2);
+  });
+
+  it('de-duplicates a re-tagged version and skips drafts / prereleases', () => {
+    const list = [
+      release('0.3.0', 'draft text', { draft: true }),
+      release('0.3.0', 'beta text', { prerelease: true }),
+      release('0.3.0', 'short'),
+      release('0.2.9', 'menu'),
+    ];
+    const releases = parseGitHubReleaseList(list);
+    expect(releases).toHaveLength(2);
+    const digest = collectReleaseNotes(releases, '0.2.8', '0.3.0');
+    expect(digest.blocks.map((block) => block.version)).toEqual(['0.2.9', '0.3.0']);
+    expect(digest.blocks[1]?.notes).toBe('short');
+  });
+
+  it('keeps the richer body when the same version arrives twice', () => {
+    const short = parseGitHubRelease(release('0.3.0', 'short'));
+    const rich = parseGitHubRelease(release('0.3.0', 'a much longer body'));
+    expect(short).not.toBeNull();
+    expect(rich).not.toBeNull();
+    const digest = collectReleaseNotes([short!, rich!], '0.2.9', '0.3.0');
+    expect(digest.blocks).toHaveLength(1);
+    expect(digest.blocks[0]?.notes).toBe('a much longer body');
+  });
+
+  it('survives a payload that is not a release list', () => {
+    expect(parseGitHubReleaseList({ tag_name: 'v0.3.0' })).toEqual([]);
+    expect(parseGitHubReleaseList(null)).toEqual([]);
+    expect(collectReleaseNotes([], '0.2.8', '0.3.0').blocks).toEqual([]);
+  });
+});
+
 describe('app update · prompt gate', () => {
   const base: AppUpdateState = {
     phase: 'available',
@@ -138,6 +253,8 @@ describe('app update · prompt gate', () => {
     message: '',
     downloadedBytes: 0,
     totalBytes: null,
+    releaseNotes: [],
+    omittedReleaseNotes: 0,
     skippedVersion: null,
     lastCheckedAt: null,
     canAutoInstall: false,

@@ -166,7 +166,10 @@ export class TaskDetailService {
     const canceled = await this.deps.queue.cancel(task.id);
     return canceled
       ? this.result('cancel', true, 'OK', '已取消')
-      : this.result('cancel', false, 'REFUSED', `状态 ${task.state} 不可取消`);
+      // D-142: `false` now means "the process was not confirmed terminated" —
+      // the tree kill failed, or the task is mid-probe and has no handle yet.
+      // It is not a state refusal, so the message must not claim one.
+      : this.result('cancel', false, 'REFUSED', '取消失败：进程未终止，可稍后再次尝试取消');
   }
 
   private async remove(task: TaskRecord): Promise<TaskDetailResult> {

@@ -21,7 +21,7 @@ import { TERMINATION_UNCONFIRMED_MARKER } from '@ytvdlt/shared';
 import { createStreamingProcessPort } from './process-streaming.js';
 import { createBoundedOutput, OUTPUT_LIMIT_MARKER, type BoundedOutput } from './output-limiter.js';
 import {
-  allowAnyHttpUrl, fetchFollowingRedirects, type RedirectPolicy,
+  allowAnyHttpUrl, fetchFollowingRedirects, isPublicResolvedAddress, type RedirectPolicy,
 } from './http-policy.js';
 import { createShellPort } from './shell-port.js';
 
@@ -67,6 +67,66 @@ export interface NodePortsOptions {
   shell?: IShellPort;
 }
 
+/**
+ * D-145: bounded retry for the final "replace target" step of the atomic
+ * writes. On Windows an antivirus scanner / search indexer / a lingering
+ * viewer routinely holds the TARGET file open for tens of milliseconds, which
+ * makes the replace-rename fail with EPERM / EBUSY / EACCES. Such locks clear
+ * on their own, so a few short retries turn a spurious save failure into a
+ * success. The bound (at most ~ATOMIC_REPLACE_MAX_RETRIES *
+ * ATOMIC_REPLACE_RETRY_DELAY_MS of extra waiting) keeps a genuinely stuck
+ * lock from hanging a config save forever.
+ */
+export const ATOMIC_REPLACE_MAX_RETRIES = 3;
+export const ATOMIC_REPLACE_RETRY_DELAY_MS = 50;
+
+/** D-145: true for the transient "target momentarily locked" errno set. */
+function isTransientReplaceLockError(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+}
+
+function replaceRetryDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+/**
+ * D-145: replace `target` with `tmp` in ONE step — a plain rename.
+ *
+ * WHY IT IS ATOMIC: on Windows libuv implements `fs.rename` with
+ * `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which swaps an existing target in
+ * a single kernel call; on POSIX it is rename(2), atomic by definition. The
+ * target therefore never points at a missing or truncated file, even if the
+ * process dies mid-write.
+ *
+ * WHY THE TARGET IS NO LONGER `rm`'ED FIRST: the old sequence
+ * (`rm target` → `rename tmp target`) had a window between the two calls in
+ * which the ONLY good copy of the file (config.json, history, task store...)
+ * did not exist. A crash in that window — or a rename failure — destroyed it,
+ * which is exactly what an "atomic write" must never do. Nothing here touches
+ * `target` before the rename succeeds.
+ *
+ * On failure the tmp file is cleaned up (best effort, so cleanup cannot mask
+ * the real error) and the ORIGINAL rename error is rethrown: the caller keeps
+ * the previous good contents on disk.
+ */
+async function renameReplaceExisting(tmp: string, target: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rename(tmp, target);
+      return;
+    } catch (error) {
+      // Only the Windows lock-churn errno set is transient (see D-145 above);
+      // anything else (e.g. ENOENT on the tmp file) is a real bug — no retry.
+      if (!isTransientReplaceLockError(error) || attempt >= ATOMIC_REPLACE_MAX_RETRIES) {
+        await fs.rm(tmp, { force: true }).catch(() => undefined);
+        throw error;
+      }
+      await replaceRetryDelay(ATOMIC_REPLACE_RETRY_DELAY_MS);
+    }
+  }
+}
+
 function fileSystemPort(): FileSystemPort {
   return {
     async readText(path: string): Promise<string> {
@@ -82,8 +142,8 @@ function fileSystemPort(): FileSystemPort {
       } finally {
         await handle.close();
       }
-      await fs.rm(path, { force: true });
-      await fs.rename(tmp, path);
+      // D-145: atomic replace — the target is never deleted first.
+      await renameReplaceExisting(tmp, path);
     },
     async writeBytesAtomic(path: string, data: Uint8Array): Promise<void> {
       await fs.mkdir(dirname(path), { recursive: true });
@@ -95,8 +155,8 @@ function fileSystemPort(): FileSystemPort {
       } finally {
         await handle.close();
       }
-      await fs.rm(path, { force: true });
-      await fs.rename(tmp, path);
+      // D-145: atomic replace — the target is never deleted first.
+      await renameReplaceExisting(tmp, path);
     },
     async exists(path: string): Promise<boolean> {
       try {
@@ -119,8 +179,13 @@ function fileSystemPort(): FileSystemPort {
     async rmdir(path: string): Promise<void> {
       await fs.rmdir(path);
     },
+    // D-145: a plain rename. libuv's MoveFileExW(MOVEFILE_REPLACE_EXISTING)
+    // on Windows / rename(2) on POSIX replaces an existing target atomically,
+    // so callers that swap a file in place (engine self-update backup/swap,
+    // D-62; ConfigStore corrupt-file backup; crash-guard rotation) never
+    // observe a missing target. The old rm-then-rename had a crash window in
+    // which `to` did not exist.
     async rename(from: string, to: string): Promise<void> {
-      await fs.rm(to, { force: true });
       await fs.rename(from, to);
     },
     async unlink(path: string): Promise<void> {
@@ -349,7 +414,10 @@ function processPort(): ProcessPort {
 }
 
 /**
- * M5 (D-67): global `fetch`, the only outbound network call in the app.
+ * M5 (D-67): the app's only outbound network call, routed through
+ * `fetchFollowingRedirects`. D-143 moved the transport from global `fetch` to
+ * `node:http`/`node:https` so every connection is pinned to policy-verified
+ * DNS answers (see the header of `http-policy.ts`).
  *
  * D-137 (F-02): `arrayBuffer()` used to read the WHOLE body before any size
  * check — a hostile or simply endless cover-image stream could grow the main
@@ -378,7 +446,13 @@ function httpPort(): HttpPort {
     try {
       const policy: RedirectPolicy = opts?.urlPolicy === undefined
         ? allowAnyHttpUrl
-        : { allow: opts.urlPolicy };
+        // D-143: any caller-supplied URL policy now also validates RESOLVED
+        // addresses and pins the socket to them. The two production callers are
+        // the thumbnail cache (`isPublicHttpsUrl`) and the updater
+        // (`isTrustedReleaseHost`); both need "no private/loopback IP behind a
+        // checked hostname". The permissive no-policy default stays unvalidated
+        // so local 127.0.0.1 traffic keeps working.
+        : { allow: opts.urlPolicy, allowResolvedAddress: isPublicResolvedAddress };
       const response = await fetchFollowingRedirects(url, {
         signal: controller.signal,
         headers: { 'user-agent': 'YTVDLT' },

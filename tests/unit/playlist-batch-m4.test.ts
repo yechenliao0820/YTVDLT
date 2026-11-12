@@ -60,7 +60,16 @@ function engine(stats: Stats, failUrl?: string, autoComplete = false): DownloadE
           });
         });
       }
-      return { pid: 1, cancel: async () => { stats.active -= 1; return true; } };
+      return {
+        pid: 1,
+        // D-142: a confirmed kill always settles the run (the process exits and
+        // the engine reports `canceled`), releasing the slot for a retry.
+        cancel: async () => {
+          stats.active -= 1;
+          onEvent({ type: 'canceled', taskId: req.taskId });
+          return true;
+        },
+      };
     },
     async selfUpdate() {
       return { fromVersion: '', toVersion: '', channel: 'stable', changed: false };

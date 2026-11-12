@@ -592,8 +592,11 @@ const M3_TEST_FILE_MAP = {
   'txt-import-service.test.ts': ['A-D129'],
   'txt-import-ui.test.ts': ['A-D129'],
   'update-dialog-cancel.test.ts': ['A-D114'],
+  'update-dialog-history.test.ts': ['A-D114'],
   'volume.test.ts': ['A-D118'],
   'queue-failure.test.ts': ['A-4.4-16', 'A-4.4-21'],
+  'queue-live-fixture.test.ts': ['A-4.4-16'],
+  'task-detail-live-fixture.test.ts': ['A-M4-06'],
   // D-137 · 本轮新增的 4 个回归测试文件（受控本地 HTTP 服务器 / 真实子进程
   // / 纯函数 / 真实 SiteSupportService），挂到新补的 A-D137；后两个另外挂到
   // 语义最接近的既有断言，便于交叉追溯。判定逻辑与门禁口径未改。
@@ -1298,7 +1301,7 @@ const M5_ASSERTIONS = [
   // 注意：`deferred` 的那条**不写 `tests`** —— 它的用例默认被 skip，按 tests 归因只能
   // 得到 0ms，反而会被 `M5-GATE-duration`（durationMs<=1 即 tooFast）判红，属于自伤。
   // =========================================================================
-  { id: 'A-D114', layer: 'L0', subject: '应用自更新交互：构建版本单一事实源、下载可取消、完成后清理、设置页动作与取消对话框', tests: ['app-version', 'app-update-cancel', 'app-update-cleanup', 'settings-app-update', 'update-dialog-cancel'], needs: ['vitest'], evidence: ['reports/vitest-results.json::app-version.test.ts,app-update-cancel.test.ts,app-update-cleanup.test.ts,settings-app-update.test.ts,update-dialog-cancel.test.ts', 'apps/desktop/src/main/app-update-service.ts,app-update-cleanup.ts', 'packages/ui/src/pages/settings/'] },
+  { id: 'A-D114', layer: 'L0', subject: '应用自更新交互：构建版本单一事实源、下载可取消、完成后清理、跨版本更新说明（D-140）、设置页动作与取消对话框', tests: ['app-version', 'app-update-cancel', 'app-update-cleanup', 'settings-app-update', 'update-dialog-cancel', 'update-dialog-history'], needs: ['vitest'], evidence: ['reports/vitest-results.json::app-version.test.ts,app-update-cancel.test.ts,app-update-cleanup.test.ts,settings-app-update.test.ts,update-dialog-cancel.test.ts,update-dialog-history.test.ts', 'apps/desktop/src/main/app-update-service.ts,app-update-cleanup.ts', 'packages/ui/src/pages/settings/'] },
   { id: 'A-D115', layer: 'L0', subject: '后处理阶段（合并/整理/校验）单调推进并在卡片如实呈现，不假装 100% 即完成', tests: ['postprocess-parser', 'queue-stage', 'task-queue-stage'], needs: ['vitest'], evidence: ['reports/vitest-results.json::postprocess-parser.test.ts,queue-stage.test.ts,task-queue-stage.test.ts', 'packages/engine-ytdlp/src/postprocess-parser.ts', 'packages/shared/src/events.ts'] },
   { id: 'A-D116', layer: 'L2', subject: '删除任务：记录/文件两个动作分离，8 种组合幂等（文件已被外部删除也不报失败）', tests: ['queue-delete', 'task-removal-idempotent'], needs: ['vitest'], evidence: ['reports/vitest-results.json::queue-delete.test.ts,task-removal-idempotent.test.ts', 'packages/ui/src/pages/queue/queue.js', 'core/src/task-queue/task-queue.ts'] },
   { id: 'A-D118', layer: 'L0', subject: '临时目录与输出目录同卷判定（跨卷回落、任务段名净化）', tests: ['volume'], needs: ['vitest'], evidence: ['reports/vitest-results.json::volume.test.ts', 'packages/core/src/path-resolver/volume.ts'] },

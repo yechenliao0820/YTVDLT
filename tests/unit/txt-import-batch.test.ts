@@ -33,13 +33,19 @@ function holdingEngine(stats: Stats): DownloadEngine {
     async version() { return 'fake'; },
     async probe() { return mediaInfo(); },
     async probePlaylist() { throw new Error('unused by TXT import'); },
-    download(req: DownloadRequest, _onEvent: (event: EngineEvent) => void) {
+    download(req: DownloadRequest, onEvent: (event: EngineEvent) => void) {
       stats.active += 1;
       stats.maxActive = Math.max(stats.maxActive, stats.active);
       stats.started.push(req.taskId);
       return {
         pid: 1,
-        cancel: async () => { stats.active -= 1; return true; },
+        // D-142: a confirmed kill always settles the run (the process exits and
+        // the engine reports `canceled`), releasing the slot for a retry.
+        cancel: async () => {
+          stats.active -= 1;
+          onEvent({ type: 'canceled', taskId: req.taskId });
+          return true;
+        },
       };
     },
     async selfUpdate() {

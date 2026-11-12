@@ -38,6 +38,22 @@ export interface AppRelease {
 }
 
 /**
+ * One version's notes inside the "what changed since your build" list (0.3.1,
+ * D-140).
+ *
+ * A release body answers "what changed in THIS version". A user who skipped
+ * versions needs the whole interval, one entry per version — otherwise the
+ * dialog shows a body that talks about work landed on a version they never saw.
+ */
+export interface AppReleaseNote {
+  /** Normalised version: `0.2.9`. */
+  readonly version: string;
+  readonly publishedAt: string;
+  /** Plain text, already flattened; empty when the release shipped no notes. */
+  readonly notes: string;
+}
+
+/**
  * What the update surface is doing right now.
  *
  * `ready` means "downloaded and verified, waiting for the user to click 安装";
@@ -50,6 +66,14 @@ export interface AppUpdateState {
   readonly phase: AppUpdatePhase;
   readonly currentVersion: string;
   readonly latest: AppRelease | null;
+  /**
+   * Every version between the running build (exclusive) and `latest`
+   * (inclusive), OLDEST FIRST — empty when the list could not be read, in which
+   * case the dialog falls back to `latest.notes`.
+   */
+  readonly releaseNotes: readonly AppReleaseNote[];
+  /** How many older versions were dropped because the note budget ran out. */
+  readonly omittedReleaseNotes: number;
   /** Human-readable reason for `error`, or an informational line. */
   readonly message: string;
   readonly downloadedBytes: number;

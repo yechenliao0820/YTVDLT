@@ -69,3 +69,56 @@ describe('settings application update action', () => {
     expect(app.calls).toEqual(['install', 'install']);
   });
 });
+
+/**
+ * D-141: the settings card froze for the whole download.
+ *
+ * `download` answers only when the transfer is over, so `data-update-state`
+ * stays `available` while bytes are moving. The refresh timer gated on that
+ * attribute alone, therefore it never read the status and the card never showed
+ * a byte of progress — a jump straight from "available" to "install now".
+ */
+describe('settings application update refresh gate', () => {
+  function gate(phase: string, appBusy: boolean): number {
+    const block = {
+      attributes: { 'data-update-state': phase },
+      getAttribute(key: string) { return this.attributes[key] ?? null; },
+    };
+    let ticks: (() => void)[] = [];
+    let reads = 0;
+    const context: any = {
+      appBusy,
+      doc: {
+        visibilityState: 'visible',
+        getElementById: (id: string) => (id === 'settings-app-block' ? block : null),
+      },
+      readAppState: () => { reads += 1; },
+      setInterval: (fn: () => void) => { ticks.push(fn); return 0; },
+    };
+    const anchor = source.indexOf('// The queue dialog polls the same state');
+    const start = source.indexOf('setInterval(function () {', anchor);
+    const end = source.indexOf('}, 1500);', start) + '}, 1500);'.length;
+    expect(anchor).toBeGreaterThan(-1);
+    expect(start).toBeGreaterThan(anchor);
+    expect(end).toBeGreaterThan(start);
+    runInNewContext(source.slice(start, end), context);
+    ticks.forEach((tick) => tick());
+    return reads;
+  }
+
+  it('keeps polling while the download action is still pending', () => {
+    // Phase is `available` — the main process has not answered `download` yet.
+    expect(gate('available', true)).toBe(1);
+  });
+
+  it('keeps polling while the main process reports downloading / checking', () => {
+    expect(gate('downloading', false)).toBe(1);
+    expect(gate('checking', false)).toBe(1);
+  });
+
+  it('stays quiet when nothing is in flight', () => {
+    expect(gate('available', false)).toBe(0);
+    expect(gate('idle', false)).toBe(0);
+    expect(gate('ready', false)).toBe(0);
+  });
+});

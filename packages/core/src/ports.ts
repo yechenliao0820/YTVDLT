@@ -138,7 +138,19 @@ export interface ITaskQueue {
   enqueue(record: TaskRecord): Promise<void>;
   /** Enqueue N independent tasks (playlist batch, M4-4). */
   enqueueBatch(records: readonly TaskRecord[]): Promise<readonly string[]>;
+  /**
+   * D-142: `false` means the process was NOT confirmed terminated — either the
+   * tree kill failed or the task is mid-probe with no handle yet. The record
+   * keeps its non-terminal state and its slot; the cancel may be retried at
+   * any time. `true` means the tree is confirmed dead (or the task was still
+   * queued and was dropped).
+   */
   cancel(taskId: string): Promise<boolean>;
+  /**
+   * Re-queue a settled task. Refuses (throws) while the task still occupies a
+   * slot (D-142): a second run for the same id would double-write the temp
+   * dir, manifest and output file.
+   */
   restart(taskId: string): Promise<void>;
   get(taskId: string): TaskRecord | undefined;
   list(): readonly TaskRecord[];

@@ -206,7 +206,12 @@
 
   function tasks() {
     if (param('empty', '0') === '1') return [];
-    if (live.active && Array.isArray(live.tasks)) return live.tasks;
+    // D-141: live mode NEVER borrows the screenshot fixture. Boot used to run a
+    // synchronous render before the first `TASK_LIST` reply, so `live.tasks`
+    // was still null and the six sample rows below were painted into the real
+    // window — every launch, and again on every language switch (which is a
+    // full page reload). "Unknown" is not "these six fake downloads".
+    if (live.active) return Array.isArray(live.tasks) ? live.tasks : [];
     var injected = global.__YTVDLT_TASKS__;
     return Array.isArray(injected) && injected.length > 0 ? injected : SAMPLE;
   }
@@ -484,10 +489,14 @@
     return call('TASK_LIST', listPayload).then(function (result) {
       if (!result || result.ok === false) { live.error = true; render(); return; }
       var wasError = live.error;
+      // D-141: the very first reply must always repaint — with an empty queue
+      // the data is identical to the pre-reply placeholder, so the paint-key
+      // comparison below would otherwise swallow the transition to "empty".
+      var firstReply = live.tasks === null;
       live.error = false;
       live.tasks = (Array.isArray(result.items) ? result.items : []).map(toTask);
       // Recovering from an error must always repaint, even if the data matches.
-      if (wasError || paintKey(live.tasks) !== lastPaint) { render(); return; }
+      if (firstReply || wasError || paintKey(live.tasks) !== lastPaint) { render(); return; }
       if (progressKey(live.tasks) === lastProgress) return;
       patchProgress(live.tasks);
     });
@@ -1522,6 +1531,10 @@
     var visible = sortTasks(filterTasks(list, model.tab, model.query));
     var perTab = counts(list);
     var errorMode = param('error', '0') === '1' || live.error;
+    // D-141: live mode, after boot and before the first `TASK_LIST` reply. The
+    // queue is unknown here — neither the fixture nor the empty illustration may
+    // be painted, or the window would claim something it cannot know yet.
+    var awaitingFirstList = live.active && live.tasks === null && !live.error;
     // Live mode reports what is actually running; the fixture keeps 2/3 so the
     // screenshot baselines stay identical.
     var banner = CONCURRENCY;
@@ -1539,13 +1552,15 @@
     var empty = doc.getElementById('queue-empty');
     var error = doc.getElementById('queue-error');
     var showError = errorMode;
-    var showEmpty = !errorMode && visible.length === 0;
+    var showEmpty = !errorMode && visible.length === 0 && !awaitingFirstList;
     setHidden(empty, !showEmpty);
     setHidden(error, !showError);
-    setHidden(cardsHost, showError || showEmpty);
+    setHidden(cardsHost, showError || showEmpty || awaitingFirstList);
     if (showEmpty) setEmptyVariant(list.length === 0 ? 'empty' : 'filter');
     if (showError) {
       root.setAttribute('data-state', 'error');
+    } else if (awaitingFirstList) {
+      root.setAttribute('data-state', 'loading');
     } else if (visible.length === 0) {
       root.setAttribute('data-state', 'empty');
     } else {
@@ -2018,6 +2033,14 @@
       });
     };
     loop();
+    // D-141: a first reply that never lands would leave the shell blank forever.
+    // After this window the page admits it could not read the queue and offers
+    // the normal retry button, instead of silently showing nothing.
+    global.setTimeout(function () {
+      if (live.tasks !== null || live.error) return;
+      live.error = true;
+      render();
+    }, 2500);
   }
 
   if (global.YTVDLT && global.YTVDLT.shell) {

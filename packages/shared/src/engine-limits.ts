@@ -73,3 +73,29 @@ export const OUTPUT_LIMIT_MARKER = '[ytvdlt] output limit exceeded: child termin
  * success path closed.
  */
 export const TERMINATION_UNCONFIRMED_MARKER = '[ytvdlt] child tree termination unconfirmed';
+
+/**
+ * D-144: per-stream ceiling on the RETAINED TAIL of one streaming (download)
+ * spawn, in BYTES. Unlike D-133 this never terminates the child — a normal
+ * download legitimately streams megabytes of progress by design — it only
+ * bounds the diagnostic copy the main process keeps in memory. The realtime
+ * `onChunk` callback is unaffected and still sees every byte.
+ *
+ * Same magnitude as D-133's stderr backstop: yt-dlp's diagnostic output for a
+ * failed job is a handful of ending lines, so 1 MiB of tail is generous.
+ */
+export const STREAM_TAIL_MAX_BYTES = 1 * 1024 * 1024;
+
+/**
+ * D-144: placed ONCE, at the FRONT, of a stream's retained tail when earlier
+ * bytes were discarded to hold the ceiling. Front, not appended like
+ * OUTPUT_LIMIT_MARKER: it describes the data that follows, and the END of the
+ * tail must stay pristine because error diagnosis reads the last lines.
+ *
+ * Neutral like OUTPUT_LIMIT_MARKER / TERMINATION_UNCONFIRMED_MARKER: it
+ * contains no keyword from `core/src/error-mapper/rules.ts`, so a truncated
+ * log can never be mislabelled as a network or permission failure, and the
+ * fact it states is "this log is not complete", nothing more.
+ */
+export const STREAM_TAIL_TRUNCATED_MARKER =
+  '[ytvdlt] stream tail truncated: earlier output discarded';

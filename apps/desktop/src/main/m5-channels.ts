@@ -961,6 +961,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     if (deps.appUpdate === undefined) {
       return {
         phase: 'idle', currentVersion: '', latest: null,
+        releaseNotes: [], omittedReleaseNotes: 0,
         message: '此构建不含更新器', downloadedBytes: 0, totalBytes: null,
         skippedVersion: null, lastCheckedAt: null, canAutoInstall: false,
       };

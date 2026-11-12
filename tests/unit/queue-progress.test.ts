@@ -141,8 +141,11 @@ describe('D-107 · the live poll keeps null and repaints on every real change', 
   it('unknown → 0 → non-zero → terminal', async () => {
     vi.useFakeTimers();
     const h = harness({ live: true, items: [dto({ percent: null })] });
-    // Nothing polled yet: the deterministic SAMPLE is on screen (6 cards).
-    expect(h.cards.children.length).toBe(6);
+    // D-141: before the first `TASK_LIST` reply the queue is UNKNOWN, so nothing
+    // is painted. The six-row screenshot fixture used to be rendered here into
+    // the real window (it was even asserted as "expected"); that is the bug.
+    expect(h.cards.children.length).toBe(0);
+    expect(h.root.getAttribute('data-state')).toBe('loading');
 
     await h.settle();
     expect(onlyCard(h).getAttribute('data-progress-mode')).toBe('unknown');

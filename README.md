@@ -220,6 +220,12 @@ never installs silently. When the installer is ready the button switches to
 *Install now* and actually sends `install` — it no longer loops back through
 `download`. (D-104, D-119)
 
+The release-notes dialog explains the **whole interval you skipped**: read the
+release list, keep every version between your build and the one on offer, and
+print one block per version, oldest first. A machine on 0.2.8 upgrading to
+0.3.0 therefore reads what 0.2.9 changed *and* what 0.3.0 changed — instead of
+one body that refers to a version it never ran. (D-140)
+
 ### Known limitations
 
 Stated plainly rather than glossed over:
@@ -246,9 +252,9 @@ Stated plainly rather than glossed over:
 
 Full list: [`docs/AI-MAINTENANCE.md`](docs/AI-MAINTENANCE.md) §10.
 
-## Release history — 0.2.2 → 0.2.9
+## Release history — 0.2.2 → 0.3.0
 
-Eight releases in three days. The trajectory moved from UI polish, through
+Nine releases in four days. The trajectory moved from UI polish, through
 download-core correctness, to edge cases that only appear after a file has been
 moved or deleted outside the app.
 
@@ -262,14 +268,12 @@ moved or deleted outside the app.
 | 0.2.7 | 2026-11-09 | Updater install state machine; card button height adapts to large windows | D-119 | [v0.2.7](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.7) |
 | 0.2.8 | 2026-11-10 | Idempotent deletion; on-demand local file state detection; layered licence pane with the full English licence | D-120 / D-121 | [v0.2.8](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.8) |
 | **0.2.9** | **2026-11-10** | Native right-click edit menu in editable fields; settings placeholder shows `—` instead of a made-up path | D-122 / D-123 | [v0.2.9](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.9) |
+| 0.3.0 | 2026-11-12 | Subtitle pipeline; TXT / playlist batch import; bounded engine output; dynamic supported-sites list and the six-state URL pre-check; HTTP / IPC / process-termination hardening; command templates | D-124…D-139 | [v0.3.0](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.0) |
 
-Unreleased work sitting on top of 0.2.9 — subtitles, batch import, playlist
-batch, supported sites, the URL support pre-check, command templates and the
-D-137/D-138 security-boundary hardening — is described in
+0.3.0 is published. Work landing on top of it — including the version-jump
+release-notes fix (D-140, see *Staying current*) — is described in
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) (up to D-139). A `0.3.0` installer has
-been built locally (see [`docs/BUILD-HISTORY.md`](docs/BUILD-HISTORY.md)) but
-**no GitHub Release exists yet**.
+[`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Engineering and verification
 
@@ -283,9 +287,9 @@ The 0.2.8 release was gated by:
 | Screenshot drift | 0 px (two DOM baselines rebuilt per case after the licence-pane change; no PNG baseline was overwritten) |
 | `check-layering` / `frozen-gate` | 0 violations / passed |
 
-The unreleased work on top of 0.2.9 (subtitles, batch import, playlist batch,
-supported sites, URL pre-check, command templates and the D-137/D-138
-security-boundary hardening) was gated separately by:
+The 0.3.0 work (subtitles, batch import, playlist batch, supported sites, URL
+pre-check, command templates and the D-137/D-138 security-boundary hardening)
+was gated separately by:
 
 | Gate | Result |
 |---|---|

@@ -10,7 +10,8 @@
  *  L2 · the REAL `node-ports` adapter spawning the REAL bundled node.exe —
  *       proves the enforcement end to end: overflow terminates the process,
  *       stderr carries the marker, exit code is poisoned, and a normal
- *       download's unbounded stream is untouched.
+ *       download's realtime stream is untouched (its diagnostic copy is a
+ *       bounded tail since D-144 — see stream-tail-buffer.test.ts).
  *
  * Why node.exe and not yt-dlp.exe: a ceiling needs an output PRODUCER whose
  * size is controllable to the byte (`node -e '...'`), while yt-dlp's metadata
@@ -26,6 +27,7 @@ import type { CorePorts, ProcessPort, SpawnResult } from '@ytvdlt/shared';
 import {
   METADATA_MAX_STDOUT_BYTES, METADATA_MAX_STDERR_BYTES, OUTPUT_LIMIT_MARKER,
   URL_PRECHECK_TIMEOUT_MS,
+  STREAM_TAIL_MAX_BYTES, STREAM_TAIL_TRUNCATED_MARKER,
 } from '@ytvdlt/shared';
 import { createNodePorts, OVERFLOW_SETTLE_GRACE_MS } from '../../apps/desktop/src/main/adapters/node-ports.js';
 import { createBoundedOutput } from '../../apps/desktop/src/main/adapters/output-limiter.js';
@@ -397,21 +399,37 @@ describe('TASK-02 · bounded spawn against the real bundled node.exe (L2)', () =
     expect(OVERFLOW_SETTLE_GRACE_MS).toBeLessThan(URL_PRECHECK_TIMEOUT_MS);
   });
 
-  it('10 · a normal download stream is NEVER capped (unbounded stays unbounded)', async () => {
+  it('10 · a normal download stream is never KILLED and its realtime feed stays whole (D-144 tail)', async () => {
     const run = makeRun();
     // ~8 MiB — 8x the metadata ceiling. A download may legitimately emit this.
     const script = 'const c="p".repeat(65_536);'
       + 'for(let i=0;i<128;i+=1) process.stdout.write(c);';
+    let chunkBytes = 0;
     const handle = run.process.spawnStreaming(
       NODE_EXE,
       ['-e', script],
       { shell: false, windowsHide: true, timeoutMs: 30_000 },
-      () => undefined,
+      (chunk) => {
+        if (chunk.stream === 'stdout') chunkBytes += Buffer.byteLength(chunk.text, 'utf8');
+      },
     );
     const done = await handle.done;
     expect(done.exitCode).toBe(0);
-    expect(Buffer.byteLength(done.stdout, 'utf8')).toBe(65_536 * 128);
+    expect(done.timedOut).toBe(false);
+    // The realtime feed is untouched: every byte crossed `onChunk` (D-144 kept
+    // progress parsing unlimited — only the diagnostic copy is bounded).
+    expect(chunkBytes).toBe(65_536 * 128);
+    // The diagnostic copy is now a bounded TAIL: the shared marker sits in
+    // front exactly once, the retained content fits the ceiling, and the last
+    // bytes written survive (error diagnosis reads the end). The child was NOT
+    // killed and D-133's overflow marker never appears on this path.
+    expect(done.stdout.startsWith(STREAM_TAIL_TRUNCATED_MARKER)).toBe(true);
+    expect(done.stdout.split(STREAM_TAIL_TRUNCATED_MARKER).length - 1).toBe(1);
     expect(done.stdout).not.toContain(OUTPUT_LIMIT_MARKER);
+    expect(Buffer.byteLength(done.stdout, 'utf8')).toBeLessThanOrEqual(
+      STREAM_TAIL_MAX_BYTES + Buffer.byteLength(`${STREAM_TAIL_TRUNCATED_MARKER}\n`, 'utf8'),
+    );
+    expect(done.stdout.endsWith('p')).toBe(true);
   });
 
   it('11 · the engine hands the ceilings to the adapter for probe and probePlaylist', async () => {

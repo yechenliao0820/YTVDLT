@@ -920,7 +920,12 @@
       if (doc.visibilityState === 'hidden') return;
       var block = doc.getElementById('settings-app-block');
       var phase = block === null ? 'idle' : block.getAttribute('data-update-state');
-      if (phase === 'downloading' || phase === 'checking') readAppState();
+      // D-141: `appBusy` is the ONLY signal that exists while `download` is
+      // still pending — the main process answers that action when the transfer
+      // finishes, so `data-update-state` stays `available` for the whole
+      // download. Gating on the phase alone froze the card: no text updates and
+      // no progress for minutes, then a jump straight to "install now".
+      if (appBusy || phase === 'downloading' || phase === 'checking') readAppState();
     }, 1500);
   }
 

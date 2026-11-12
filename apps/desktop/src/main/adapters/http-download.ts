@@ -35,6 +35,14 @@ export interface DownloadRequest {
    * chain with the permissive default (used by offline cancellation tests).
    */
   readonly hostPolicy?: (url: string) => boolean;
+  /**
+   * D-143: checked against EVERY address EVERY hop's hostname resolves to; the
+   * socket is then pinned to the verified addresses. Production passes
+   * `isPublicResolvedAddress` so a public-looking release host that quietly
+   * resolves to a private/loopback IP (DNS rebinding) is refused. Omitted =
+   * URL check only, as before D-143.
+   */
+  readonly allowResolvedAddress?: (address: string) => boolean;
   readonly signal?: AbortSignal;
   readonly trashPartial?: (path: string) => Promise<void>;
 }
@@ -75,9 +83,16 @@ export async function downloadToFile(request: DownloadRequest): Promise<Download
     // let a checked github.com URL bounce to an arbitrary host (or an http
     // downgrade) without this layer ever seeing the final address. Every hop is
     // now re-checked, the chain is capped, and the same AbortSignal covers it.
+    // D-143: `allowResolvedAddress` (when the caller passes one) additionally
+    // gates every resolved IP and pins the connection to the verified address.
     const redirectPolicy: RedirectPolicy = request.hostPolicy === undefined
       ? allowAnyHttpUrl
-      : { allow: request.hostPolicy };
+      : {
+          allow: request.hostPolicy,
+          ...(request.allowResolvedAddress === undefined
+            ? {}
+            : { allowResolvedAddress: request.allowResolvedAddress }),
+        };
     const response = await fetchFollowingRedirects(request.url, {
       signal: controller.signal,
       headers: { 'user-agent': 'YTVDLT-updater' },

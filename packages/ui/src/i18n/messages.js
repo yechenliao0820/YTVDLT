@@ -308,7 +308,10 @@
       // 0.2.1 (D-93): 应用更新弹窗（queue 与 settings 共用）
       'update.title': '发现新版本',
       'update.subtitle': 'v{version} 已发布（当前 v{current}）',
+      'update.subtitle.jump': 'v{version} 已发布（当前 v{current}，跳过 {skipped} 个版本）',
       'update.notes': '更新内容',
+      'update.notes.range': '更新内容 · v{from} → v{to}，共 {count} 个版本',
+      'update.notes.omitted': '更早的 {count} 个版本说明已省略，可前往发布页查看。',
       'update.notes.empty': '该版本未填写发布说明。',
       'update.download': '下载并安装',
       'update.cancelDownload': '取消下载',
@@ -882,7 +885,10 @@
 
       'update.title': 'Update available',
       'update.subtitle': 'v{version} is out (you have v{current})',
+      'update.subtitle.jump': 'v{version} is out (you have v{current}; {skipped} version(s) skipped)',
       'update.notes': "What's new",
+      'update.notes.range': "What's new · v{from} → v{to}, {count} versions",
+      'update.notes.omitted': 'Notes for {count} older version(s) are omitted; see the release page.',
       'update.notes.empty': 'This release has no notes.',
       'update.download': 'Download and install',
       'update.cancelDownload': 'Cancel download',

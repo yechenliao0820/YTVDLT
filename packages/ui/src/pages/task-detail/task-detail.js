@@ -33,16 +33,38 @@
     return SAMPLE;
   }
 
-  /** Which buttons are usable for a given task (mirrors the service rules). */
-  function availability(model) {
+  /**
+   * Which buttons are usable for a given task (mirrors the service rules).
+   * Two branches, exactly like queue.js `actionsFor` (D-76): live mode must
+   * offer only what the backend can actually do. D-146: `TaskQueue.cancel()`
+   * has a cancellable handle for the download stage alone (registered by
+   * `executeDownload()`), so during FetchingInfo / ReadyWithInfo a cancel has
+   * nothing to kill and returns false — arming the button there would only
+   * produce a refusal. Live mode therefore keeps cancel for Running / Queued
+   * (the queue page's rule). The static fixture branch keeps the legacy rule
+   * verbatim: the frozen file:// screenshot baseline must stay byte-identical.
+   */
+  function availability(model, liveMode) {
     var running = model.state === 'Running' || model.state === 'FetchingInfo';
     var retryable = model.state === 'Error' || model.state === 'Canceled';
+    if (liveMode === true) {
+      // D-76 / D-146: same branch shape and cancel rule as queue.js.
+      return {
+        'open-file': Array.isArray(model.artifacts) && model.artifacts.length > 0,
+        'open-folder': Array.isArray(model.artifacts) && model.artifacts.length > 0,
+        'copy-url': true,
+        'copy-error-report': typeof model.errorCode === 'string' && model.errorCode.length > 0,
+        cancel: model.state === 'Running' || model.state === 'Queued',
+        remove: !running,
+        retry: retryable
+      };
+    }
     return {
       'open-file': Array.isArray(model.artifacts) && model.artifacts.length > 0,
       'open-folder': Array.isArray(model.artifacts) && model.artifacts.length > 0,
       'copy-url': true,
       'copy-error-report': typeof model.errorCode === 'string' && model.errorCode.length > 0,
-      cancel: model.state === 'Running' || model.state === 'ReadyWithInfo' || model.state === 'FetchingInfo',
+      cancel: running || model.state === 'ReadyWithInfo',
       remove: !running,
       retry: retryable
     };
@@ -52,7 +74,7 @@
     doc.getElementById('ytvdlt-output').textContent = JSON.stringify({
       action: action,
       taskId: model.id,
-      accepted: availability(model)[action] === true
+      accepted: availability(model, live)[action] === true
     }, null, 2);
   }
 
@@ -78,11 +100,11 @@
     }
   }
 
-  var current = { model: task(), enabled: {} };
+  var current = { model: live ? null : task(), enabled: {} };
 
   function paint(model) {
     current.model = model;
-    current.enabled = availability(model);
+    current.enabled = availability(model, live);
     doc.getElementById('detail-id').textContent = model.id;
     doc.getElementById('detail-state').textContent = model.state;
     doc.getElementById('detail-progress').textContent = typeof model.percent === 'number' ? model.percent + '%' : '—';
@@ -93,7 +115,7 @@
     ACTIONS.forEach(function (action) {
       var node = doc.querySelector('[data-action="' + action + '"]');
       if (node === null) return;
-      node.setAttribute('aria-disabled', availability(model)[action] ? 'false' : 'true');
+      node.setAttribute('aria-disabled', availability(model, live)[action] ? 'false' : 'true');
     });
   }
 
@@ -118,8 +140,10 @@
   function load(taskId) {
     invoke('TASK_DETAIL', { taskId: taskId }).then(function (result) {
       if (!result || result.found !== true || !result.task) { showMissing(true); return; }
-      showMissing(false);
+      // Paint BEFORE revealing the body: `showMissing(false)` reads the current
+      // model to restore `data-state`, and in live mode it is null until now.
       paint(result.task);
+      showMissing(false);
     });
   }
 
@@ -248,7 +272,26 @@
     setModalHidden(modal, false);
   }
 
-  paint(current.model);
+  if (!live) paint(current.model);
+
+  // D-141: in live mode the fixture is never shown. `index.html` ships the
+  // fixture values because the screenshot baseline depends on them, so a live
+  // load blanks them until `TASK_DETAIL` answers — a fake "t1 / Error / 42%"
+  // must not flash on every navigation (language switches reload the page).
+  function blankFixture() {
+    ['detail-id', 'detail-state', 'detail-progress', 'detail-code', 'detail-artifacts', 'detail-url']
+      .forEach(function (id) {
+        var node = doc.getElementById(id);
+        if (node !== null) node.textContent = '—';
+      });
+    var host0 = doc.getElementById('ytvdlt-task-detail');
+    if (host0 !== null) host0.setAttribute('data-state', 'loading');
+    ACTIONS.forEach(function (action) {
+      var node = doc.querySelector('[data-action="' + action + '"]');
+      if (node !== null) node.setAttribute('aria-disabled', 'true');
+    });
+  }
+  if (live) blankFixture();
 
   ACTIONS.forEach(function (action) {
     var button = doc.querySelector('[data-action="' + action + '"]');

@@ -236,6 +236,7 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       state: () => appUpdater === null
         ? {
           phase: 'idle', currentVersion: appVersion, latest: null, message: '更新器尚未就绪',
+          releaseNotes: [], omittedReleaseNotes: 0,
           downloadedBytes: 0, totalBytes: null, skippedVersion: null,
           lastCheckedAt: null, canAutoInstall: false,
         }
@@ -245,6 +246,7 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
           ok: false, action, message: '更新器尚未就绪',
           state: {
             phase: 'idle', currentVersion: appVersion, latest: null, message: '',
+            releaseNotes: [], omittedReleaseNotes: 0,
             downloadedBytes: 0, totalBytes: null, skippedVersion: null,
             lastCheckedAt: null, canAutoInstall: false,
           },

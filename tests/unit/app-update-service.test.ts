@@ -42,12 +42,16 @@ interface Harness {
 
 function harness(options: {
   response?: () => Promise<string>;
+  /** `GET /releases` — the history lookup (D-140). Defaults to `response`. */
+  listResponse?: () => Promise<string>;
   currentVersion?: string;
   config?: Record<string, unknown>;
 } = {}): Harness {
   const base = createInMemoryPorts();
+  const single = options.response ?? (async () => releaseJson());
+  const list = options.listResponse ?? single;
   const http: HttpPort = {
-    getText: options.response ?? (async () => releaseJson()),
+    getText: async (url: string) => (url.includes('/releases?') ? list() : single()),
     getBytes: async () => new Uint8Array(),
   };
   const ports: CorePorts = { ...base.ports, http };
@@ -118,6 +122,71 @@ describe('app update service · check', () => {
   it('honours the "check on startup" switch', () => {
     const h = harness({ config: { 'advanced.autoCheckAppUpdate': false } });
     expect(h.service.shouldAutoCheck()).toBe(false);
+  });
+});
+
+describe('app update service · version jump history', () => {
+  const payload = (version: string, body: string): Record<string, unknown> => ({
+    tag_name: `v${version}`,
+    name: `YTVDLT ${version}`,
+    body,
+    html_url: `https://github.com/yechenliao0820/YTVDLT/releases/tag/v${version}`,
+    published_at: '2026-11-10T00:00:00Z',
+    draft: false,
+    prerelease: false,
+    assets: [],
+  });
+
+  const history = (): Promise<string> => Promise.resolve(JSON.stringify([
+    payload('0.3.0', '## YTVDLT 0.3.0\n\nBig release'),
+    payload('0.2.9', '## Fixed\n\n- right-click menu'),
+    payload('0.2.8', '## YTVDLT 0.2.8\n\n- before your build'),
+  ]));
+
+  it('lists every skipped version when the user jumps several releases', async () => {
+    const h = harness({
+      currentVersion: '0.2.8',
+      response: async () => releaseJson({
+        tag_name: 'v0.3.0', name: 'YTVDLT 0.3.0', body: '## YTVDLT 0.3.0\n\nBig release',
+      }),
+      listResponse: history,
+    });
+    const state = await h.service.check({ manual: true });
+    expect(state.phase).toBe('available');
+    expect(state.releaseNotes.map((note) => note.version)).toEqual(['0.2.9', '0.3.0']);
+    expect(state.releaseNotes[0]?.notes).toContain('right-click menu');
+    expect(state.omittedReleaseNotes).toBe(0);
+  });
+
+  it('falls back to the newest body when the history lookup fails', async () => {
+    const h = harness({
+      currentVersion: '0.1.0',
+      listResponse: async () => { throw new Error('HTTP 403'); },
+    });
+    const state = await h.service.check({ manual: true });
+    expect(state.phase).toBe('available');
+    expect(state.releaseNotes.map((note) => note.version)).toEqual(['0.2.1']);
+    expect(state.releaseNotes[0]?.notes).toContain('支持检查更新');
+  });
+
+  it('falls back when the list payload is not a release array', async () => {
+    const h = harness({
+      currentVersion: '0.2.8',
+      response: async () => releaseJson({
+        tag_name: 'v0.3.0', name: 'YTVDLT 0.3.0', body: 'Big release',
+      }),
+      listResponse: async () => releaseJson(),
+    });
+    const state = await h.service.check({ manual: true });
+    expect(state.phase).toBe('available');
+    expect(state.releaseNotes.map((note) => note.version)).toEqual(['0.3.0']);
+  });
+
+  it('clears the history again once the app is up to date', async () => {
+    const h = harness({ currentVersion: '0.2.1' });
+    const state = await h.service.check({ manual: true });
+    expect(state.phase).toBe('idle');
+    expect(state.releaseNotes).toEqual([]);
   });
 });
 

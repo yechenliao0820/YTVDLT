@@ -24,16 +24,27 @@
  *   - `install()` re-verifies all three on the bytes about to be launched, so
  *     a file replaced between "ready" and "install" cannot be executed;
  *   - the installer URL must be a GitHub host (see `isTrustedReleaseHost`).
+ *
+ * D-140: `check()` also reads the release LIST, so a user who skipped several
+ * versions gets one block per version instead of a single body that refers to a
+ * version they never ran. That lookup is best-effort — failing it must never
+ * turn a perfectly good "update available" into an error.
  */
 import { readFile, rename, writeFile } from 'node:fs/promises';
 import type {
-  AppRelease, AppReleaseAsset, AppUpdateAction, AppUpdateActionResult,
+  AppRelease, AppReleaseAsset, AppReleaseNote, AppUpdateAction, AppUpdateActionResult,
   AppUpdateState, CorePorts,
 } from '@ytvdlt/shared';
 import type { IConfigStore, ILogger } from '@ytvdlt/core';
-import { isNewerVersion } from '@ytvdlt/core';
-import { fetchLatestRelease, isTrustedReleaseHost, type ReleaseSource } from './github-releases.js';
-import { downloadToFile, fileSize, looksLikeExecutable, PartialCleanupError } from './adapters/http-download.js';
+import { collectReleaseNotes, isNewerVersion } from '@ytvdlt/core';
+import {
+  fetchLatestRelease, fetchReleaseList, isTrustedReleaseHost, type ReleaseSource,
+} from './github-releases.js';
+import {
+  downloadToFile, fileSize, looksLikeExecutable, PartialCleanupError,
+  type DownloadRequest, type DownloadResult,
+} from './adapters/http-download.js';
+import { isPublicResolvedAddress } from './adapters/http-policy.js';
 import { createUpdateCleanupFiles, rememberPendingUpdate } from './app-update-cleanup.js';
 
 /** Where the update settings live (advanced domain, same place as D-67). */
@@ -62,6 +73,13 @@ export interface AppUpdateServiceDeps {
   /** Quit after the installer process is launched. */
   readonly quit: () => void;
   readonly trashPartial?: (path: string) => Promise<void>;
+  /**
+   * D-143: the installer downloader. Defaults to the real `downloadToFile`
+   * (D-137 redirect policy + D-143 DNS pinning); injected by tests so they
+   * stay offline — the old global-`fetch` stub stopped working when the
+   * transport moved to `node:http`/`node:https`.
+   */
+  readonly downloadInstaller?: (request: DownloadRequest) => Promise<DownloadResult>;
 }
 
 export interface AppUpdateService {
@@ -130,6 +148,9 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
   /** Hash actually verified on the bytes now in `installerPath` (D-104). */
   let verifiedSha256: string | null = null;
   let lastCheckedAt: string | null = null;
+  /** D-140: per-version notes for the interval the user skipped, oldest first. */
+  let releaseNotes: readonly AppReleaseNote[] = [];
+  let omittedReleaseNotes = 0;
   let disposed = false;
   let downloadController: AbortController | null = null;
   let downloadFinished: Promise<void> | null = null;
@@ -147,6 +168,8 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       phase,
       currentVersion: deps.currentVersion,
       latest,
+      releaseNotes,
+      omittedReleaseNotes,
       message,
       downloadedBytes,
       totalBytes,
@@ -176,6 +199,42 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
     }
   }
 
+  /**
+   * D-140: rebuild the "what changed since your build" stack.
+   *
+   * Best-effort by design — a failed history lookup must never turn a valid
+   * "update available" into an error. When the list endpoint is unreachable
+   * (offline, rate-limited, GitHub outage) the latest release's own body is
+   * still better than an empty dialog, so that is the fallback.
+   */
+  async function notesSince(
+    http: CorePorts['http'],
+    release: AppRelease,
+  ): Promise<{ notes: readonly AppReleaseNote[]; omitted: number }> {
+    const fallback = (): { notes: readonly AppReleaseNote[]; omitted: number } => {
+      const digest = collectReleaseNotes([release], deps.currentVersion, release.version);
+      return { notes: digest.blocks, omitted: digest.omitted };
+    };
+    if (http === undefined) return fallback();
+    try {
+      const list = await fetchReleaseList(http, deps.source);
+      if (list.length === 0) return fallback();
+      const digest = collectReleaseNotes(list, deps.currentVersion, release.version);
+      if (digest.blocks.length === 0) return fallback();
+      const hasLatest = digest.blocks.some((block) => block.version === release.version);
+      if (hasLatest) return { notes: digest.blocks, omitted: digest.omitted };
+      // The list is paginated and the newest release must never be missing from
+      // the dialog: append the authoritative single-release body when it is.
+      const latestOnly = collectReleaseNotes([release], deps.currentVersion, release.version);
+      return { notes: [...digest.blocks, ...latestOnly.blocks], omitted: digest.omitted };
+    } catch (error) {
+      await logger.warn('app-update', 'release history unavailable; showing the latest notes only', {
+        detail: messageOf(error),
+      });
+      return fallback();
+    }
+  }
+
   async function check(options: { manual?: boolean } = {}): Promise<AppUpdateState> {
     if (disposed) return state();
     if (phase === 'checking' || phase === 'downloading') return state();
@@ -201,6 +260,8 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
         latest = null;
         installerPath = null;
         verifiedSha256 = null;
+        releaseNotes = [];
+        omittedReleaseNotes = 0;
         phase = 'idle';
         message = `已是最新版本（${deps.currentVersion}）`;
         return state();
@@ -211,10 +272,17 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       verifiedSha256 = null;
       downloadedBytes = 0;
       totalBytes = release.installer?.sizeBytes ?? null;
+      // D-140: the dialog explains the whole skipped interval, not just the
+      // newest body. A failure here degrades to `latest.notes`, never to an error.
+      const digest = await notesSince(http, release);
+      releaseNotes = digest.notes;
+      omittedReleaseNotes = digest.omitted;
       phase = 'available';
       message = `发现新版本 ${release.version}`;
       await logger.info('app-update', 'new version available', {
-        current: deps.currentVersion, latest: release.version,
+        current: deps.currentVersion,
+        latest: release.version,
+        notesFor: releaseNotes.length,
       });
       return state();
     } catch (error) {
@@ -292,13 +360,18 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       }
 
       const target = `${deps.updatesDir}/${safeFileName(asset.name)}`;
-      const result = await downloadToFile({
+      const result = await (deps.downloadInstaller ?? downloadToFile)({
         url: asset.url,
         targetPath: target,
         expectedBytes: asset.sizeBytes > 0 ? asset.sizeBytes : null,
         // D-137: the allowlist is checked again on EVERY redirect hop, not only
         // on the `browser_download_url` we validated above.
         hostPolicy: isTrustedReleaseHost,
+        // D-143: DNS rebinding guard — every address every hop's hostname
+        // resolves to must be public, and the socket is pinned to the verified
+        // address. A checked github.com URL that quietly resolves to a private
+        // IP is refused before any byte is fetched.
+        allowResolvedAddress: isPublicResolvedAddress,
         signal: controller.signal,
         ...(deps.trashPartial === undefined ? {} : { trashPartial: deps.trashPartial }),
         onProgress: (progress) => {

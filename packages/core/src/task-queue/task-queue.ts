@@ -220,6 +220,10 @@ export class TaskQueue implements ITaskQueue {
       const next = this.records.get(nextId);
       if (next === undefined) continue;
       if (next.state !== 'Idle' && next.state !== 'ReadyWithInfo') continue;
+      // D-142 invariant: a task that already occupies a slot must never be
+      // started a second time. A FIFO entry for a running id can only be
+      // stale; drop it — the task is executing and needs no slot.
+      if (this.running.has(nextId)) continue;
       void this.runSafely(next);
     }
   }
@@ -292,7 +296,12 @@ export class TaskQueue implements ITaskQueue {
 
       const outcome = await this.executeDownload(record, effectiveRequest);
       if (outcome.kind === 'canceled') {
-        this.transition(record, 'Canceled');
+        // D-142: `cancel()` may already have transitioned the record while the
+        // engine's close event was still pending (the kill is confirmed before
+        // `executeDownload` settles). `Canceled -> Canceled` has no self-loop
+        // edge, so re-transitioning here would throw and let `runSafely` pin a
+        // junk UNKNOWN error on a cleanly canceled task.
+        if (record.state === 'Running') this.transition(record, 'Canceled');
         return;
       }
       if (outcome.kind === 'failed') {
@@ -584,11 +593,16 @@ export class TaskQueue implements ITaskQueue {
     if (handle === undefined) return false;
     const killed = await handle.cancel();
     if (!killed) {
-      record.error = {
-        code: 'UNKNOWN', message: '取消失败：进程仍存活', detail: `pid=${handle.pid ?? 'null'}`,
-        retryable: true, report: 'UNKNOWN: process tree survived taskkill',
-      };
-      this.transition(record, 'Error');
+      // D-142: the process tree SURVIVED taskkill. The task is still genuinely
+      // running (the old process keeps writing bytes), so the record must not
+      // claim the retryable terminal `Error` state: that used to let
+      // `restart()` start a SECOND process for the same task id while the
+      // first one was still alive — both writing the same temp dir, manifest
+      // and output file, each overwriting the other's handle. Leave the record
+      // in its current non-terminal state: the slot stays occupied, the user
+      // may retry the cancel, and the queue self-heals when the process
+      // eventually exits (the engine has already latched `canceled`, so the
+      // run settles as `Canceled` no matter how the process dies).
       return false;
     }
     if (record.state === 'Running') this.transition(record, 'Canceled');
@@ -598,6 +612,17 @@ export class TaskQueue implements ITaskQueue {
   async restart(taskId: string): Promise<void> {
     const record = this.records.get(taskId);
     if (record === undefined) throw new Error(`unknown task: ${taskId}`);
+    // D-142: a record may still occupy a slot while its STATE looks settled —
+    // the window between a successful cancel and the engine's close event, or
+    // a cancel whose kill failed (the record then stays in its non-terminal
+    // state, but the same guard covers every other path to this window).
+    // Starting a second run for the same id would hand the fresh process the
+    // old run's temp dir / manifest / output name and let the two closures
+    // overwrite each other's handle and transitions. Refuse until the old
+    // process is confirmed exited and the slot is released.
+    if (this.running.has(taskId)) {
+      throw new Error(`task still running, retry refused: ${taskId}`);
+    }
     const target: TaskState = record.mediaInfo !== null ? 'ReadyWithInfo' : 'Idle';
     this.transition(record, target);
     record.error = null;
