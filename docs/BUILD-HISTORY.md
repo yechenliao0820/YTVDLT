@@ -60,3 +60,22 @@
 3. **打包后立刻** `git checkout -- package.json apps/desktop/package.json` 还原源文件。
 4. 产物目录建议命名 `dist-<version>/`，只保留最近一个可用版本，旧的移入 `_to-delete/`。
 
+## 0.3.0 构建（2026-11-12）
+
+| 项 | 值 |
+|---|---|
+| 触发 | 业主 2026-11-12 说「打包吧」（铁律 9 的点名项） |
+| 版本号 | 打包时临时把根 `package.json` 与 `apps/desktop/package.json` 改成 `0.3.0`（`0.2.9` 按十进制进位），**打包后立刻 `git checkout --` 还原为 `0.2.9`**；仓库的发版基准没有变 |
+| 目标 | **只打 NSIS 安装版**（`--win nsis`）；未打便携版、未创建 Release |
+| 命令 | `node scripts/build-desktop.mjs` → `electron-builder --config apps/desktop/electron-builder.yml --config.directories.output=dist-0.3.0 --win nsis --publish never` |
+| 产物 | `dist-0.3.0/YTVDLT Setup 0.3.0.exe` — **226,282,986 B** |
+| SHA-256 | `5d93f92307e3b91ac72e5fa372332caa8766e265d0709254dd87d38287940af3` |
+| blockmap | `YTVDLT Setup 0.3.0.exe.blockmap` — 237,729 B |
+| latest.yml | `version: 0.3.0`，sha512 已写入，`releaseDate` 2026-11-12T05:54:50Z（本地文件，未上传） |
+| 版本资源 | `win-unpacked/YTVDLT.exe` FileVersion **0.3.0** / ProductVersion **0.3.0.0**；Setup 文件版本 0.3.0 |
+| asar | `win-unpacked/resources/app.asar` — 1,292,817 B；直接 grep 命中 `settings-template-save` 与 `queue.precheck.confirm.title`，确认 D-139 的 UI 真的进了包 |
+| 运行时 | `resources/runtime/` 含 `aria2c.exe` / `ffmpeg/` / `node.exe` / `runtime-manifest.json` / `SHA2-256SUMS` |
+| 签名 | 未签名（无证书），SmartScreen 首次运行会提示 |
+| 未做 | **没有启动真机窗口点选**（安装包已产出但未运行）；未打便携版；未上传任何 Release 资产 |
+| 产物命名差异 | 本次是 `YTVDLT Setup 0.3.0.exe`（**空格**），历史 Release 写作 `YTVDLT.Setup.0.2.9.exe`（点号）。`electron-builder.yml` 只给便携版设了 `artifactName`，NSIS 走默认模板，所以**发布时按实际文件名上传，不要凭历史名推断** |
+

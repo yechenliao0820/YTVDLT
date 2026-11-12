@@ -19,23 +19,23 @@ dialog on first launch.
 - Download engine: bundled `yt-dlp`, verified and replaceable at runtime
 - Maintainability: a one-way layering rule keeps all queue logic offline-testable
 
-## Latest release — 0.2.9
+## Latest release — 0.3.0
 
 | | |
 |---|---|
-| Released | 2026-11-10 |
-| Artifact | `YTVDLT.Setup.0.2.9.exe` — NSIS installer, Windows x64, 226,309,433 B |
-| SHA-256 | `952ec7d890ed099a984c570a18cb2af8ab54bdbc9355f907be8ff0d3f2632e58` |
-| Tag / release baseline | `v0.2.9` → commit `a39468d` |
-| Downloads | [Release 0.2.9](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.9) · [all releases](https://github.com/yechenliao0820/YTVDLT/releases) |
+| Released | 2026-11-12 |
+| Artifact | `YTVDLT Setup 0.3.0.exe` — NSIS installer, Windows x64, 226,282,986 B |
+| SHA-256 | `5d93f92307e3b91ac72e5fa372332caa8766e265d0709254dd87d38287940af3` |
+| Tag / release baseline | `v0.3.0` |
+| Downloads | [Release 0.3.0](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.0) · [all releases](https://github.com/yechenliao0820/YTVDLT/releases) |
 
-**What changed in 0.2.9** — right-click inside an editable field (the video link
-box) now opens the native Cut / Copy / Paste / Select all menu in the UI
-language, with each item enabled according to Electron's own `editFlags`;
-non-editable areas keep their existing task-card menu, and the clipboard is
-never read or auto-submitted (D-123). This is also the first installer to carry
-the settings-page placeholder fix: a path that has not loaded yet shows `—`
-instead of flashing a made-up Downloads path (D-122).
+**What changed in 0.3.0** — the first release to carry everything that landed
+on top of 0.2.9: the subtitle pipeline, TXT and playlist batch import, the
+lowest-quality fix (`-S +res`), bounded child-process output, the dynamic
+supported-sites panel with six-state URL pre-checks, the HTTP / IPC /
+termination boundary hardening, and two new UI paths — a pre-check you can see
+and confirm before a link is queued, and command templates in Settings
+(D-124…D-139).
 
 The installer is **not code-signed**; SmartScreen will warn once on first run.
 
@@ -117,7 +117,10 @@ filesystem. `scripts/check-layering.mjs` enforces the boundary.
   `CANCELLED` by the same engine, and **only an unambiguous "unsupported" is
   blocked** — everything else is let through and fails with the engine's own,
   more accurate error if it really fails. A page that simply has no video is
-  *not* reported as an unsupported site. (D-134)
+  *not* reported as an unsupported site. The single-link box asks the engine
+  **before** creating a task: a clear refusal is shown in the UI language, and
+  an unconfirmed verdict (no media / indeterminate / timeout) asks whether to
+  queue it anyway instead of enqueueing silently. (D-134, D-139)
 - Real filenames: `--restrict-filenames` is no longer silently enabled, so CJK
   titles, spaces and punctuation survive. Existing configs are migrated
   (schema v1 → v2). A repeated download is saved as a separate ` (1)` / ` (2)`
@@ -134,6 +137,12 @@ filesystem. `scripts/check-layering.mjs` enforces the boundary.
 - While a task is active the queue polls every 400 ms and patches only the
   numbers in place, so cover thumbnails do not flicker. Idle polling stays at
   1.2 s. (D-112)
+- **Command templates.** Save a named, reusable set of yt-dlp arguments (one
+  argument per line) from *Settings → Templates*, and delete them again. Every
+  argument is validated against a positive allowlist on the main side —
+  `--exec`, `--config-locations`, `--cookies-from-browser` and friends are
+  rejected rather than trusted. Editing an existing template is not exposed
+  yet; the store already supports it. (D-139)
 - Cancel, retry, open file, open folder, multi-select, sort, bulk delete and
   clear history.
 
@@ -255,10 +264,12 @@ moved or deleted outside the app.
 | **0.2.9** | **2026-11-10** | Native right-click edit menu in editable fields; settings placeholder shows `—` instead of a made-up path | D-122 / D-123 | [v0.2.9](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.9) |
 
 Unreleased work sitting on top of 0.2.9 — subtitles, batch import, playlist
-batch, supported sites and the URL support pre-check — is described in
+batch, supported sites, the URL support pre-check, command templates and the
+D-137/D-138 security-boundary hardening — is described in
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) (up to D-139) and has not been packaged
-or versioned yet.
+[`docs/DECISIONS.md`](docs/DECISIONS.md) (up to D-139). A `0.3.0` installer has
+been built locally (see [`docs/BUILD-HISTORY.md`](docs/BUILD-HISTORY.md)) but
+**no GitHub Release exists yet**.
 
 ## Engineering and verification
 
@@ -273,13 +284,15 @@ The 0.2.8 release was gated by:
 | `check-layering` / `frozen-gate` | 0 violations / passed |
 
 The unreleased work on top of 0.2.9 (subtitles, batch import, playlist batch,
-supported sites, URL pre-check) was gated separately by:
+supported sites, URL pre-check, command templates and the D-137/D-138
+security-boundary hardening) was gated separately by:
 
 | Gate | Result |
 |---|---|
-| Unit / contract tests | 1724 passed across 121 files, 0 failed |
-| Offline integration (the real bundled `yt-dlp` / FFmpeg) | 40 passed across 12 files |
-| Screenshot E2E | 31/31 cases + 5/5 negative checks, baselines untouched (0 px drift) |
+| `pnpm typecheck` | 5/5 workspace packages successful |
+| Unit / contract / integration tests | **1829 passed / 2 skipped across 138 files, 0 failed** |
+| Coverage | statements 88.7% / branches 86.7% / functions 92.0% / lines 88.7% (floor 70, not raised) |
+| Screenshot E2E | 31/31 cases + 5/5 negative checks; only the two settings baselines were rebuilt (PNG + DOM), the other 58 baseline files byte-identical |
 | `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
 | Engine self-report provenance | Which extractors exist, and how failures are classified, are read back from the shipped `yt-dlp` — never from a checked-in list |
 
