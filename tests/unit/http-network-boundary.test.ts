@@ -85,12 +85,36 @@ describe('D-137 · pure URL policy', () => {
       '169.254.1.1', '0.0.0.0', '100.64.0.1', '224.0.0.1', 'localhost',
       'a.localhost', 'printer.local', 'box.internal', '::1', 'fd00::1',
       'fe80::1', '2130706433', '0x7f000001',
+      // D-138: the HEX form `new URL()` produces for IPv4-mapped addresses.
+      '::ffff:7f00:1', '::ffff:c0a8:101', '::ffff:a9fe:1',
     ]) {
       expect(isPrivateHost(host), host).toBe(true);
     }
-    for (const host of ['cdn.example.com', 'github.com', '93.184.216.34', '8.8.8.8']) {
+    for (const host of [
+      'cdn.example.com', 'github.com', '93.184.216.34', '8.8.8.8',
+      // D-138: a public domain that merely STARTS with "fc" / "fd" is not an
+      // IPv6 unique-local address.
+      'fcdn.example.com', 'fdic.gov', 'fcbank.example',
+      // A mapped PUBLIC address stays public.
+      '::ffff:808:808',
+    ]) {
       expect(isPrivateHost(host), host).toBe(false);
     }
+  });
+
+  it('rejects IPv4-mapped IPv6 URLs after the URL parser normalises them (D-138)', () => {
+    // `new URL('https://[::ffff:127.0.0.1]/')` reports `[::ffff:7f00:1]`, so a
+    // dotted-quad string check never fires. Exercise the real parser output.
+    expect(new URL('https://[::ffff:127.0.0.1]/').hostname).toBe('[::ffff:7f00:1]');
+    expect(isPublicHttpsUrl('https://[::ffff:127.0.0.1]/')).toBe(false);
+    expect(isPublicHttpsUrl('https://[::ffff:192.168.1.1]/')).toBe(false);
+    expect(isPublicHttpsUrl('https://[::ffff:7f00:1]/')).toBe(false);
+    expect(isPublicHttpsUrl('https://[::ffff:c0a8:101]/')).toBe(false);
+    expect(isPublicHttpsUrl('https://[::ffff:169.254.1.1]/')).toBe(false);
+    // Public mapped address and public fc/fd-prefixed domains still pass.
+    expect(isPublicHttpsUrl('https://[::ffff:8.8.8.8]/')).toBe(true);
+    expect(isPublicHttpsUrl('https://fcdn.example.com/image.png')).toBe(true);
+    expect(isPublicHttpsUrl('https://fdic.gov/image.png')).toBe(true);
   });
 
   it('accepts only credential-free https URLs on public hosts', () => {

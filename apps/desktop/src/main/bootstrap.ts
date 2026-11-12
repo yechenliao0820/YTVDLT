@@ -148,24 +148,82 @@ const EMPTY_STATS: TrayStats = { active: 0, pending: 0, completed: 0, failed: 0 
 /**
  * D-137 (F-04) — the ONLY definition of "a page we trust with the bridge".
  *
- * The renderer is a LOCAL static page (`file://` in dev, the app scheme when
- * packaged). Menu navigation swaps between local pages and `?lang=` reloads the
- * same one, so the rule is about ORIGIN + SCHEME, not an exact URL: both of
- * those must still work, while an embedded iframe, a remote page or a
- * `javascript:`/`data:` navigation must never reach a bridge channel.
+ * D-138 fixes the first version: it compared `origin` to separate local pages
+ * from remote ones, but EVERY `file:` URL has the literal origin `null`. So
+ * `file:///C:/Users/Public/evil.html` — and even `file:///app/pages/%2e%2e/
+ * %2e%2e/evil.html` — looked exactly like the packaged page. The rule is now a
+ * normalised PATH allowlist under the application root:
+ *
+ *   - same scheme and host;
+ *   - the candidate path is decoded, `.`/`..` are resolved, and the result must
+ *     stay INSIDE the root derived from `pageUrl` (`<dist>/pages/queue/
+ *     index.html` -> `<dist>/pages/`), compared case-insensitively because
+ *     Windows is;
+ *   - `file:` and the packaged app scheme both work; http(s) never does.
  *
  * `webContents.loadURL()` does not emit `will-navigate`, so this check cannot
  * interfere with the menu's own page switches.
+ *
+ * NOT covered: symlinks and NTFS 8.3 short names cannot be resolved without
+ * touching the filesystem, which this module deliberately does not do. The
+ * install directory is not user-writable, so an untrusted page cannot create
+ * such an alias inside the trusted root.
  */
 export function isTrustedLocalPage(candidate: string, pageUrl: string): boolean {
   try {
     const actual = new URL(candidate);
     const expected = new URL(pageUrl);
-    if (actual.protocol !== expected.protocol || actual.origin !== expected.origin) return false;
-    return actual.protocol === 'file:' || !/^https?:$/.test(actual.protocol);
+    if (actual.protocol !== expected.protocol) return false;
+    if (/^https?:$/.test(actual.protocol)) return false;
+    if (actual.host !== expected.host) return false;
+
+    const actualSegments = normalizedPathSegments(actual.pathname);
+    if (actualSegments === null) return false;
+
+    if (actual.protocol === 'file:') {
+      // The page lives at <root>/pages/<page>/index.html; trust the `pages`
+      // directory, so every shipped page passes and nothing else does.
+      const rootSegments = normalizedPathSegments(new URL('../', expected).pathname);
+      if (rootSegments === null || rootSegments.length === 0) return false;
+      if (actualSegments.length <= rootSegments.length) return false;
+      if (!rootSegments.every((segment, index) => actualSegments[index] === segment)) return false;
+      // A page, not an arbitrary asset: `index.html.bak` and `evil.js` inside
+      // the root are not navigable application pages.
+      return /\.html?$/.test(actualSegments[actualSegments.length - 1] as string);
+    }
+
+    // Packaged custom scheme (`app://queue`): same host is the same app.
+    return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * Decode and normalise a URL path into lowercase segments. `..` is resolved
+ * HERE, not left to the URL parser — `new URL('file:///a/%2e%2e/b')` keeps the
+ * encoded dots in `pathname`, so a parser-only check misses that traversal.
+ * Returns null when the path escapes above its own root or decodes to garbage.
+ */
+function normalizedPathSegments(pathname: string): string[] | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  if (decoded.includes('\u0000')) return null;
+  const segments: string[] = [];
+  for (const part of decoded.replace(/\\/g, '/').split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      if (segments.length === 0) return null;
+      segments.pop();
+      continue;
+    }
+    segments.push(part.toLowerCase());
+  }
+  return segments;
 }
 
 /** The slice of Electron's `IpcMainInvokeEvent` this boundary needs. */

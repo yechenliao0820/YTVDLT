@@ -44,6 +44,34 @@ describe('D-137 · trusted local page predicate', () => {
     expect(isTrustedLocalPage('', PAGE_URL)).toBe(false);
     expect(isTrustedLocalPage('not a url', PAGE_URL)).toBe(false);
   });
+
+  it('refuses any file URL OUTSIDE the application pages root (D-138)', () => {
+    // Every `file:` URL has origin `null`; the old origin comparison let all of
+    // these through. Only paths under `<app>/pages/` may be trusted.
+    expect(isTrustedLocalPage('file:///C:/Users/Public/evil.html', PAGE_URL)).toBe(false);
+    expect(isTrustedLocalPage('file:///app/evil.html', PAGE_URL)).toBe(false);
+    expect(isTrustedLocalPage('file:///app/pages/../evil.html', PAGE_URL)).toBe(false);
+    expect(isTrustedLocalPage('file:///app/pages/../../evil.html', PAGE_URL)).toBe(false);
+    expect(isTrustedLocalPage('file:///app/pages/queue/index.html.bak', PAGE_URL)).toBe(false);
+    expect(isTrustedLocalPage('file:///app/pages-other/queue/index.html', PAGE_URL)).toBe(false);
+    // Prefix-check must be path-segment aware, not a raw string prefix.
+    expect(isTrustedLocalPage('file:///app/pagesX/queue/index.html', PAGE_URL)).toBe(false);
+  });
+
+  it('refuses traversal hidden in percent-encoding or backslashes (D-138)', () => {
+    expect(isTrustedLocalPage('file:///app/pages/%2e%2e/%2e%2e/evil.html', PAGE_URL)).toBe(false);
+    expect(isTrustedLocalPage('file:///app/pages/%2E%2E/evil.html', PAGE_URL)).toBe(false);
+    expect(isTrustedLocalPage('file:///app/pages/queue/%2e%2e/%2e%2e/evil.html', PAGE_URL)).toBe(false);
+    expect(isTrustedLocalPage('file:///app/pages\\..\\..\\evil.html', PAGE_URL)).toBe(false);
+  });
+
+  it('keeps legitimate page switches, query strings and case differences', () => {
+    expect(isTrustedLocalPage('file:///app/pages/settings/index.html', PAGE_URL)).toBe(true);
+    expect(isTrustedLocalPage('file:///app/pages/queue/../settings/index.html', PAGE_URL)).toBe(true);
+    expect(isTrustedLocalPage('FILE:///APP/PAGES/QUEUE/INDEX.HTML', PAGE_URL)).toBe(true);
+    // The pages root itself is a directory, not a page.
+    expect(isTrustedLocalPage('file:///app/pages/', PAGE_URL)).toBe(false);
+  });
 });
 
 describe('D-137 · IPC sender assertion', () => {

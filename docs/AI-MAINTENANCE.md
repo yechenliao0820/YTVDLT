@@ -355,6 +355,8 @@ ui（零依赖） ← preload ← apps/desktop
 26. **`redirect: 'follow'` 会让「初始 URL 校验」整个失效**（D-137）：`fetch` 自己决定最终地址，所以校验过 `https://github.com/…` 之后，一个 302 仍能把它带到任意主机或 http 明文，而应用层只看得到结果。所有出站请求一律走 `adapters/http-policy.ts::fetchFollowingRedirects`（`redirect:'manual'` + 逐跳 `allow` + 跳数上限 + 环检测），**同一个 AbortSignal 覆盖整条链**。同理，`HttpPort.getBytes()` 曾用 `arrayBuffer()` 读完整 body 才比大小，且计时器在拿到响应头就被 `clearTimeout`——无 `Content-Length` 的大流和慢流各能独立把主进程拖垮；现在按字节流累计、`maxBytes` 立即取消、单一 deadline 覆盖到最后一片。**DNS 重绑定不在此列**：URL 字面量检查看不见解析后的 IP，别把「主机名不是内网 IP」写成「已防 SSRF」。
 27. **「发出 kill」不等于「进程已退出」**（D-137）：`taskkill /T` 是外部进程、可能失败；超时/超限若在 kill 发出的瞬间就 resolve，调用方拿到的是「我认为它停了」而不是「我看到它停了」。`node-ports.spawn()` 现在有界等待 `killTree()` 的布尔结果，只有 `close`/`error` 事件才是退出证据；两者都没有时 stderr 追加中性的 `TERMINATION_UNCONFIRMED_MARKER`，且 `exitCode` 对**超时与超限**一律置 `null`（否则 `taskkill` 的退出码 1 会伪装成一次正常运行）。
 
+28. **`file:` 的 `origin` 恒为 `'null'`，不能用来区分「应用页面」与「任意本地文件」**（D-138）：`new URL('file:///C:/x/evil.html').origin` 和 `new URL('file:///app/pages/queue/index.html').origin` 都是字符串 `'null'`。可信页面必须走**规范化路径白名单**：`decodeURIComponent` → 按 `/` 分段 → 消 `..` → 反斜杠归一 → **按段**比较前缀（`pages-other` 不能命中 `pages`）→ 末段限 `.html`/`.htm`。注意 WHATWG URL **不解码** `%2e%2e`，`pathname` 会原样保留，只靠 URL 解析挡不住编码穿越。同一族的地址坑：`new URL('https://[::ffff:127.0.0.1]/')` 的 hostname 是 `[::ffff:7f00:1]`，任何「点分字符串前缀」匹配都永不命中；IPv6 必须先展开成 8 组再判 `fc00::/7` / `fe80::/10` / `::ffff:0:0/96`（取末 32 位复用 IPv4 段判断），并且**先判断是不是 IP 字面量**——否则 `fc`/`fd` 开头的公开域名会被误拒。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 
