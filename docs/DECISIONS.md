@@ -1867,3 +1867,13 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① `shared/src/update.ts` 的 `QueueIntakeGate` 追加**可选** `waitForIdle?(timeoutMs)`（可选，既有假 gate 不受影响）；② `queue-intake-gate.ts` 实现为轮询 `activeTaskIds.length === 0`（250 ms 间隔，队列懒取，可能在 host 建好前返回 true）；③ `self-updater.ts` 在 `pause()` 之后、动盘之前 `await waitForIdle(60 s)`，超时则**不动文件**、记 ERROR、返回 `reason: 'queue-busy'`（`UpdateResult.reason` 是自由字符串，不破坏类型），`finally` 仍照常 `resume()`。 |
 | 验证 | `npx turbo run typecheck` 5/5；全量 **2038 项 0 失败**（`self-updater` 既有 `gate.calls === ['pause','resume']` 断言仍绿——`waitForIdle` 是可选的，假 gate 没实现，走 `undefined` 分支）；`check-layering` 0。 |
 | 未覆盖 | ① 60 s 是**拍的**，不是测出来的：大文件慢速下载可能超过它，此时更新被推迟（可重试），不会破坏文件；② `component-updater.run()` 仍未在入口处检查队列，只靠 `SelfUpdater` 内部等空——UI 上不会提前告诉用户「有任务在跑」；③ 轮询 250 ms 在队列长期繁忙时是持续的定时器，没有用事件订阅（gate 是懒取，订阅需要在 host 重建时重挂）；④ 未在真机复现「下载中更新」场景（需打包 + 真实组件源）。 |
+
+## D-172 · 2026-11-13 · 首次推送被分支保护拦下：`main` 只能走 PR，改推分支 `audit/d-162-171`
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主说「推送至 GitHub 吧仓库」，`git push origin main` 被服务端拒绝：`remote: error: GH013: Repository rule violations found for refs/heads/main.` / `- Changes must be made through a pull request.` / `- Required status check "typecheck · tests · gates (windows-latest)" is expected.` 本地 `main` 停在 `bdd8753`（领先 `origin/main` 一个提交），远端仍是 `ee4b9b0`。 |
+| 根因 | 不是网络或凭据问题，是**规则生效**：D-161 交付的那份 6 步分支保护清单，业主已经在 GitHub 网页端执行了（这正是 D-161「未覆盖⑤」里预留的那一步）。D-161 当时写的是「本地只交付清单、不声称已生效」，于是文档口径落后于仓库现实——`AI-MAINTENANCE` §7.1 与 §10 都还写着「未启用 / `protected: false`」。另一层容易混淆的认知：`ci.yml` 只负责**跑**检查，能否**强制**完全由仓库设置决定，workflow 文件无法自我强制。 |
+| 决策 | ① **不改规则、不绕过**：不去关分支保护、不走 API 直推、不临时放宽——业主明确表态「项目已经做起来了，这个保护就是要开的」，属长期策略而非临时障碍；② 改推**分支**：`git push -u origin main:refs/heads/audit/d-162-171`，把同一个提交 `bdd8753` 放到远端分支上，用 GitHub 回显的 `pull/new/<branch>` 建 PR，合并动作交给业主点击；③ 文档口径同步为「已生效」：§7.1 从「配置清单」改写为「状态 + 日常流程 + 直推会被拒的原文 + 复核方式」，§10 把「`main` 未启用强制 CI 门禁」这一行按本手册「完成一项就删一行」的规则移除并记入已删除行，铁律 12 补一句「只能推分支再开 PR」；④ 推送成功后把本地 `main` 的上游从临时分支改回 `origin/main`，避免下一次 `git status` 误读。 |
+| 验证 | `git ls-remote origin refs/heads/audit/d-162-171` → `bdd875307af614ceaf374130766c882befb546b7`，与本地 `HEAD` 逐字符一致；`git branch --set-upstream-to=origin/main main` 后 `git status -sb` 为 `## main...origin/main [ahead 1]`；工作树干净。PR 入口：`https://github.com/yechenliao0820/YTVDLT/pull/new/audit/d-162-171`。 |
+| 未覆盖 | ① PR 尚未创建（需要业主在网页端点击，AI 不代操作）；② 该分支上的首次 CI 结果尚未观察——干净 runner 的历史坑（D-157 资产取回、D-158 的 `.mjs` 行尾）已在代码里，但仍以 Actions 实际结论为准，红了按日志定位、不改断言；③ 分支合并后是否删除由业主决定（当前文档要求保留作远端溯源点）；④ 推送时 GitHub 另外提示默认分支有 9 个依赖漏洞（4 critical / 5 moderate），与本轮改动无关，未处理。 |
