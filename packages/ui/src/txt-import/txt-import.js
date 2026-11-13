@@ -29,6 +29,15 @@
     var busy = false;
     // T5: true while the enqueue round-trip (and its in-flight pre-check) runs.
     var enqueueInFlight = false;
+    /**
+     * D-160: this submission's opaque cancellation scope. Cancel, progress and
+     * the enqueue payload all carry the SAME id, so another live dialog's stop
+     * button cannot abort this batch (or vice versa).
+     */
+    var activeOperationId = '';
+    function newOperationId() {
+      return 'txt-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    }
     // T5: the in-precheck wait row + its STATUS poll. `pollMs` is injectable so
     // tests do not need real 500 ms waits.
     var pollMs = typeof options.pollMs === 'number' && options.pollMs > 0 ? options.pollMs : 500;
@@ -79,13 +88,13 @@
       stop.addEventListener('click', function () {
         stop.setAttribute('disabled', 'disabled');
         progress.textContent = t('queue.precheck.cancelling');
-        call('URL_SUPPORT_CHECK_CANCEL', {});
+        call('URL_SUPPORT_CHECK_CANCEL', { operationId: activeOperationId });
       });
       row.appendChild(progress);
       row.appendChild(stop);
       foot.appendChild(row);
       var timer = setInterval(function () {
-        call('URL_SUPPORT_CHECK_STATUS', {}).then(function (status) {
+        call('URL_SUPPORT_CHECK_STATUS', { operationId: activeOperationId }).then(function (status) {
           if (wait === null) return;
           if (!status || status.active !== true) {
             // Batch finished (or the probe is unavailable): stop polling; the
@@ -128,7 +137,7 @@
       // T5: closing while the batch pre-check is in flight means "stop" — ask
       // the main process to cancel it (a no-op when nothing is running). The
       // enqueue reply then arrives as the `cancelled` result.
-      if (enqueueInFlight) call('URL_SUPPORT_CHECK_CANCEL', {});
+      if (enqueueInFlight) call('URL_SUPPORT_CHECK_CANCEL', { operationId: activeOperationId });
       if (overlay !== null && overlay.parentNode !== null) overlay.parentNode.removeChild(overlay);
       overlay = null;
       preview = null;
@@ -337,6 +346,9 @@
       busy = true;
       var choice = typeof getChoice === 'function' ? getChoice() : { kind: 'video' };
       var payload = { importId: current.importId, kind: choice.kind === 'audio' ? 'audio' : 'video' };
+      // D-160: bind this round-trip's pre-check to its own cancellation scope.
+      activeOperationId = newOperationId();
+      payload.operationId = activeOperationId;
       if (payload.kind === 'audio') {
         if (choice.audioQuality) payload.audioQuality = choice.audioQuality;
         if (choice.audioFormat) payload.audioFormat = choice.audioFormat;

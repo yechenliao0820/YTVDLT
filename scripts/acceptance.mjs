@@ -473,7 +473,7 @@ const M3_TEST_FILE_MAP = {
   'shell-port.test.ts': ['A-4.6-02'],
   'subtitle-planner.test.ts': ['A-4.3-01', 'A-4.3-03', 'A-4.3-05', 'A-M3-10'],
   'task-queue.test.ts': ['A-M3-12', 'A-4.5-07'],
-  'task-store.test.ts': ['A-M3-12'],
+  'task-store.test.ts': ['A-M3-12', 'A-D159', 'A-D161'],
   'u3-verify-manifest-preserve.test.ts': ['A-4.6-01', 'A-4.2-11'],
   'vitest-run-guard.test.ts': ['M3-GATE-b0-r2-1'],
   // M2 L2 offline integration cases (present in the full vitest JSON report).
@@ -516,7 +516,7 @@ const M3_TEST_FILE_MAP = {
   'task-queue-intake.test.ts': ['A-4.4-28', 'A-M4-02'],
   'app-updater.test.ts': ['A-4.4-29'],
   // M5-5 follow-up (D-67): component updates over HTTP + the feed contract.
-  'component-updater.test.ts': ['A-4.4-28', 'A-4.4-29'],
+  'component-updater.test.ts': ['A-4.4-28', 'A-4.4-29', 'A-D161'],
   'http-update-source.test.ts': ['A-4.4-28'],
   // 0.2.1 (D-91…D-94, D-97): menu wiring, GitHub-release app update, engine check.
   'app-menu.test.ts': ['A-M5-00'],
@@ -619,8 +619,8 @@ const M3_TEST_FILE_MAP = {
   // 与门禁口径未改；文件在 vitest 里真挂了，对应断言就会红。
   'http-ipv6-whitelist.test.ts': ['A-D152'],
   'progress-pending-limit.test.ts': ['A-D153'],
-  'precheck-cancel.test.ts': ['A-D156'],
-  'precheck-cancel-ui.test.ts': ['A-D156'],
+  'precheck-cancel.test.ts': ['A-D156', 'A-D160'],
+  'precheck-cancel-ui.test.ts': ['A-D156', 'A-D160'],
 };
 
 /** Honest, separately-listed deviations (never reported as PASS assertions). */
@@ -1360,6 +1360,9 @@ const M5_ASSERTIONS = [
   { id: 'A-D156', layer: 'L1', subject: 'URL 预检用户级取消：AbortSignal 贯穿 shared → node-ports → 引擎 → 门禁三入口，IPC 两通道零 payload，取消即不入队并回带 cancelled，批量进度轮询；CANCELLED 永不拦截、终止确认弹窗；live-only 动态 DOM 不改冻结基线', tests: ['precheck-cancel', 'm5-channels', 'm5-host'], needs: ['vitest'], evidence: ['reports/vitest-results.json::precheck-cancel.test.ts,precheck-cancel-ui.test.ts,m5-channels.test.ts,m5-host.test.ts', 'apps/desktop/src/main/site-precheck-gate.ts', 'apps/desktop/src/main/m5-channels.ts', 'docs/DECISIONS.md::D-156'] },
   { id: 'A-D157', layer: 'L1', subject: 'CI 干净环境完整性：进度 fixture 入库、测试前按 --only=ytdlp/node 取回随包运行时、许可测试输入统一 LF；不放宽任何断言与覆盖率门限', tests: ['about-licence', 'probe-output-limit', 'progress-parser'], needs: ['vitest'], evidence: ['reports/vitest-results.json::about-licence.test.ts,probe-output-limit.test.ts,progress-parser.test.ts', '.gitignore', '.github/workflows/ci.yml', 'docs/DECISIONS.md::D-157'] },
   { id: 'A-D158', layer: 'L1', subject: 'CRLF shebang 防线：.gitattributes 把 .mjs 钉为 LF，Windows runner 收集期不再报 SyntaxError；源码与断言零改动', tests: ['browser-discovery', 'vitest-run-guard'], needs: ['vitest'], evidence: ['reports/vitest-results.json::browser-discovery.test.ts,vitest-run-guard.test.ts', '.gitattributes', 'docs/DECISIONS.md::D-158'] },
+  { id: 'A-D159', layer: 'L1', subject: '损坏快照先字节级备份再写回：load 五态分类、corrupt / invalid-records 备份原文、read-error / 备份失败阻断 save、WARNING 带 skippedRecords、restoreTasks 报告携带 load 诊断；完整启动链后原始字节仍可找回', tests: ['task-store', 'task-recovery', 'task-host'], needs: ['vitest'], evidence: ['reports/vitest-results.json::task-store.test.ts,task-recovery.test.ts,task-host.test.ts', 'packages/core/src/task-store/task-store.ts', 'packages/core/src/task-store/bootstrap.ts', 'docs/DECISIONS.md::D-159'] },
+  { id: 'A-D160', layer: 'L1', subject: '预检取消按 operationId 隔离：四入口载荷携带同一不透明 id、主进程按 id 分组 controller 与进度、取消只终止对应提交、无 id 的 legacy 作用域碰不到隔离提交、非法 id 被拒；D-156 的 CANCELLED 终止与 fail-open 不变', tests: ['precheck-cancel', 'm5-channels', 'precheck-cancel-ui'], needs: ['vitest'], evidence: ['reports/vitest-results.json::precheck-cancel.test.ts,precheck-cancel-ui.test.ts,m5-channels.test.ts', 'apps/desktop/src/main/m5-channels.ts', 'packages/ui/src/txt-import/txt-import.js', 'docs/DECISIONS.md::D-160'] },
+  { id: 'A-D161', layer: 'L1', subject: '外部审计剩余三项：镜像默认 HTTPS + 同主机禁降级 + 内网地址显式放行且三入口策略一致；快照关键嵌套字段非破坏性修复并先备份、repairedFields 入报告与 WARNING；CI 强制门禁的 GitHub 端配置清单落在手册 §7.1', tests: ['component-updater', 'http-update-source', 'task-store'], needs: ['vitest'], evidence: ['reports/vitest-results.json::component-updater.test.ts,http-update-source.test.ts,task-store.test.ts', 'apps/desktop/src/main/component-updater.ts', 'packages/core/src/task-store/task-store.ts', 'docs/AI-MAINTENANCE.md', 'docs/DECISIONS.md::D-161'] },
 ];
 
 /** M5 e2e cases that must exist and pass for the visual assertions. */

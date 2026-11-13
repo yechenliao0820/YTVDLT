@@ -355,10 +355,475 @@ describe('T3 · full boot path over a damaged snapshot', () => {
     });
     expect(await restoreTasks(queue, store)).toEqual({
       restored: 1, interrupted: 1, skipped: 0, empty: false,
+      load: {
+        status: 'invalid-records',
+        skippedRecords: 2,
+        backupPath: expect.stringContaining('tasks.corrupt-'),
+        writeBlocked: false,
+        error: '2 record(s) failed the structural guard',
+      },
     });
     expect(store.lastLoadSkippedCount).toBe(2);
     expect(queue.get('live')?.state).toBe('Canceled');
     expect(queue.get('live')?.lastPercent).toBe(37);
     expect(queue.list()).toHaveLength(1);
+  });
+});
+
+// --- D-159 · a damaged snapshot must stay recoverable -----------------------
+
+type Mem = ReturnType<typeof createInMemoryPorts>;
+
+interface DegradedWarning {
+  level: string;
+  scope: string;
+  event: string;
+  payload: {
+    status: string;
+    skippedRecords: number;
+    backupPath: string | null;
+    writeBlocked: boolean;
+    repairedFields?: number;
+    error: string | null;
+  };
+}
+
+const SNAPSHOT = (mem: Mem): string => `${mem.state.env.configDir}/tasks.json`;
+
+/** `writeBytesAtomic` keeps the real bytes in `state.bytes`; the text fallback writes `files`. */
+const backupTextOf = (mem: Mem, path: string): string => {
+  const bytes = mem.state.bytes.get(path);
+  if (bytes !== undefined) return Buffer.from(bytes).toString('utf8');
+  return mem.state.files.get(path) ?? '';
+};
+
+const backupKeys = (mem: Mem): string[] =>
+  [...new Set([...mem.state.files.keys(), ...mem.state.bytes.keys()])]
+    .filter((key) => key.includes('.corrupt-'));
+
+const degradedWarnings = (mem: Mem): DegradedWarning[] =>
+  mem.state.logLines
+    .map((line): DegradedWarning | null => {
+      try { return JSON.parse(line) as DegradedWarning; } catch { return null; }
+    })
+    .filter((line): line is DegradedWarning => line !== null && line.event === 'snapshot.load.degraded');
+
+const D159_ENGINE: DownloadEngine = {
+  async version() { return 'fake'; },
+  async probe() { throw new Error('boot must not probe'); },
+  async probePlaylist() { throw new Error('boot must not probe'); },
+  download() { throw new Error('boot must not download'); },
+  async selfUpdate() { return { fromVersion: '', toVersion: '', channel: 'stable', changed: false }; },
+};
+
+const D159_VERIFIER: IArtifactVerifier = {
+  async verify() { throw new Error('boot must not verify'); },
+};
+
+/** A real `TaskQueue` wired to the real store — the production boot chain. */
+const bootQueue = (mem: Mem, store: Parameters<typeof restoreTasks>[1]): TaskQueue => new TaskQueue({
+  ports: mem.ports,
+  engine: D159_ENGINE,
+  verifier: D159_VERIFIER,
+  history: new HistoryStore({ ports: mem.ports }),
+  taskStore: store,
+  jsRuntimePath: 'C:/runtime/node.exe',
+  persistIntervalMs: 0,
+});
+
+const TRUNCATED_JSON = '{"schemaVersion":1,"savedAt":"2026-11-05T00:00:00.000Z","tasks":[{"id":"t1"';
+
+describe('D-159 · load() classifies failures and protects the original', () => {
+  it('missing file → healthy "missing", no warning, no backup', async () => {
+    const { mem, store } = setup();
+    expect((await store.load()).tasks).toEqual([]);
+    expect(store.lastLoadDiagnostic).toEqual({
+      status: 'missing', skippedRecords: 0, backupPath: null, writeBlocked: false, error: null,
+    });
+    expect(degradedWarnings(mem)).toHaveLength(0);
+    expect(backupKeys(mem)).toHaveLength(0);
+  });
+
+  it('valid snapshot → healthy "ok", save() unaffected', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), JSON.stringify(snapshot([record('t1', 'Completed')])));
+    expect((await store.load()).tasks).toHaveLength(1);
+    expect(store.lastLoadDiagnostic.status).toBe('ok');
+    expect(degradedWarnings(mem)).toHaveLength(0);
+    expect(backupKeys(mem)).toHaveLength(0);
+    await store.save(snapshot([record('t2', 'Completed')]));
+    expect(store.lastSaveError).toBeNull();
+  });
+
+  it('corrupt JSON → byte-for-byte backup of the ORIGINAL text + WARNING', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), TRUNCATED_JSON);
+    expect((await store.load()).tasks).toEqual([]);
+
+    const diagnostic = store.lastLoadDiagnostic;
+    expect(diagnostic.status).toBe('corrupt');
+    expect(diagnostic.writeBlocked).toBe(false);
+    expect(diagnostic.backupPath).toMatch(/tasks\.corrupt-/);
+    // The exact damaged bytes are still retrievable — nothing was re-serialised.
+    expect(backupTextOf(mem, diagnostic.backupPath ?? '')).toBe(TRUNCATED_JSON);
+    expect(mem.state.files.get(SNAPSHOT(mem))).toBe(TRUNCATED_JSON);
+
+    const warnings = degradedWarnings(mem);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.level).toBe('WARNING');
+    expect(warnings[0]?.scope).toBe('task-store');
+    expect(warnings[0]?.payload).toEqual({
+      status: 'corrupt',
+      skippedRecords: 0,
+      backupPath: diagnostic.backupPath,
+      writeBlocked: false,
+      error: expect.any(String),
+    });
+  });
+
+  it('a broken top-level shape (tasks is not an array) is also corrupt + backed up', async () => {
+    const { mem, store } = setup();
+    const damaged = '{"schemaVersion":1,"tasks":"nope"}';
+    mem.state.files.set(SNAPSHOT(mem), damaged);
+    expect((await store.load()).tasks).toEqual([]);
+    expect(store.lastLoadDiagnostic.status).toBe('corrupt');
+    expect(backupTextOf(mem, store.lastLoadDiagnostic.backupPath ?? '')).toBe(damaged);
+  });
+
+  it('a null root and a non-Error throw are both handled without crashing the boot', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), 'null');
+    expect((await store.load()).tasks).toEqual([]);
+    expect(store.lastLoadDiagnostic.status).toBe('corrupt');
+
+    const second = setup();
+    second.mem.ports.fs.readText = async () => { throw 'locked by another process'; };
+    expect((await second.store.load()).tasks).toEqual([]);
+    expect(second.store.lastLoadDiagnostic.status).toBe('read-error');
+    expect(second.store.lastLoadDiagnostic.error).toBe('locked by another process');
+  });
+
+  it('isolated records are backed up BEFORE the filtered snapshot can be written', async () => {
+    const { mem, store } = setup();
+    const damaged = JSON.stringify({
+      schemaVersion: 1, savedAt: '2026-11-05T00:00:00.000Z',
+      tasks: [null, { ...rawBase, id: 'bad', state: 'QUEUED' }, record('good', 'Completed')],
+    });
+    mem.state.files.set(SNAPSHOT(mem), damaged);
+    const loaded = await store.load();
+
+    expect(loaded.tasks.map((t) => t.id)).toEqual(['good']);
+    expect(store.lastLoadSkippedCount).toBe(2);
+    const diagnostic = store.lastLoadDiagnostic;
+    expect(diagnostic.status).toBe('invalid-records');
+    expect(diagnostic.skippedRecords).toBe(2);
+    expect(diagnostic.writeBlocked).toBe(false);
+    // The dropped bad records are still recoverable from the untouched copy.
+    expect(backupTextOf(mem, diagnostic.backupPath ?? '')).toBe(damaged);
+    expect(degradedWarnings(mem)[0]?.payload.skippedRecords).toBe(2);
+  });
+
+  it('a non-ENOENT read failure blocks EVERY later save; the original stays untouched', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), TRUNCATED_JSON);
+    mem.ports.fs.readText = async () => { throw new Error('EACCES: simulated read failure'); };
+
+    expect((await store.load()).tasks).toEqual([]);
+    const diagnostic = store.lastLoadDiagnostic;
+    expect(diagnostic.status).toBe('read-error');
+    expect(diagnostic.writeBlocked).toBe(true);
+    expect(diagnostic.backupPath).toBeNull();
+    expect(diagnostic.error).toContain('EACCES');
+    expect(degradedWarnings(mem)[0]?.payload.writeBlocked).toBe(true);
+
+    await expect(store.save(snapshot([record('new', 'Completed')]))).rejects.toThrow(/SNAPSHOT_WRITE_BLOCKED/);
+    expect(store.lastSaveError?.message).toContain('SNAPSHOT_WRITE_BLOCKED');
+    expect(mem.state.files.get(SNAPSHOT(mem))).toBe(TRUNCATED_JSON);
+  });
+
+  it('a Node-style ENOENT (code) is a first run, not a read failure', async () => {
+    const { mem, store } = setup();
+    mem.ports.fs.readText = async () => {
+      const error = new Error('ENOENT: no such file or directory') as Error & { code: string };
+      error.code = 'ENOENT';
+      throw error;
+    };
+    expect((await store.load()).tasks).toEqual([]);
+    expect(store.lastLoadDiagnostic.status).toBe('missing');
+    expect(store.lastLoadDiagnostic.writeBlocked).toBe(false);
+    expect(degradedWarnings(mem)).toHaveLength(0);
+  });
+
+  it('a failed backup (no bytes, no text) blocks writes and keeps the original', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), TRUNCATED_JSON);
+    mem.ports.fs.readBytes = async () => { throw new Error('readBytes unavailable'); };
+    mem.ports.fs.writeBytesAtomic = async () => { throw new Error('ENOSPC'); };
+    mem.ports.fs.writeTextAtomic = async () => { throw new Error('ENOSPC'); };
+
+    expect((await store.load()).tasks).toEqual([]);
+    expect(store.lastLoadDiagnostic.status).toBe('corrupt');
+    expect(store.lastLoadDiagnostic.backupPath).toBeNull();
+    expect(store.lastLoadDiagnostic.writeBlocked).toBe(true);
+    await expect(store.save(snapshot([]))).rejects.toThrow(/SNAPSHOT_WRITE_BLOCKED/);
+    expect(mem.state.files.get(SNAPSHOT(mem))).toBe(TRUNCATED_JSON);
+  });
+
+  it('an exhausted backup-name allocator also blocks writes', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), TRUNCATED_JSON);
+    mem.ports.fs.exists = async () => true;
+    expect((await store.load()).tasks).toEqual([]);
+    expect(store.lastLoadDiagnostic.writeBlocked).toBe(true);
+  });
+
+  it('two loads in the same clock tick produce two distinct backups', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), TRUNCATED_JSON);
+    await store.load();
+    await store.load();
+    const keys = backupKeys(mem);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(keys[1]).toMatch(/-2\.json$/);
+    expect(backupTextOf(mem, keys[0] ?? '')).toBe(TRUNCATED_JSON);
+    expect(backupTextOf(mem, keys[1] ?? '')).toBe(TRUNCATED_JSON);
+  });
+
+  it('once a backup succeeds, save() works again (the guard is not sticky)', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), TRUNCATED_JSON);
+    await store.load();
+    expect(store.lastLoadDiagnostic.writeBlocked).toBe(false);
+    await store.save(snapshot([record('after', 'Completed')]));
+    expect((await store.load()).tasks.map((t) => t.id)).toEqual(['after']);
+    expect(store.lastLoadDiagnostic.status).toBe('ok');
+  });
+
+  it('a dead log sink cannot break load()', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), TRUNCATED_JSON);
+    mem.ports.logSink.appendJsonl = async () => { throw new Error('log sink down'); };
+    expect((await store.load()).tasks).toEqual([]);
+    expect(store.lastLoadDiagnostic.status).toBe('corrupt');
+    expect(store.lastLoadDiagnostic.backupPath).not.toBeNull();
+  });
+});
+
+describe('D-159 · full boot chain over a damaged snapshot', () => {
+  it('corrupt JSON → restoreTasks() keeps the original bytes retrievable', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), TRUNCATED_JSON);
+    const result = await restoreTasks(bootQueue(mem, store), store);
+
+    expect(result.restored).toBe(0);
+    expect(result.empty).toBe(true);
+    expect(result.load.status).toBe('corrupt');
+    expect(result.load.writeBlocked).toBe(false);
+    // The boot wrote an empty snapshot back, but ONLY after a verified copy.
+    expect(JSON.parse(mem.state.files.get(SNAPSHOT(mem)) ?? '{}').tasks).toEqual([]);
+    expect(backupTextOf(mem, result.load.backupPath ?? '')).toBe(TRUNCATED_JSON);
+  });
+
+  it('invalid records → the boot report carries skippedRecords and the backup keeps them', async () => {
+    const { mem, store } = setup();
+    const damaged = JSON.stringify({
+      schemaVersion: 1, savedAt: '2026-11-05T00:00:00.000Z',
+      tasks: [null, record('good', 'Running', 33)],
+    });
+    mem.state.files.set(SNAPSHOT(mem), damaged);
+    const result = await restoreTasks(bootQueue(mem, store), store);
+
+    expect(result.restored).toBe(1);
+    expect(result.load.status).toBe('invalid-records');
+    expect(result.load.skippedRecords).toBe(1);
+    expect(backupTextOf(mem, result.load.backupPath ?? '')).toBe(damaged);
+    const persisted = JSON.parse(mem.state.files.get(SNAPSHOT(mem)) ?? '{}') as TaskSnapshot;
+    expect(persisted.tasks.map((t) => t.id)).toEqual(['good']);
+    expect(persisted.tasks[0]?.state).toBe('Canceled');
+    expect(degradedWarnings(mem)[0]?.payload.skippedRecords).toBe(1);
+  });
+
+  it('read error → restoreTasks() does NOT overwrite tasks.json at all', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), TRUNCATED_JSON);
+    mem.ports.fs.readText = async () => { throw new Error('EBUSY: file locked'); };
+
+    const result = await restoreTasks(bootQueue(mem, store), store);
+    expect(result.restored).toBe(0);
+    expect(result.load.status).toBe('read-error');
+    expect(result.load.writeBlocked).toBe(true);
+    // queue.restore() still called persistSnapshot(); the store refused it.
+    expect(mem.state.files.get(SNAPSHOT(mem))).toBe(TRUNCATED_JSON);
+    expect(store.lastSaveError?.message).toContain('SNAPSHOT_WRITE_BLOCKED');
+  });
+
+  it('backup failure → restoreTasks() does NOT overwrite tasks.json at all', async () => {
+    const { mem, store } = setup();
+    mem.state.files.set(SNAPSHOT(mem), TRUNCATED_JSON);
+    mem.ports.fs.readBytes = async () => { throw new Error('readBytes unavailable'); };
+    mem.ports.fs.writeBytesAtomic = async () => { throw new Error('ENOSPC'); };
+    mem.ports.fs.writeTextAtomic = async () => { throw new Error('ENOSPC'); };
+
+    const result = await restoreTasks(bootQueue(mem, store), store);
+    expect(result.load.status).toBe('corrupt');
+    expect(result.load.writeBlocked).toBe(true);
+    expect(mem.state.files.get(SNAPSHOT(mem))).toBe(TRUNCATED_JSON);
+  });
+
+  it('a legacy store without diagnostics reports "unknown", never a false "ok"', async () => {
+    const { mem } = setup();
+    const legacy = {
+      async load(): Promise<TaskSnapshot> { return snapshot([record('legacy', 'Idle')]); },
+      async save(): Promise<void> { /* legacy no-op */ },
+      recover(raw: TaskSnapshot): TaskSnapshot { return raw; },
+    };
+    const result = await restoreTasks(bootQueue(mem, legacy), legacy);
+    expect(result.restored).toBe(1);
+    expect(result.load.status).toBe('unknown');
+  });
+});
+
+// --- D-161 · deep (but non-destructive) validation of nested fields ---------
+
+/** A structurally valid record with one or more nested fields deliberately broken. */
+const damagedRecord = (patch: Record<string, unknown>): Record<string, unknown> => ({
+  ...(record('t1', 'Completed') as unknown as Record<string, unknown>),
+  ...patch,
+});
+
+describe('D-161 · key nested fields are validated at load time', () => {
+  it('bad artifacts entries are dropped, the TASK itself survives, repairs are counted', async () => {
+    const { mem, store } = setup();
+    writeRawTasks(mem, [damagedRecord({ artifacts: ['C:/ok.mp4', null, 7, '', { path: 'x' }] })]);
+    const loaded = await store.load();
+    expect(loaded.tasks).toHaveLength(1);
+    expect(loaded.tasks[0]?.artifacts).toEqual(['C:/ok.mp4']);
+    expect(store.lastLoadSkippedCount).toBe(0);
+    expect(store.lastLoadRepairedCount).toBe(4);
+    expect(store.lastLoadDiagnostic.status).toBe('repaired-fields');
+    expect(store.lastLoadDiagnostic.repairedFields).toBe(4);
+  });
+
+  it('kind / timestamps / progress numbers / booleans are normalised to safe values', async () => {
+    const { mem, store } = setup();
+    writeRawTasks(mem, [damagedRecord({
+      kind: 'movie', createdAt: 42, updatedAt: null,
+      lastPercent: '37%', lastDownloadedBytes: '12', lastSpeedBps: {},
+      privateMode: 'yes', postprocessed: 1,
+    })]);
+    const task = (await store.load()).tasks[0];
+    expect(task?.kind).toBe('video');
+    expect(task?.createdAt).toBe(mem.state.nowIso);
+    expect(task?.updatedAt).toBe(mem.state.nowIso);
+    expect(task?.lastPercent).toBeNull();
+    expect(task?.lastDownloadedBytes).toBeNull();
+    expect(task?.lastSpeedBps).toBeNull();
+    expect(task?.privateMode).toBe(false);
+    expect(task?.postprocessed).toBe(false);
+    expect(store.lastLoadRepairedCount).toBe(8);
+    expect(store.lastLoadSkippedCount).toBe(0);
+  });
+
+  it('mediaInfo: a non-object becomes null; a broken object has its key fields filled', async () => {
+    const { mem, store } = setup();
+    writeRawTasks(mem, [damagedRecord({ mediaInfo: 'not an object' })]);
+    expect((await store.load()).tasks[0]?.mediaInfo).toBeNull();
+    expect(store.lastLoadRepairedCount).toBe(1);
+
+    const second = setup();
+    writeRawTasks(second.mem, [damagedRecord({
+      mediaInfo: { id: 7, title: null, formats: 'nope' },
+    })]);
+    const media = (await second.store.load()).tasks[0]?.mediaInfo;
+    expect(media?.id).toBe('t1');
+    expect(media?.title).toBe('t1');
+    expect(media?.formats).toEqual([]);
+    expect(second.store.lastLoadRepairedCount).toBe(3);
+  });
+
+  it('request: one broken domain nulls the whole request; a sound one is untouched', async () => {
+    const { mem, store } = setup();
+    writeRawTasks(mem, [damagedRecord({
+      request: { format: {}, subtitle: {}, paths: {}, network: {}, advanced: 'bad' },
+    })]);
+    expect((await store.load()).tasks[0]?.request).toBeNull();
+    expect(store.lastLoadRepairedCount).toBe(1);
+
+    const sound = { format: {}, subtitle: {}, paths: {}, network: {}, advanced: {} };
+    const second = setup();
+    writeRawTasks(second.mem, [damagedRecord({ request: sound })]);
+    expect((await second.store.load()).tasks[0]?.request).toBeTruthy();
+    expect(second.store.lastLoadRepairedCount).toBe(0);
+  });
+
+  it('error: a non-AppError object becomes null; a valid AppError is preserved', async () => {
+    const { mem, store } = setup();
+    writeRawTasks(mem, [damagedRecord({ error: { code: 42, message: null } })]);
+    expect((await store.load()).tasks[0]?.error).toBeNull();
+
+    const second = setup();
+    const error = { code: 'E', message: 'm', detail: '', retryable: true, report: '' };
+    writeRawTasks(second.mem, [damagedRecord({ error })]);
+    expect((await second.store.load()).tasks[0]?.error).toBeTruthy();
+    expect(second.store.lastLoadRepairedCount).toBe(0);
+  });
+
+  it('subtitleFiles: wrong type and bad elements are cleaned without losing the task', async () => {
+    const { mem, store } = setup();
+    writeRawTasks(mem, [damagedRecord({ subtitleFiles: [{ path: 'C:/a.srt' }, null, 5] })]);
+    expect((await store.load()).tasks[0]?.subtitleFiles).toHaveLength(1);
+    expect(store.lastLoadRepairedCount).toBe(2);
+
+    const second = setup();
+    writeRawTasks(second.mem, [damagedRecord({ subtitleFiles: 'not an array' })]);
+    expect((await second.store.load()).tasks[0]?.subtitleFiles).toEqual([]);
+    expect(second.store.lastLoadRepairedCount).toBe(1);
+  });
+
+  it('a healthy snapshot is NOT copied: recover() keeps the original object reference', () => {
+    const { store } = setup();
+    const good = record('t1', 'Completed');
+    const recovered = store.recover(snapshot([good]));
+    expect(recovered.tasks[0]).toBe(good);
+  });
+
+  it('recover() also repairs hand-built snapshots (defence in depth)', () => {
+    const { store } = setup();
+    const damaged = {
+      schemaVersion: 1, savedAt: 'x', tasks: [damagedRecord({ kind: 'bogus' })],
+    } as unknown as TaskSnapshot;
+    expect(store.recover(damaged).tasks[0]?.kind).toBe('video');
+  });
+
+  it('isolation takes precedence over repair, and BOTH counts reach the report', async () => {
+    const { mem, store } = setup();
+    writeRawTasks(mem, [null, damagedRecord({ kind: 'bogus' })]);
+    expect((await store.load()).tasks).toHaveLength(1);
+    expect(store.lastLoadSkippedCount).toBe(1);
+    expect(store.lastLoadRepairedCount).toBe(1);
+    expect(store.lastLoadDiagnostic.status).toBe('invalid-records');
+    expect(store.lastLoadDiagnostic.skippedRecords).toBe(1);
+    expect(store.lastLoadDiagnostic.repairedFields).toBe(1);
+  });
+
+  it('a repair backs up the original bytes and reports repairedFields through the boot chain', async () => {
+    const { mem, store } = setup();
+    const damaged = JSON.stringify({
+      schemaVersion: 1, savedAt: '2026-11-05T00:00:00.000Z',
+      tasks: [damagedRecord({ kind: 'bogus', artifacts: [null] })],
+    });
+    mem.state.files.set(SNAPSHOT(mem), damaged);
+
+    const result = await restoreTasks(bootQueue(mem, store), store);
+    expect(result.load.status).toBe('repaired-fields');
+    expect(result.load.repairedFields).toBe(2);
+    expect(result.load.writeBlocked).toBe(false);
+    expect(backupTextOf(mem, result.load.backupPath ?? '')).toBe(damaged);
+    expect(degradedWarnings(mem)[0]?.payload.repairedFields).toBe(2);
+
+    const persisted = JSON.parse(mem.state.files.get(SNAPSHOT(mem)) ?? '{}') as TaskSnapshot;
+    expect(persisted.tasks[0]?.kind).toBe('video');
+    expect(persisted.tasks[0]?.artifacts).toEqual([]);
   });
 });

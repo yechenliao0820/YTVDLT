@@ -240,6 +240,7 @@ describe('TXT import UI · confirm and honest results', () => {
     expect(h.calls.map((c) => c.channel)).toEqual(['TXT_IMPORT_PICK', 'TXT_IMPORT_ENQUEUE']);
     expect(h.calls[1]?.payload).toEqual({
       importId: 'import-ticket-0001', kind: 'video', quality: '1080p',
+      operationId: expect.any(String), // D-160: this submission's cancel scope
     });
   });
 

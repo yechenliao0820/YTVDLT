@@ -144,7 +144,10 @@ describe('M4-3 · 原始验收 ② — restore after a hard kill', () => {
     const { queue, engineState, store } = session(files);
 
     const result = await restoreTasks(queue, store);
-    expect(result).toEqual({ restored: 5, interrupted: 2, skipped: 0, empty: false });
+    expect(result).toEqual({
+      restored: 5, interrupted: 2, skipped: 0, empty: false,
+      load: { status: 'ok', skippedRecords: 0, backupPath: null, writeBlocked: false, error: null },
+    });
     // Booting must never start a download behind the user's back.
     expect(engineState.downloadCalls).toBe(0);
     expect(queue.activeTaskIds).toHaveLength(0);
@@ -190,7 +193,10 @@ describe('M4-3 · 原始验收 ② — restore after a hard kill', () => {
 
   it('first run (no snapshot file) restores nothing and reports empty', async () => {
     const { queue, store } = session(new Map());
-    expect(await restoreTasks(queue, store)).toEqual({ restored: 0, interrupted: 0, skipped: 0, empty: true });
+    expect(await restoreTasks(queue, store)).toEqual({
+      restored: 0, interrupted: 0, skipped: 0, empty: true,
+      load: { status: 'missing', skippedRecords: 0, backupPath: null, writeBlocked: false, error: null },
+    });
     expect(queue.list()).toHaveLength(0);
   });
 

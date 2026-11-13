@@ -5,6 +5,10 @@
 #
 # 步骤顺序 = 维护手册 §7 的本地改动流程（typecheck → npm test → 分层门禁 → 冻结门禁）。
 #
+# D-161 / 外部审计：本 workflow 会自动运行，但「合并前必须通过」由 GitHub
+# 仓库的分支保护 / ruleset 决定，本地 workflow 文件无法自我强制。配置步骤与
+# 验收判据见维护手册 §7.1「CI 强制门禁（GitHub 端配置）」。
+#
 # ── 明确不放进本 CI 的内容（均为有意排除，不是遗漏）────────────────────────
 # 1) e2e 截图基线（scripts/run-e2e.mjs + tests/e2e/baselines）：需要
 #    chrome-headless-shell（D-105 对构建版本门槛严格）与显示环境，像素级

@@ -512,13 +512,20 @@ function httpPort(): HttpPort {
     try {
       const policy: RedirectPolicy = opts?.urlPolicy === undefined
         ? allowAnyHttpUrl
-        // D-143: any caller-supplied URL policy now also validates RESOLVED
-        // addresses and pins the socket to them. The two production callers are
-        // the thumbnail cache (`isPublicHttpsUrl`) and the updater
-        // (`isTrustedReleaseHost`); both need "no private/loopback IP behind a
-        // checked hostname". The permissive no-policy default stays unvalidated
-        // so local 127.0.0.1 traffic keeps working.
-        : { allow: opts.urlPolicy, allowResolvedAddress: isPublicResolvedAddress };
+        // D-143: any caller-supplied URL policy also validates RESOLVED
+        // addresses and pins the socket to them (thumbnail cache
+        // `isPublicHttpsUrl`, official updater `isTrustedReleaseHost`).
+        // D-161: an operator-configured intranet mirror opts out of the
+        // PUBLIC-only address check with `allowPrivateAddresses: true`, because
+        // its loopback / RFC1918 address is the intended target. Its own
+        // `urlPolicy` still judges hop 0 and every Location, so this is not a
+        // return to the unvalidated no-policy default.
+        : {
+          allow: opts.urlPolicy,
+          ...(opts.allowPrivateAddresses === true
+            ? {}
+            : { allowResolvedAddress: isPublicResolvedAddress }),
+        };
       const response = await fetchFollowingRedirects(url, {
         signal: controller.signal,
         headers: { 'user-agent': 'YTVDLT' },

@@ -448,7 +448,7 @@ const flushWhile = async (predicate: () => boolean): Promise<void> => {
 };
 
 describe('T5 · IPC cancel + status channels', () => {
-  it('registers both channels, takes zero payload keys, and rejects any extra key', () => {
+  it('registers both channels, accepts only the opaque operationId, and rejects any other key', () => {
     expect(M5_CHANNELS).toContain(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL);
     expect(M5_CHANNELS).toContain(IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS);
     expect(validateM5Payload(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL, {})).toEqual({});
@@ -679,5 +679,127 @@ describe('T5 · the three entry points: cancel ⇒ nothing is enqueued', () => {
     }) as Record<string, unknown>;
     // Empty selection is still refused the old way (no cancel involved).
     expect(result['code']).toBe('EMPTY_SELECTION');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-160 · per-submission cancellation scope (external audit P2-2)
+// ---------------------------------------------------------------------------
+
+/** A TXT import service that reports progress once and holds until released. */
+function heldTxtImport() {
+  let signal: SpawnAbortSignal | undefined;
+  let release: (value: unknown) => void = () => undefined;
+  const held = new Promise<unknown>((resolve) => { release = resolve; });
+  const service = {
+    enqueue: (opts: {
+      precheckSignal?: SpawnAbortSignal;
+      onPrecheckProgress?: (checked: number, total: number) => void;
+    }): Promise<unknown> => {
+      signal = opts.precheckSignal;
+      opts.onPrecheckProgress?.(2, 5);
+      return held;
+    },
+  };
+  return {
+    service,
+    signal: (): SpawnAbortSignal | undefined => signal,
+    release: (): void => release({
+      ok: true, cancelled: false, code: '', requested: 5, enqueued: 0, failed: 0,
+      taskIds: [], failures: [],
+    }),
+  };
+}
+
+describe('D-160 · cancellation is scoped to one operationId', () => {
+  it('two concurrent single-URL checks: cancelling one leaves the other running', async () => {
+    const support = hangingSupport();
+    const handlers = createM5Handlers(await m5Deps({ siteSupport: support }));
+    const first = handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK)?.({
+      url: 'https://a.test/1', operationId: 'op-first',
+    });
+    const second = handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK)?.({
+      url: 'https://b.test/2', operationId: 'op-second',
+    });
+    await flushWhile(() => support.registered.length < 2);
+
+    expect(await handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL)?.({ operationId: 'op-first' }))
+      .toEqual({ ok: true, cancelled: true });
+    expect(support.registered[0]?.aborted).toBe(true);
+    expect(support.registered[1]?.aborted).toBe(false);
+    expect((await first as Record<string, unknown>)['state']).toBe('CANCELLED');
+
+    // An id nobody registered is an honest no-op, not a global stop.
+    expect(await handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL)?.({ operationId: 'op-unknown' }))
+      .toEqual({ ok: true, cancelled: false });
+    expect(support.registered[1]?.aborted).toBe(false);
+
+    expect(await handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL)?.({ operationId: 'op-second' }))
+      .toEqual({ ok: true, cancelled: true });
+    expect((await second as Record<string, unknown>)['state']).toBe('CANCELLED');
+  });
+
+  it('a legacy (no-id) CANCEL cannot abort an isolated submission', async () => {
+    const support = hangingSupport();
+    const handlers = createM5Handlers(await m5Deps({ siteSupport: support }));
+    const pending = handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK)?.({
+      url: 'https://a.test/1', operationId: 'op-isolated',
+    });
+    await flushWhile(() => support.registered.length < 1);
+    expect(await handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL)?.({}))
+      .toEqual({ ok: true, cancelled: false });
+    expect(support.registered[0]?.aborted).toBe(false);
+    await handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL)?.({ operationId: 'op-isolated' });
+    expect((await pending as Record<string, unknown>)['state']).toBe('CANCELLED');
+  });
+
+  it('a TXT batch cancel stops only that batch, not a concurrent single-URL check', async () => {
+    const support = hangingSupport();
+    const txt = heldTxtImport();
+    const handlers = createM5Handlers(await m5Deps({
+      siteSupport: support,
+      txtImport: txt.service as unknown as NonNullable<M5ChannelDeps['txtImport']>,
+    }));
+    const batch = handlers.get(IPC_CHANNELS.TXT_IMPORT_ENQUEUE)?.({
+      importId: 'import-ticket-0001', kind: 'video', operationId: 'op-txt',
+    });
+    await flushWhile(() => txt.signal() === undefined);
+    const single = handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK)?.({
+      url: 'https://a.test/1', operationId: 'op-single',
+    });
+    await flushWhile(() => support.registered.length < 1);
+
+    expect(await handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL)?.({ operationId: 'op-txt' }))
+      .toEqual({ ok: true, cancelled: true });
+    expect(txt.signal()?.aborted).toBe(true);
+    expect(support.registered[0]?.aborted).toBe(false);
+
+    // Progress is scoped too: the TXT dialog sees its own readout only.
+    const txtStatus = await handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS)?.({
+      operationId: 'op-txt',
+    }) as Record<string, unknown>;
+    expect(txtStatus['active']).toBe(true);
+    expect(txtStatus['total']).toBe(5);
+    const singleStatus = await handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS)?.({
+      operationId: 'op-single',
+    }) as Record<string, unknown>;
+    expect(singleStatus['active']).toBe(false);
+
+    txt.release();
+    await batch;
+    await handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL)?.({ operationId: 'op-single' });
+    expect((await single as Record<string, unknown>)['state']).toBe('CANCELLED');
+  });
+
+  it('a malformed operationId is rejected before any controller is created', async () => {
+    const support = hangingSupport();
+    const handlers = createM5Handlers(await m5Deps({ siteSupport: support }));
+    await expect(handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK)!({
+      url: 'https://a.test/1', operationId: 'https://evil.test/steal',
+    })).rejects.toThrow(/invalid operationId/);
+    await expect(handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL)!({
+      operationId: 'a'.repeat(129),
+    })).rejects.toThrow(/invalid operationId/);
+    expect(support.registered).toHaveLength(0);
   });
 });

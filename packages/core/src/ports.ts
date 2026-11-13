@@ -128,10 +128,52 @@ export interface IHistoryStore {
   importJson(json: string): Promise<number>;
 }
 
+/**
+ * D-159 · why the last `load()` did NOT return a fully trusted snapshot.
+ *
+ * `missing` / `ok` are healthy; the other three are degraded. `unknown` is
+ * reserved for a store that predates this contract (or a hand-built mock) and
+ * therefore cannot report on itself — it must never be reported as `ok`.
+ */
+export type TaskLoadStatus =
+  | 'missing'
+  | 'ok'
+  | 'invalid-records'
+  | 'repaired-fields'
+  | 'corrupt'
+  | 'read-error'
+  | 'unknown';
+
+/** D-159 · structured boot-time snapshot health, carried by `RestoreTasksResult`. */
+export interface TaskLoadDiagnostic {
+  readonly status: TaskLoadStatus;
+  /** Records isolated by the structural guard (bad entries silently dropped before D-159). */
+  readonly skippedRecords: number;
+  /** Byte-for-byte copy of the damaged original; `null` when no copy could be made. */
+  readonly backupPath: string | null;
+  /**
+   * True when `save()` refuses to write: the original is still on disk and was
+   * neither readable nor safely backed up. A boot that returns an empty snapshot
+   * must then be unable to overwrite the only remaining copy of the user's data.
+   */
+  readonly writeBlocked: boolean;
+  /**
+   * D-161: nested fields normalised to safe defaults (bad `artifacts` entries,
+   * `kind`, `mediaInfo`, `request`, `error`, …). Present only when > 0; the
+   * original damaged bytes are backed up before the repaired snapshot is
+   * written back, exactly like an isolated record.
+   */
+  readonly repairedFields?: number;
+  /** Short cause; never contains snapshot content or URLs. */
+  readonly error: string | null;
+}
+
 export interface ITaskStore {
   load(): Promise<TaskSnapshot>;
   save(snapshot: TaskSnapshot): Promise<void>;
   recover(raw: TaskSnapshot): TaskSnapshot;
+  /** D-159 (optional for legacy / mock stores): health of the most recent `load()`. */
+  readonly lastLoadDiagnostic?: TaskLoadDiagnostic;
 }
 
 export interface ITaskQueue {

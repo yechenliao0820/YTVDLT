@@ -31,7 +31,7 @@ import { createAppUpdateService, type AppUpdateService } from './app-update-serv
 import { cleanupCompletedUpdate, createUpdateCleanupFiles } from './app-update-cleanup.js';
 import { createThumbnailCache, type ThumbnailCache } from './thumbnail-cache.js';
 import {
-  createComponentUpdater, type ComponentUpdatePort,
+  createComponentUpdater, allowedComponentFeed, type ComponentUpdatePort,
 } from './component-updater.js';
 import { createM5Host, type M5Host } from './m5-host.js';
 import { readSiteSupportNetwork } from './site-support-network.js';
@@ -508,7 +508,13 @@ function resolveEngineUpdateSource(ports: CorePorts, _runtimeDir: string): Engin
  * settings button explains why instead of failing silently.
  *
  * Precedence: `YTVDLT_COMPONENT_FEED` (deployment override) →
- * `advanced.componentFeedUrl` (user setting). Only http(s) is accepted.
+ * `advanced.componentFeedUrl` (user setting).
+ *
+ * D-161: HTTPS is REQUIRED by default. A plain-HTTP mirror (intranet NAS / LAN)
+ * needs the explicit deployment opt-in `YTVDLT_ALLOW_HTTP_COMPONENT_FEED=1`;
+ * without it the feed is silently disabled rather than fetched over cleartext.
+ * The opt-in is the documented risk confirmation: SHA-256 over the same
+ * untrusted link cannot detect a simultaneous manifest+binary substitution.
  *
  * 0.2.1 (D-94): yt-dlp no longer depends on this — it carries its own official
  * feed. This value now only feeds components that have no feed of their own
@@ -519,7 +525,8 @@ function resolveComponentFeed(config: M5Host['m4']['task']['config']): string | 
   const raw = fromEnv !== ''
     ? fromEnv
     : String(config.get<string>('advanced', 'componentFeedUrl') ?? '').trim();
-  return /^https?:\/\//i.test(raw) ? raw : null;
+  const allowInsecureHttp = (process.env['YTVDLT_ALLOW_HTTP_COMPONENT_FEED'] ?? '').trim() === '1';
+  return allowedComponentFeed(raw, allowInsecureHttp);
 }
 
 /**

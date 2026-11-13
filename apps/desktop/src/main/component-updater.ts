@@ -129,42 +129,92 @@ function isHttpUrl(value: string | null | undefined): value is string {
  *
  * - GitHub-family hosts (the official yt-dlp feed `github.com/yt-dlp/…` and
  *   the `api.github.com` version API) share the app updater's trust root, so
- *   `isTrustedReleaseHost` is reused directly; its coverage (`github.com`,
- *   `*.github.com`, `*.githubusercontent.com`) is exactly where GitHub release
- *   requests and their asset redirects land. The port turns a caller policy
- *   into per-hop URL checks PLUS public-only resolved-address validation with
- *   socket pinning (node-ports.ts `httpPort`), so a redirect to a non-GitHub
- *   host — or a private/loopback address behind any hop — fails closed.
+ *   `isTrustedReleaseHost` is reused directly. The port turns that policy into
+ *   per-hop URL checks PLUS public-only resolved-address validation with
+ *   socket pinning (node-ports.ts `httpPort`).
  *
- * - Everything else is an operator-configured mirror (intranet NAS, domestic
- *   CDN, self-hosted directory). The operator explicitly pointed the app
- *   there, so the per-hop URL rule is deliberately "any valid http(s) hop":
- *   the user trusted this source AND the redirect chain it hands out (CDN
- *   redirects are the norm for mirrors). A same-origin / allowlist rule was
- *   considered and REJECTED: any caller `urlPolicy` makes the port classify
- *   resolved addresses public-only, which would break every intranet mirror —
- *   the primary mirror use-case. The mirror path therefore passes NO urlPolicy
- *   and keeps the transport-level guards that stay on unconditionally: every
- *   hop must still be a valid http(s) URL, the chain is capped at
- *   `MAX_HTTP_REDIRECTS`, loops are detected, and the socket is pinned to the
- *   resolved addresses (port default `allowAnyHttpUrl` +
- *   `fetchFollowingRedirects`). Address classification is the one check
- *   intentionally left out here.
+ * - Everything else is an operator-configured mirror. Before D-161 this path
+ *   passed NO `urlPolicy` at all, because any caller policy made the port
+ *   classify resolved addresses public-only and killed every intranet mirror.
+ *   That left a supply-chain hole: a plain-HTTP mirror could have BOTH
+ *   `SHA2-256SUMS` and the binary replaced in transit, and a same-feed hash
+ *   cannot detect the simultaneous substitution. D-161 closes it in layers:
+ *     ① feeds are HTTPS by default; plain HTTP needs an explicit deployment
+ *       opt-in (`YTVDLT_ALLOW_HTTP_COMPONENT_FEED=1`, see
+ *       `allowedComponentFeed`);
+ *     ② every mirror hop must stay on the feed's OWN hostname and must not
+ *       downgrade an HTTPS feed to HTTP (`mirrorHopPolicy`), so a mirror can
+ *       no longer redirect the trust chain to an arbitrary third party;
+ *     ③ `allowPrivateAddresses: true` keeps the port's address classification
+ *       off for this one path, so loopback / RFC1918 mirrors still work while
+ *       the URL policy, redirect cap, loop detection and socket pinning stay
+ *       fully on.
  *
  * The split is a pure function of the URL, so there is no "sometimes checked,
- * sometimes not" state: the official feed can never fall onto the mirror path
- * (it is a GitHub URL by construction), and a mirror living on the GitHub
- * trust root simply gets the stricter rules, which keep working there (GitHub
- * asset redirects stay in-family).
+ * sometimes not" state: the official feed can never fall onto the mirror path,
+ * and a mirror living on the GitHub trust root simply gets the stricter rules.
+ * NOTE: same-hostname is deliberately stricter than "any http(s) hop". A mirror
+ * that needs to hand off to a DIFFERENT host must point the configured feed URL
+ * at that final host instead; cross-host CDN chains are no longer implicitly
+ * trusted. SHA-256 still protects against corruption, not first-party
+ * authenticity — independent release signing remains a future item.
  */
 export function componentSourceUrlPolicy(url: string): ((rawUrl: string) => boolean) | undefined {
   return isTrustedReleaseHost(url) ? isTrustedReleaseHost : undefined;
 }
 
+/**
+ * D-161: per-hop rule for one operator mirror. A hop is legal only when it is
+ * a valid http(s) URL on the SAME hostname as the configured feed (the port may
+ * change — common for NAS mirrors) and, for an HTTPS feed, it is still HTTPS.
+ * A malformed source rejects every hop. Pure and side-effect free so the
+ * policy can be asserted without a network.
+ */
+export function mirrorHopPolicy(sourceUrl: string): (rawUrl: string) => boolean {
+  let source: URL;
+  try {
+    source = new URL(sourceUrl);
+  } catch {
+    return () => false;
+  }
+  if (source.protocol !== 'https:' && source.protocol !== 'http:') return () => false;
+  const host = source.hostname.toLowerCase();
+  const noDowngrade = source.protocol === 'https:';
+  return (rawUrl: string): boolean => {
+    try {
+      const hop = new URL(rawUrl);
+      if (hop.protocol !== 'https:' && hop.protocol !== 'http:') return false;
+      if (noDowngrade && hop.protocol !== 'https:') return false;
+      return hop.hostname.toLowerCase() === host;
+    } catch {
+      return false;
+    }
+  };
+}
+
+/** D-161: the FULL fetch policy for one component feed (official or mirror). */
+export function componentFetchPolicy(url: string): Pick<HttpFetchOptions, 'urlPolicy' | 'allowPrivateAddresses'> {
+  const official = componentSourceUrlPolicy(url);
+  if (official !== undefined) return { urlPolicy: official };
+  return { urlPolicy: mirrorHopPolicy(url), allowPrivateAddresses: true };
+}
+
 /** `extra` merged under the source-appropriate policy (policy wins). */
 function withSourcePolicy(url: string, extra: HttpFetchOptions = {}): HttpFetchOptions {
-  const policy = componentSourceUrlPolicy(url);
-  return policy === undefined ? extra : { ...extra, urlPolicy: policy };
+  return { ...extra, ...componentFetchPolicy(url) };
+}
+
+/**
+ * D-161: HTTPS by default for an operator-configured component feed. Plain
+ * HTTP is accepted ONLY when the deployment explicitly opts in (an intranet
+ * NAS / LAN mirror with no TLS); that opt-in is the documented risk
+ * confirmation. Any other scheme / empty value disables the feature.
+ */
+export function allowedComponentFeed(raw: string, allowInsecureHttp: boolean): string | null {
+  const trimmed = raw.trim();
+  if (/^https:\/\//i.test(trimmed)) return trimmed;
+  if (allowInsecureHttp && /^http:\/\//i.test(trimmed)) return trimmed;
+  return null;
 }
 
 /** Latest tag from a GitHub release payload; `null` when unusable. */
@@ -312,14 +362,20 @@ export function createComponentUpdater(deps: ComponentUpdaterDeps): ComponentUpd
       try {
         for (const component of usable) {
           const feed = feedOf(component) as string;
-          // Component-update hardening: manifest + binary get the same
-          // source-appropriate policy as the version query — strict GitHub
-          // allowlist for official feeds, bounded permissive transport for
-          // operator mirrors (`componentSourceUrlPolicy` rationale).
-          const feedPolicy = componentSourceUrlPolicy(feed);
+          // D-161: an explicitly opted-in cleartext mirror must leave a trace.
+          if (/^http:\/\//i.test(feed)) {
+            await logger.warn('component-update', 'insecure HTTP mirror in use', {
+              component: component.id,
+            });
+          }
+          // D-161: manifest + binary carry the SAME full source policy as the
+          // version query — GitHub allowlist for official feeds, same-host /
+          // no-downgrade + intranet-address allowance for operator mirrors.
+          // Both files come from this one feed, so neither may be fetched under
+          // a looser rule than the other (see the D-161 rationale above).
           const source = new HttpUpdateSource({
             baseUrl: feed, fileName: component.fileName, http,
-            ...(feedPolicy === undefined ? {} : { urlPolicy: feedPolicy }),
+            ...componentFetchPolicy(feed),
           });
           const updater = new SelfUpdater({
             ports,

@@ -181,6 +181,17 @@ export interface HttpFetchOptions {
   readonly maxBytes?: number;
   /** Per-hop predicate. Absent = accept any http(s) URL; the chain stays bounded. */
   readonly urlPolicy?: (rawUrl: string) => boolean;
+  /**
+   * D-161 (append-only): with an explicit `urlPolicy` the port normally also
+   * requires every resolved address to be public (DNS-rebinding guard). Set
+   * this to `true` ONLY for an operator-configured INTRANET feed, whose
+   * loopback / RFC1918 addresses are the whole point. The URL policy still
+   * applies to the initial URL and every redirect hop, the redirect chain is
+   * still capped, and the socket is still pinned — only the public-only
+   * address classification is skipped. Default `false` keeps every existing
+   * caller (official GitHub feed, thumbnail cache) exactly as strict as before.
+   */
+  readonly allowPrivateAddresses?: boolean;
 }
 
 export interface HttpPort {

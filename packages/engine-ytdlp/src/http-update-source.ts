@@ -34,6 +34,12 @@ export interface HttpUpdateSourceOptions {
    * permissive default — an explicit mirror-mode choice, not an oversight.
    */
   readonly urlPolicy?: (rawUrl: string) => boolean;
+  /**
+   * D-161: when the caller supplied its own mirror policy for an intranet
+   * feed, keep the port's resolved-address check OFF (loopback / RFC1918 are
+   * legal targets there). Ignored when no `urlPolicy` is configured.
+   */
+  readonly allowPrivateAddresses?: boolean;
 }
 
 function joinUrl(base: string, name: string): string {
@@ -56,7 +62,10 @@ export class HttpUpdateSource implements EngineUpdateSource {
    */
   private fetchOptions(): HttpFetchOptions {
     const policy = this.options.urlPolicy;
-    return policy === undefined ? {} : { urlPolicy: policy };
+    return policy === undefined ? {} : {
+      urlPolicy: policy,
+      ...(this.options.allowPrivateAddresses === true ? { allowPrivateAddresses: true } : {}),
+    };
   }
 
   async fetchChecksums(): Promise<string> {

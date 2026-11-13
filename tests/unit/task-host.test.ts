@@ -87,7 +87,10 @@ describe('M4-3 · TaskHost boot', () => {
     });
     expect(host.concurrency).toBe(3);
     expect(host.queue.concurrency).toBe(3);
-    expect(host.restore).toEqual({ restored: 0, interrupted: 0, skipped: 0, empty: true });
+    expect(host.restore).toEqual({
+      restored: 0, interrupted: 0, skipped: 0, empty: true,
+      load: { status: 'missing', skippedRecords: 0, backupPath: null, writeBlocked: false, error: null },
+    });
     expect(counter.downloads).toBe(0);
   });
 

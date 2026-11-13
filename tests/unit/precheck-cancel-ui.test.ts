@@ -254,7 +254,8 @@ describe('T5 · TXT import dialog: cancel during the pre-check', () => {
     await tick();
     const cancel = env.calls.find((c) => c.channel === 'URL_SUPPORT_CHECK_CANCEL');
     expect(cancel).toBeDefined();
-    expect(cancel?.payload).toEqual({}); // zero payload: it stops the CURRENT pre-check
+    // D-160: the cancel names THIS submission's scope, never a batch/URL/ticket.
+    expect(cancel?.payload).toEqual({ operationId: expect.any(String) });
     expect(doc.byId.get('txt-import-cancel-precheck')?.getAttribute('disabled')).toBe('disabled');
     expect(doc.byId.get('txt-import-wait-progress')?.textContent).toBe(t('queue.precheck.cancelling'));
 
@@ -321,7 +322,7 @@ describe('T5 · playlist dialog: cancel during the pre-check', () => {
     await tick();
     const cancel = env.calls.find((c) => c.channel === 'URL_SUPPORT_CHECK_CANCEL');
     expect(cancel).toBeDefined();
-    expect(cancel?.payload).toEqual({});
+    expect(cancel?.payload).toEqual({ operationId: expect.any(String) });
 
     env.enqueueGates[0]?.({ ...CANCELLED_ENQUEUE });
     await tick();

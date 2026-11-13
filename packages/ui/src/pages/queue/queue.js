@@ -987,13 +987,22 @@
    * T5: the single-URL pre-check is cancellable. The bar is built on the fly
    * (D-139 pattern, never declared in `index.html`) and ONLY in the live
    * pre-check path, so the frozen static baselines never see it. The cancel
-   * click fires `URL_SUPPORT_CHECK_CANCEL` (zero payload — "stop the current
-   * pre-check"); the main process aborts the engine child, and the outcome
-   * comes back through the normal verdict / enqueue reply as
-   * `PRECHECK_CANCELLED`, which this page renders as「已取消，未入队」.
+   * click fires `URL_SUPPORT_CHECK_CANCEL` with this submission's opaque
+   * `operationId` (D-160); the main process aborts ONLY the controllers bound
+   * to that id. The outcome comes back through the normal verdict / enqueue
+   * reply as `PRECHECK_CANCELLED`, which renders as「已取消，未入队」.
    */
   var precheckCancelBar = null;
   var singlePrecheckCancelled = false;
+  /**
+   * D-160: one opaque id per user submission. `URL_SUPPORT_CHECK` and the
+   * `DOWNLOAD_START` gate re-check share it, so the cancel bar stops exactly
+   * this submission and can never abort another live dialog's pre-check.
+   */
+  var currentPrecheckOperationId = '';
+  function newOperationId() {
+    return 'pc-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
 
   function removePrecheckCancelBar() {
     if (precheckCancelBar !== null) {
@@ -1031,7 +1040,7 @@
       singlePrecheckCancelled = true;
       stop.setAttribute('disabled', 'disabled');
       text.textContent = t('queue.precheck.cancelling');
-      call('URL_SUPPORT_CHECK_CANCEL', {});
+      call('URL_SUPPORT_CHECK_CANCEL', { operationId: currentPrecheckOperationId });
     });
     bar.appendChild(text);
     bar.appendChild(stop);
@@ -1148,6 +1157,9 @@
     }
     var payload = downloadPayload(url);
     if (payload === null) return;
+    // D-160: bind both pre-checks of this submission to ONE cancellation scope.
+    currentPrecheckOperationId = newOperationId();
+    payload.operationId = currentPrecheckOperationId;
     enqueueing = true;
 
     // No bridge = static preview; keep the byte-identical legacy path.
@@ -1161,7 +1173,9 @@
     // T5: the check window shows the runtime cancel bar (live only).
     singlePrecheckCancelled = false;
     showPrecheckCancelBar();
-    call('URL_SUPPORT_CHECK', { url: url }).then(function (verdict) {
+    call('URL_SUPPORT_CHECK', {
+      url: url, operationId: currentPrecheckOperationId,
+    }).then(function (verdict) {
       if (singlePrecheckCancelled) {
         // The user pressed stop: the verdict (a CANCELLED state) is not a gate
         // judgement — nothing may be enqueued behind their back.
@@ -1170,10 +1184,11 @@
         notify(t('queue.precheck.cancelled'));
         return;
       }
-      // T5: the CANCEL channel aborts EVERY in-flight pre-check (it has no batch
-      // id by design), so another live view can be the one that stopped this
-      // check. A CANCELLED verdict must terminate here just as a local click
-      // does: no confirm modal, no DOWNLOAD_START, no task.
+      // D-160: a CANCELLED verdict still terminates here (no confirm modal, no
+      // DOWNLOAD_START, no task). With per-submission scopes it can now only
+      // come from THIS submission's own cancel, but keeping the verdict as the
+      // authority preserves the fail-closed rule if a signal is aborted by any
+      // other means (e.g. a process-level shutdown).
       if (verdict && (verdict.code === 'PRECHECK_CANCELLED' || verdict.state === 'CANCELLED')) {
         enqueueing = false;
         removePrecheckCancelBar();

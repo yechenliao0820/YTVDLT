@@ -138,7 +138,7 @@ ui（零依赖） ← preload ← apps/desktop
 | **子进程启动环境（cwd / TEMP / PATH）** | `packages/engine-ytdlp/src/yt-dlp-engine.ts::spawnBase` —— 任何新 spawn 都从这里取 |
 | **有界元数据子进程的输出硬上限（`probe` / `probePlaylist` / `version`）** | `shared/src/ports.ts::SpawnOptions.maxStdoutBytes / maxStderrBytes`（append-only 可选字段，字节数）→ `apps/desktop/src/main/adapters/output-limiter.ts::createBoundedOutput`（按**字节**累加：对每个到达的 `Buffer` 分片取 `chunk.byteLength`，**不是** `string.length`；超限保留已接受前缀、拒绝剩余分片且**不抛异常**；超限在 stderr 追加 `OUTPUT_LIMIT_MARKER`）→ `shared/src/engine-limits.ts`（`METADATA_MAX_STDOUT_BYTES = 16 MiB` / `METADATA_MAX_STDERR_BYTES = 1 MiB`）；`assertSafeSpawnOptions()` 拒绝非正整数上限。**正常下载一个字节上限都不加**（不杀进程；D-144 起其**诊断副本**改为 1 MiB 尾缓冲 `STREAM_TAIL_MAX_BYTES` + `STREAM_TAIL_TRUNCATED_MARKER`，实时 `onChunk` 进度依旧全量不限），长下载照旧可流式吐兆字节进度。超限与超时**都走 `killTree()`**（`taskkill /PID /T /F`，见 §9 坑 21）。**D-153**：`spawnStreaming` 的 stdout 行拼装缓冲 `pending` 按字节封顶 `PROGRESS_PENDING_MAX_BYTES`（1 MiB），丢最旧前缀、结束统一记一条 WARNING，无换行 chunk 走 fast-path。**D-156**：`SpawnOptions.signal`（append-only，结构化 `SpawnAbortSignal`）触发时走同一 `killTree()` + 有界等待退出证据；只供有界元数据 / URL 预检任务，正常下载不传 signal。D-133 / D-144 / D-153 / D-156 |
 | 产物校验、错误码与中文提示、错误报告 | `core/src/artifact-verifier/`、`shared/src/errors.ts`、`core/src/error-mapper/`、`error-report/`；列表页一句话失败简报（D-109）：`core/src/failure-summary/`（稳定码→分类）→ `main/m5-channels.ts::toTaskListItem`（`failureKind`）→ `ui/src/pages/queue/queue.js::failureKeyOf`（`queue.failure.<kind>`），详情 DTO 不动 |
-| 队列调度、并发、暂停、历史快照 | `core/src/task-queue/`、`task-store/`；数据目录判定在 `data-dir.ts` |
+| 队列调度、并发、暂停、历史快照 | `core/src/task-queue/`、`task-store/`；数据目录判定在 `data-dir.ts`；**损坏快照先字节级备份再写回、读错误阻断写入**在 `task-store/task-store.ts::load/save`（D-159） |
 | 详情页、日志页、设置页、M3 三个对话框 | `packages/ui/src/pages/*`、`packages/ui/src/dialogs/*` |
 | 打包配置、图标、安装包 | `apps/desktop/electron-builder.yml`、`scripts/make-icon.mjs`、`apps/desktop/build/installer.nsh` |
 | **应用本体更新（检查 / 说明弹窗 / 下载校验 / 安装 / 忽略版本）** | `main/app-update-service.ts`、`main/github-releases.ts`、`main/adapters/http-download.ts`；纯规则在 `core/src/app-update/`（`notes.ts` = 跨版本说明聚合）；弹窗在 `ui/src/updates/update-dialog.js`。D-104：缓存复用与安装前都重算 SHA-256，基准为发布 `digest` 或 `<target>.sha256` sidecar，失败只隔离不删。**D-140：说明面必须覆盖 `(current, latest]` 整段区间**——`/releases/latest` 只回答「有没有新版」，弹窗文案来自 `/releases?per_page=30` + `collectReleaseNotes()`（升序、单版 1400 / 总量 6000 字符、超预算从最旧端丢并计数）；历史查询失败只降级成单版正文，**不允许**把一次成功的检查变成 `error` |
@@ -235,6 +235,7 @@ ui（零依赖） ← preload ← apps/desktop
 | **应用内部工作目录** | `<dataDir>/work/<taskId>/`：yt-dlp 产物清单、子进程 `cwd`、以及 `-P temp:` 指向的中间文件（`.part` / `.part-FragN.part` / `.ytdl`）。**按任务隔离**；清单读取并交接后才删除，成功后若目录为空则非递归 `rmdir`。**这就是续传的凭据，不要当成垃圾清理**（D-118） |
 | **跨卷时的中间文件** | `<outputDir>/.ytvdlt-incomplete/<taskId>/`：当 `<dataDir>` 与输出目录不在同一卷（或卷无法判定）时使用。放在输出目录内部是为了保证收尾的 `shutil.move` 退化成 rename，而不是整份复制 |
 | 封面缓存 / 更新包 | `<dataDir>\thumbs\<sha1(url)>.<ext>`、同目录 `index.json`（D-103 持久索引：taskIds / bytes / lastUsedAt）、`<dataDir>\updates\YTVDLT-Setup-*.exe`（D-93 / D-96） |
+| **损坏快照备份** | 与 `tasks.json` 同目录的 `tasks.corrupt-<UTC 时间戳>[-N].json`（只读安装时随 `configDir` 一起回落到 `%APPDATA%\YTVDLT\config\`）：`TaskStore.load()` 在 JSON 损坏或坏记录隔离**之前**写入的字节级原文副本；备份失败 / 读取错误时 `save()` 一律拒绝，原 `tasks.json` 不被覆盖（D-159）。启动恢复报告里的 `load.status` 是判断依据 |
 
 `config/config.json` 按域组织：`general / format / subtitle / paths / network / advanced`；
 `config/tasks.json` 是队列快照。
@@ -295,6 +296,34 @@ ui（零依赖） ← preload ← apps/desktop
   本手册不写当前版本号——那是会过期的状态，不属于这里。
 
 收尾一律跑 `node scripts/handoff-check.mjs`；输出不齐说明有文档没跟上。
+
+### 7.1 CI 强制门禁（GitHub 端配置，本地代码无法替代）
+
+**事实边界**：`.github/workflows/ci.yml` 让 CI 在 `push main` 与所有 PR 上自动运行
+（`windows-latest`；`pnpm typecheck` → `npm test`（四维 ≥70 覆盖率门）→
+`check-layering` → `frozen-gate`），但 workflow 文件**不能强制自己必须过**。
+「有自动化 CI」与「有强制 CI 门禁」是两件事：是否强制由仓库
+`Settings → Branches / Rulesets` 决定，只能由业主在 GitHub 网页端（或经授权的
+API）设置。不要因为 Actions 页是绿的就以为 `main` 被保护了；
+`handoff-check.mjs` 不检查这一项。
+
+配置清单（Ruleset 路径；Classic branch protection rule 的同名项等价）：
+
+| 步骤 | 设置项 | 值 |
+|---|---|---|
+| 1 | Target branches | `main` |
+| 2 | Require a pull request before merging | 开；日常改动走 PR，不在 `main` 上直接 push |
+| 3 | Require status checks to pass | 开；添加本 workflow 的 `ci` job（下拉列表里可能显示 `typecheck · tests · gates (windows-latest)`，**以实际条目为准**） |
+| 4 | Require branches to be up to date before merging | 开；避免「过了 CI 的旧分支」盖掉新 `main` |
+| 5 | Block force pushes / Restrict deletions | 开 |
+| 6 | Include administrators / Do not allow bypassing | 开，否则以上规则对管理员无效 |
+
+验收判据（**不要拿 `main` 试**）：开一个测试 PR 故意让某一步失败 → Merge 按钮
+被禁用并提示 required check 未通过；修好后门禁自动解除。CI 红了按日志定位，
+不得为变绿改测试结论（铁律 6 / 8）。
+
+> 本环境只维护本地工作树。未经业主明确指令，**不修改远端仓库设置、不 commit、
+> 不 push**。本小节是给业主执行的操作清单，不是「已完成」的记录。
 
 ---
 
@@ -397,6 +426,7 @@ ui（零依赖） ← preload ← apps/desktop
 | **更新器首次下载没有独立可信签名基准**：信任根是 TLS + GitHub 域；发布端缺 `digest` 时本地 `.sha256` sidecar 只保证「后来没变」，不认证首次来源 | `main/app-update-service.ts`、`main/adapters/http-download.ts`；口径见 D-137「未覆盖」 |
 | **IPC / 导航边界未做真机窗口验证**：sender、主 frame、`will-navigate`、`setWindowOpenHandler` 目前只有假 Electron 单测；打包后真机点一遍待业主指令（铁律 9） | `main/bootstrap.ts`、`tests/unit/ipc-trust-boundary.test.ts` |
 | **本轮加固缺在线 / 安装包证据**：HTTP 逐跳、有界读取、IPC 边界全部是离线受控测试（127.0.0.1 + 假 Electron）；真实站点预检六态矩阵与 Windows 安装包验收需业主放行国际网并点名打包（铁律 9） | `tests/unit/http-network-boundary.test.ts`；口径见 D-137「未覆盖」 |
+| **`main` 未启用强制 CI 门禁**：CI 会自动跑，但 GitHub 没要求通过才能合并（外部审计实测 `protected: false`、rulesets 为空）。分支保护只能在 GitHub 网页端配置，本地 workflow 与提交都替代不了 | 操作步骤与验收判据见 §7.1；业主执行前不要当成已生效 |
 
 > 这张表会随开发推进变短。**完成一项就删一行**，不要留着写「已做」——那是本手册最容易腐烂的地方。
 >

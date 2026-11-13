@@ -14,7 +14,8 @@ import { join } from 'node:path';
 import { Logger } from '@ytvdlt/core';
 import type { CorePorts, HttpFetchOptions, HttpPort } from '@ytvdlt/shared';
 import {
-  createComponentUpdater, normalizeVersion, type ComponentSpec,
+  createComponentUpdater, normalizeVersion, componentFetchPolicy, mirrorHopPolicy,
+  allowedComponentFeed, type ComponentSpec,
 } from '../../apps/desktop/src/main/component-updater.js';
 import { isTrustedReleaseHost } from '../../apps/desktop/src/main/github-releases.js';
 import { createNodePorts } from '../../apps/desktop/src/main/adapters/node-ports.js';
@@ -225,7 +226,7 @@ describe('component-update hardening · source policies reach the port layer', (
     expect(report.results[0]).toMatchObject({ id: 'yt-dlp', latestVersion: '2026.11.01', updateAvailable: true });
   });
 
-  it('check(): a non-GitHub version API stays on the bounded permissive mirror mode', async () => {
+  it('check(): a non-GitHub version API stays on the bounded mirror policy', async () => {
     const { ports, logger, http } = await setup({ releaseJson: '{"tag_name":"2026.11.01"}' });
     const customApi = 'https://mirror.example.org/yt-dlp/release.json';
     const updater = createComponentUpdater({
@@ -237,11 +238,19 @@ describe('component-update hardening · source policies reach the port layer', (
 
     const report = await updater.check();
     expect(http.calls).toEqual([`text:${customApi}`]);
-    // Mirror mode is an EXPLICIT decision: no urlPolicy in the options, so the
-    // port keeps its permissive default (intranet addresses allowed) and only
-    // the transport-level guards apply. Asserted as an exact object so a
-    // silently-added half-policy cannot hide here either.
-    expect(http.opts[0]).toEqual({ timeoutMs: 15_000 });
+    // D-161: mirror mode is now an EXPLICIT, bounded policy — same host, no
+    // HTTPS→HTTP downgrade, intranet resolved addresses allowed. Asserted as
+    // an exact shape so a silently-dropped guard cannot hide here either.
+    expect(http.opts[0]).toEqual({
+      timeoutMs: 15_000,
+      urlPolicy: expect.any(Function),
+      allowPrivateAddresses: true,
+    });
+    const policy = http.opts[0]?.urlPolicy;
+    expect(policy?.(customApi)).toBe(true);
+    expect(policy?.('https://mirror.example.org/another/path.json')).toBe(true);
+    expect(policy?.('http://mirror.example.org/yt-dlp/release.json')).toBe(false);
+    expect(policy?.('https://evil.invalid/steal')).toBe(false);
     expect(report.results[0]).toMatchObject({ id: 'yt-dlp', latestVersion: '2026.11.01' });
   });
 
@@ -265,7 +274,7 @@ describe('component-update hardening · source policies reach the port layer', (
     expect(new TextDecoder().decode(mem.state.bytes.get('C:/runtime/yt-dlp.exe'))).toBe('ytdlp-v2');
   });
 
-  it('run(): operator mirror manifest + binary carry no urlPolicy (explicit mirror mode)', async () => {
+  it('run(): operator mirror manifest + binary carry the same bounded mirror policy', async () => {
     const { ports, logger, components, http } = await setup();
     const updater = createComponentUpdater({
       ports, logger, components, baseUrl: MIRROR_BASE, intakeGate: null,
@@ -279,8 +288,15 @@ describe('component-update hardening · source policies reach the port layer', (
       `text:${MIRROR_BASE}SHA2-256SUMS`,
       `bytes:${MIRROR_BASE}aria2c.exe`,
     ]);
+    // D-161: BOTH files (checksum manifest and executable) must leave under
+    // the identical policy; no half-policy, no cleartext downgrade, no foreign
+    // host. Intranet addresses are explicitly allowed for this one path.
     for (const opts of http.opts) {
-      expect(opts?.urlPolicy).toBeUndefined();
+      expect(opts?.urlPolicy).toBeInstanceOf(Function);
+      expect(opts?.allowPrivateAddresses).toBe(true);
+      expect(opts?.urlPolicy?.(`${MIRROR_BASE}SHA2-256SUMS`)).toBe(true);
+      expect(opts?.urlPolicy?.(`http://feed.example.org/mirror/SHA2-256SUMS`)).toBe(false);
+      expect(opts?.urlPolicy?.('https://evil.invalid/steal')).toBe(false);
     }
   });
 
@@ -306,8 +322,13 @@ describe('component-update hardening · source policies reach the port layer', (
     // the mirror is never forced onto the strict GitHub allowlist.
     expect(http.opts[0]?.urlPolicy).toBe(isTrustedReleaseHost);
     expect(http.opts[1]?.urlPolicy).toBe(isTrustedReleaseHost);
-    expect(http.opts[2]?.urlPolicy).toBeUndefined();
-    expect(http.opts[3]?.urlPolicy).toBeUndefined();
+    // The official feed never opts out of the public-only address check.
+    expect(http.opts[0]?.allowPrivateAddresses).toBeUndefined();
+    expect(http.opts[1]?.allowPrivateAddresses).toBeUndefined();
+    expect(http.opts[2]?.urlPolicy).toBeInstanceOf(Function);
+    expect(http.opts[3]?.urlPolicy).toBeInstanceOf(Function);
+    expect(http.opts[2]?.allowPrivateAddresses).toBe(true);
+    expect(http.opts[3]?.allowPrivateAddresses).toBe(true);
   });
 });
 
@@ -393,6 +414,40 @@ describe('component-update hardening · the real HttpPort enforces the passed op
     expect(s.requests).toEqual(['/yt-dlp.exe']);
   });
 
+  it('D-161: the bounded mirror policy still reaches a loopback feed on the real port', async () => {
+    const s = await serve((_req, res) => {
+      res.writeHead(200, { 'content-length': '4' });
+      res.end(Buffer.from([9, 9, 9, 9]));
+    });
+    // The whole point of `allowPrivateAddresses`: a caller-supplied policy
+    // must NOT turn the port's public-only address check back on and break
+    // intranet mirrors.
+    const bytes = await realPorts().http.getBytes(`${s.url}/yt-dlp.exe`, {
+      timeoutMs: 3_000,
+      ...componentFetchPolicy(s.url),
+    });
+    expect(Array.from(bytes)).toEqual([9, 9, 9, 9]);
+    expect(s.requests).toEqual(['/yt-dlp.exe']);
+  });
+
+  it('D-161: a mirror cannot redirect the trust chain to a foreign host', async () => {
+    const s = await serve((req, res) => {
+      if (req.url === '/start') {
+        res.writeHead(302, { location: 'https://evil.invalid/SHA2-256SUMS' });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'content-length': '4' });
+      res.end(Buffer.from([1, 2, 3, 4]));
+    });
+    await expect(realPorts().http.getBytes(`${s.url}/start`, {
+      timeoutMs: 3_000,
+      ...componentFetchPolicy(s.url),
+    })).rejects.toThrow(/blocked outbound URL/);
+    // The redirect was refused BEFORE any second request left the process.
+    expect(s.requests).toEqual(['/start']);
+  });
+
   it('mirror mode redirects stay per-hop judged on the real port', async () => {
     const s = await serve((req, res) => {
       if (req.url === '/start') {
@@ -417,5 +472,48 @@ describe('component-update hardening · the real HttpPort enforces the passed op
     await expect(realPorts().http.getBytes(`${s.url}/n/0`, { timeoutMs: 5_000 }))
       .rejects.toThrow(/too many redirects/);
     expect(s.requests.length).toBe(MAX_HTTP_REDIRECTS + 1);
+  });
+});
+
+describe('D-161 · mirror trust model is explicit and bounded', () => {
+  it('allowedComponentFeed requires HTTPS unless the deployment explicitly opts in', () => {
+    expect(allowedComponentFeed(' https://mirror.example.org/feed ', false))
+      .toBe('https://mirror.example.org/feed');
+    expect(allowedComponentFeed('http://nas.local/mirror/', false)).toBeNull();
+    expect(allowedComponentFeed('http://nas.local/mirror/', true)).toBe('http://nas.local/mirror/');
+    expect(allowedComponentFeed('file:///C:/evil', true)).toBeNull();
+    expect(allowedComponentFeed('', true)).toBeNull();
+  });
+
+  it('mirrorHopPolicy: same host (port may change) and no HTTPS→HTTP downgrade', () => {
+    const https = mirrorHopPolicy('https://feed.example.org/mirror/');
+    expect(https('https://feed.example.org/mirror/SHA2-256SUMS')).toBe(true);
+    expect(https('https://feed.example.org:8443/cdn/yt-dlp.exe')).toBe(true);
+    expect(https('HTTPS://FEED.EXAMPLE.ORG/mirror/SHA2-256SUMS')).toBe(true);
+    expect(https('http://feed.example.org/mirror/SHA2-256SUMS')).toBe(false);
+    expect(https('https://evil.invalid/steal')).toBe(false);
+    expect(https('ftp://feed.example.org/x')).toBe(false);
+    expect(https('not a url')).toBe(false);
+    // A cleartext feed may be upgraded but still cannot leave its own host.
+    const http = mirrorHopPolicy('http://nas.local/mirror/');
+    expect(http('http://nas.local/mirror/SHA2-256SUMS')).toBe(true);
+    expect(http('https://nas.local/mirror/SHA2-256SUMS')).toBe(true);
+    expect(http('http://evil.invalid/steal')).toBe(false);
+  });
+
+  it('a malformed mirror source fails closed for every hop', () => {
+    const policy = mirrorHopPolicy('not-a-url');
+    expect(policy('https://feed.example.org/x')).toBe(false);
+    expect(policy('')).toBe(false);
+  });
+
+  it('componentFetchPolicy keeps official feeds strict and mirror feeds intranet-capable', () => {
+    expect(componentFetchPolicy('https://github.com/yt-dlp/yt-dlp/releases/latest/download'))
+      .toEqual({ urlPolicy: isTrustedReleaseHost });
+    const mirror = componentFetchPolicy('https://mirror.example.org/feed/');
+    expect(mirror.urlPolicy).toBeInstanceOf(Function);
+    expect(mirror.allowPrivateAddresses).toBe(true);
+    expect(mirror.urlPolicy?.('https://mirror.example.org/feed/SHA2-256SUMS')).toBe(true);
+    expect(mirror.urlPolicy?.('http://mirror.example.org/feed/SHA2-256SUMS')).toBe(false);
   });
 });

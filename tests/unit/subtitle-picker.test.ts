@@ -458,7 +458,7 @@ describe('stage 5 · enqueue and the untouched legacy flow', () => {
     await tick();
     expect(enqueueCalls(h)).toHaveLength(1);
     expect(Object.keys(enqueueCalls(h)[0].payload as object).sort())
-      .toEqual(['kind', 'quality', 'url']);
+      .toEqual(['kind', 'operationId', 'quality', 'url']);
   });
 
   it('a confirmed selection adds exactly the six flat keys + previewId', async () => {
@@ -635,7 +635,8 @@ describe('stage 6 · subtitle state regressions', () => {
     enqueue(h);
     await tick();
     expect(enqueueCalls(h)).toHaveLength(1);
-    expect(Object.keys(enqueueCalls(h)[0].payload as object).sort()).toEqual(['kind', 'quality', 'url']);
+    expect(Object.keys(enqueueCalls(h)[0].payload as object).sort())
+      .toEqual(['kind', 'operationId', 'quality', 'url']);
   });
 
   it.each(['PREVIEW_EXPIRED', 'PREVIEW_CONSUMED', 'SUBTITLE_NO_MANUAL_TRACK', 'ENQUEUE_FAILED'])('blocks repeated submissions after Main rejects %s until clear or re-preview', async (code) => {

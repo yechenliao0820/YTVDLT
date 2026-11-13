@@ -426,6 +426,9 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   [IPC_CHANNELS.PATH_ACTION]: ['action', 'kind'],
   [IPC_CHANNELS.DOWNLOAD_START]: [
     'url', 'kind', 'quality', 'audioQuality', 'audioFormat',
+    // D-160: opaque id of THIS user submission; the main process binds every
+    // pre-check controller of the submission to it. Not a URL / path / ticket.
+    'operationId',
     // Stage 3: the subtitle ticket + the per-task subtitle intent. Flat keys on
     // purpose — `validateM5Payload` only sees the top level, so a nested
     // `subtitle: {...}` object would smuggle unvalidated fields past it.
@@ -447,7 +450,7 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   // single-use id plus the three download enums — never a URL or a file name.
   [IPC_CHANNELS.TXT_IMPORT_PICK]: [],
   [IPC_CHANNELS.TXT_IMPORT_ENQUEUE]: [
-    'importId', 'kind', 'quality', 'audioQuality', 'audioFormat',
+    'importId', 'kind', 'quality', 'audioQuality', 'audioFormat', 'operationId',
   ],
   // Playlist batch import: the renderer may name a URL and a ticket, never a
   // PlaylistInfo, an entry URL, a path or an argv token.
@@ -455,6 +458,7 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   [IPC_CHANNELS.PLAYLIST_PREVIEW_CANCEL]: ['previewId'],
   [IPC_CHANNELS.PLAYLIST_BATCH_ENQUEUE]: [
     'previewId', 'url', 'selectedIds', 'kind', 'quality', 'audioQuality', 'audioFormat',
+    'operationId',
   ],
   // D-134: supported-site discovery. LIST takes an optional `refresh` boolean
   // and NOTHING else — the renderer can ask "ask the engine again", never
@@ -463,14 +467,16 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   // Deliberately absent: enginePath, engineVersion, argv, cookies, a format
   // selection, an extractor name — none of them are the renderer's to choose.
   [IPC_CHANNELS.SUPPORTED_SITES]: ['refresh'],
-  [IPC_CHANNELS.URL_SUPPORT_CHECK]: ['url', 'refresh'],
-  // T5: both take NOTHING. CANCEL means "stop the current in-flight pre-check"
-  // (no batch id, no URL list — the renderer never names what it cancels);
-  // STATUS is a read-only progress probe for the batch dialogs. Deliberately
-  // absent: any identifier that would let a page cancel or observe a SPECIFIC
-  // other submission.
-  [IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL]: [],
-  [IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS]: [],
+  [IPC_CHANNELS.URL_SUPPORT_CHECK]: ['url', 'refresh', 'operationId'],
+  // D-160: CANCEL / STATUS take ONE opaque `operationId` — the id the renderer
+  // minted for its own submission. It is NOT a batch id, URL list or preview
+  // ticket: the main process only ever cancels / reports the controllers it
+  // registered under that exact id, so two live dialogs can no longer stop
+  // each other. Omitting the id keeps the LEGACY scope (pre-D-160 callers):
+  // such a cancel can only reach controllers that were also registered
+  // without an id — never an isolated submission.
+  [IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL]: ['operationId'],
+  [IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS]: ['operationId'],
   // D-148: CHECK takes NOTHING (same zero-input rule as APP_INFO) so the page
   // cannot forge a frequency decision; ACTION takes ONLY the action enum —
   // never a URL (the repo page is resolved inside the main process).
@@ -777,40 +783,76 @@ function assertTemplateInput(record: Record<string, unknown>): CommandTemplateIn
 export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unknown) => Promise<unknown>> {
   const handlers = new Map<string, (payload: unknown) => Promise<unknown>>();
 
-  // ---- T5: user-level pre-check cancellation -------------------------------
-  // Every abortable pre-check registers its AbortController here: the single
-  // URL_SUPPORT_CHECK, the DOWNLOAD_START gate check, the TXT batch and the
-  // playlist batch. URL_SUPPORT_CHECK_CANCEL aborts ALL of them — the semantics
-  // are "stop the current pre-check", deliberately narrow so the renderer needs
-  // no batch id and no URL list (same zero-input rule as APP_INFO). A
-  // registered controller is always unregistered in a `finally`, so the set can
-  // never leak a finished check.
-  const cancellablePrechecks = new Set<AbortController>();
-  /**
-   * T5: line-wise progress of the BATCH pre-checks only (a single-URL check has
-   * nothing to count). An entry is created lazily on the first progress report
-   * — i.e. only while a `precheckBatch` is actually running — so `active` never
-   * covers ticket validation or the enqueue itself. Concurrent batches are
-   * summed; the normal case is one dialog pre-checking at a time.
-   */
-  const batchProgress = new Map<AbortController, { checked: number; total: number }>();
-  const registerPrecheck = (): AbortController => {
+  // ---- D-160: per-submission pre-check cancellation -------------------------
+  // Each user submission mints one opaque `operationId`; EVERY AbortController
+  // of that submission (single URL check, DOWNLOAD_START gate re-check, TXT /
+  // playlist batch) is registered under it. CANCEL and STATUS are scoped to a
+  // single id, so one dialog's stop button can no longer abort another live
+  // pre-check — the P2 audit finding against the old global Set. An omitted id
+  // is the LEGACY scope: it only reaches registrations made without an id too,
+  // never an isolated submission. Controllers are always unregistered in a
+  // `finally`, and the scope itself is dropped when its last controller leaves,
+  // so neither controllers nor scope keys can leak.
+  //
+  // The id is NOT a batch id, a URL list, a path or a preview ticket. It carries
+  // no authority beyond naming THIS submission's own cancellation scope — the
+  // main process still owns every abort decision, and the whitelist below
+  // bounds its shape so it can never smuggle a URL into the IPC surface.
+  interface PrecheckScope {
+    readonly controllers: Set<AbortController>;
+    /** BATCH pre-checks only; created lazily on the first progress report. */
+    readonly progress: Map<AbortController, { checked: number; total: number }>;
+  }
+  const LEGACY_SCOPE = '';
+  const OPERATION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+  const scopes = new Map<string, PrecheckScope>();
+
+  const scopeOf = (operationId: string | null): string => operationId ?? LEGACY_SCOPE;
+  const entryFor = (scope: string): PrecheckScope => {
+    let entry = scopes.get(scope);
+    if (entry === undefined) {
+      entry = { controllers: new Set(), progress: new Map() };
+      scopes.set(scope, entry);
+    }
+    return entry;
+  };
+  const releaseIfEmpty = (scope: string): void => {
+    const entry = scopes.get(scope);
+    if (entry !== undefined && entry.controllers.size === 0 && entry.progress.size === 0) {
+      scopes.delete(scope);
+    }
+  };
+  /** Read a validated, opaque operation id from a whitelisted IPC payload. */
+  const readOperationId = (record: Record<string, unknown>): string | null => {
+    const raw = record['operationId'];
+    if (raw === undefined || raw === '') return null;
+    if (typeof raw !== 'string' || !OPERATION_ID_RE.test(raw)) {
+      throw new Error('[m5-ipc] invalid operationId');
+    }
+    return raw;
+  };
+  const registerPrecheck = (operationId: string | null): AbortController => {
     const controller = new AbortController();
-    cancellablePrechecks.add(controller);
+    entryFor(scopeOf(operationId)).controllers.add(controller);
     return controller;
   };
-  const finishPrecheck = (controller: AbortController): void => {
-    cancellablePrechecks.delete(controller);
-    batchProgress.delete(controller);
+  const finishPrecheck = (operationId: string | null, controller: AbortController): void => {
+    const scope = scopeOf(operationId);
+    const entry = scopes.get(scope);
+    if (entry === undefined) return;
+    entry.controllers.delete(controller);
+    entry.progress.delete(controller);
+    releaseIfEmpty(scope);
   };
   const trackBatchProgress = (
+    operationId: string | null,
     controller: AbortController,
   ): (checked: number, total: number) => void => {
     let entry: { checked: number; total: number } | null = null;
     return (checked: number, total: number) => {
       if (entry === null) {
         entry = { checked: 0, total: 0 };
-        batchProgress.set(controller, entry);
+        scopes.get(scopeOf(operationId))?.progress.set(controller, entry);
       }
       entry.checked = checked;
       entry.total = total;
@@ -1048,6 +1090,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
   // else is rejected instead of silently falling back.
   handlers.set(IPC_CHANNELS.DOWNLOAD_START, async (payload) => {
     const record = validateM5Payload(IPC_CHANNELS.DOWNLOAD_START, payload);
+    const operationId = readOperationId(record);
     const url = record['url'];
     if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
       throw new Error('[m5-ipc] DOWNLOAD_START requires an http(s) url');
@@ -1104,7 +1147,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       // branch left a controller in the cancel set for every DOWNLOAD_START on
       // a build without the capability — the set grew without bound and a
       // later CANCEL falsely claimed it had stopped something.
-      const precheckController = registerPrecheck();
+      const precheckController = registerPrecheck(operationId);
       try {
         const verdict = await deps.siteSupport.check(url, false, precheckController.signal)
           .catch(() => null);
@@ -1146,7 +1189,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
           }
         }
       } finally {
-        finishPrecheck(precheckController);
+        finishPrecheck(operationId, precheckController);
       }
     }
 
@@ -1232,6 +1275,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
 
   handlers.set(IPC_CHANNELS.TXT_IMPORT_ENQUEUE, async (payload): Promise<TxtImportEnqueueDto> => {
     const record = validateM5Payload(IPC_CHANNELS.TXT_IMPORT_ENQUEUE, payload);
+    const operationId = readOperationId(record);
     const importId = record['importId'];
     if (typeof importId !== 'string' || !IMPORT_ID_RE.test(importId)) {
       throw new Error('[m5-ipc] invalid importId');
@@ -1259,7 +1303,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     // T5: the batch pre-check runs inside the service (the renderer never sees
     // these URLs, D-129), so the cancellation and the progress plumbing are
     // handed THROUGH the service into `precheckBatch`.
-    const controller = registerPrecheck();
+    const controller = registerPrecheck(operationId);
     try {
       return await deps.txtImport.enqueue({
         importId,
@@ -1268,10 +1312,10 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
         ...(rawAudioQuality === undefined ? {} : { audioQuality: rawAudioQuality as AudioQualityChoice }),
         ...(rawAudioFormat === undefined ? {} : { audioFormat: rawAudioFormat as AudioFormatChoice }),
         precheckSignal: controller.signal,
-        onPrecheckProgress: trackBatchProgress(controller),
+        onPrecheckProgress: trackBatchProgress(operationId, controller),
       });
     } finally {
-      finishPrecheck(controller);
+      finishPrecheck(operationId, controller);
     }
   });
 
@@ -1332,6 +1376,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
 
   handlers.set(IPC_CHANNELS.PLAYLIST_BATCH_ENQUEUE, async (payload): Promise<PlaylistBatchEnqueueDto> => {
     const record = validateM5Payload(IPC_CHANNELS.PLAYLIST_BATCH_ENQUEUE, payload);
+    const operationId = readOperationId(record);
     const previewId = record['previewId'];
     if (typeof previewId !== 'string' || !PLAYLIST_PREVIEW_ID_RE.test(previewId)) {
       throw new Error('[m5-ipc] invalid previewId');
@@ -1370,7 +1415,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     // T5: the batch pre-check below is cancellable; every exit from here on
     // unregisters the controller. Read through a lambda: the flag flips while
     // the pre-check awaits, and a fresh call per check avoids stale narrowing.
-    const precheckController = registerPrecheck();
+    const precheckController = registerPrecheck(operationId);
     const precheckCancelled = (): boolean => precheckController.signal.aborted;
     try {
     // An explicit empty selection is refused BEFORE spending the ticket.
@@ -1420,7 +1465,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
         deps.siteSupport,
         // T5: the batch is cancellable and reports line-wise progress to the
         // STATUS probe the dialogs poll.
-        { signal: precheckController.signal, onProgress: trackBatchProgress(precheckController) },
+        { signal: precheckController.signal, onProgress: trackBatchProgress(operationId, precheckController) },
       );
       // T5: the user cancelled the pre-check — nothing may be enqueued. The
       // preview ticket has already been consumed above (the pre-check needs the
@@ -1508,7 +1553,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     } finally {
       // T5: the controller is unregistered on EVERY exit, including the cancel
       // returns above, so the cancel set never holds a finished check.
-      finishPrecheck(precheckController);
+      finishPrecheck(operationId, precheckController);
     }
   });
 
@@ -1703,6 +1748,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
   // that rule, so it is computed here from the single frozen predicate.
   handlers.set(IPC_CHANNELS.URL_SUPPORT_CHECK, async (payload): Promise<UrlSupportCheckDto> => {
     const record = validateM5Payload(IPC_CHANNELS.URL_SUPPORT_CHECK, payload);
+    const operationId = readOperationId(record);
     const rawUrl = record['url'];
     if (typeof rawUrl !== 'string' || rawUrl.trim() === ''
       || rawUrl.length > MAX_PREVIEW_URL_LENGTH || /[\u0000-\u001f\u007f]/.test(rawUrl)) {
@@ -1724,7 +1770,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     if (port === undefined) return unavailable;
     // T5: this single check is cancellable — a CANCEL from the page aborts the
     // signal, which kills the engine child and answers the CANCELLED state.
-    const controller = registerPrecheck();
+    const controller = registerPrecheck(operationId);
     try {
       const result = await port.check(url, refresh === true, controller.signal);
       return {
@@ -1745,24 +1791,22 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
                   : result.state === 'INDETERMINATE' ? 'INDETERMINATE' : '',
       };
     } finally {
-      finishPrecheck(controller);
+      finishPrecheck(operationId, controller);
     }
   });
 
-  // T5 (append-only): the user-level "stop" for whatever pre-check is in
-  // flight. Zero payload on purpose — the renderer cancels the CURRENT
-  // pre-check and never names a batch, a URL or a ticket. Aborting an
-  // already-finished controller is a no-op, so a stale CANCEL is harmless.
+  // D-160: the user-level "stop" for ONE submission. An `operationId` scopes
+  // the abort to that submission's controllers; without it only the LEGACY
+  // scope is reachable. Two live dialogs with different ids can therefore run
+  // and be cancelled independently, which the old global Set could not do.
+  // Aborting an already-finished controller is a no-op, so a stale id is
+  // harmless; an id nobody registered answers `cancelled: false` honestly.
   handlers.set(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL, async (payload) => {
-    validateM5Payload(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL, payload);
-    let cancelled = false;
-    for (const controller of [...cancellablePrechecks]) {
-      controller.abort();
-      cancelled = true;
-    }
-    // `cancelled` says whether anything was actually in flight — the caller may
-    // render "nothing to cancel" instead of a fake success.
-    return { ok: true, cancelled };
+    const record = validateM5Payload(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL, payload);
+    const operationId = readOperationId(record);
+    const controllers = [...(scopes.get(scopeOf(operationId))?.controllers ?? [])];
+    for (const controller of controllers) controller.abort();
+    return { ok: true, cancelled: controllers.length > 0 };
   });
 
   // T5 (append-only): read-only progress probe for the batch dialogs. Polling,
@@ -1771,14 +1815,20 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
   // §5 rule 6). `active` turns false the moment the last batch pre-check
   // settles, which is the poll's termination condition.
   handlers.set(IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS, async (payload) => {
-    validateM5Payload(IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS, payload);
+    const record = validateM5Payload(IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS, payload);
+    const operationId = readOperationId(record);
+    // D-160: progress is per submission too, so one dialog's readout cannot
+    // show another dialog's checked/total counts.
+    const progress = scopes.get(scopeOf(operationId))?.progress;
     let checked = 0;
     let total = 0;
-    for (const entry of batchProgress.values()) {
-      checked += entry.checked;
-      total += entry.total;
+    if (progress !== undefined) {
+      for (const entry of progress.values()) {
+        checked += entry.checked;
+        total += entry.total;
+      }
     }
-    return { active: batchProgress.size > 0, checked, total };
+    return { active: progress !== undefined && progress.size > 0, checked, total };
   });
 
   // D-148 (A): "may the Star prompt show now?" — a zero-payload read (same
