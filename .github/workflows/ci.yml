@@ -11,10 +11,13 @@
 #    基线在无显示器 CI 上的光栅化结果不可信 —— 后续项，不进本轮 CI。
 # 2) 在线测试 vitest.online.config.ts（npm run test:online，D-132）：真实国际网
 #    真实下载；默认 vitest.config.ts 已把 tests/integration/online/** 排除在
-#    默认套件之外，本 CI 跑 `npm test` 不会联网。
-# 3) 离线集成用例（npm run test:integration:offline）：tests/integration/offline/
-#    需要 resources/runtime/win-x64/yt-dlp.exe 与 node.exe（.gitignore 明确不入库，
-#    本机由 fetch:runtime 下载）。CI 要跑需先加 fetch-runtime 步骤 —— 后续项。
+#    默认套件之外，`npm test` 本身不联网。
+# 3) 离线集成用例（npm run test:integration:offline）：整套仍不跑。但**默认
+#    套件内的 L2 单测**确实会 spawn 随包 node.exe、读取 yt-dlp.exe 的真实哈希
+#    （.gitignore 明确不入库），故本 workflow 在 Tests 之前用 fetch-runtime
+#    只取这两项（--only=ytdlp / --only=node，不下载 ffmpeg 的 76 MB 包）。
+#    D-157：首次推送的 CI run #1 就是因缺这两类资产 + 未入库的 .log fixture
+#    而红；修复后仍不放宽任何断言与覆盖率门限。
 # 4) 安装包打包（约 5 分钟且属业主点名项，手册 §0 铁律 9）：见同目录
 #    desktop-pack.yml —— 仅 workflow_dispatch 手动触发，永不随 push/PR 运行。
 
@@ -85,6 +88,17 @@ jobs:
       #     本 job 失败。守卫在干净 CI 下不需要任何环境变量，守卫会自动在
       #     spawn 前清理 reports/vitest-results.json / coverage/coverage-summary.json
       #     旧证据（单文件 unlink），无历史 reports/ 产物也能跑通。
+      # D-157: the default suite contains L2 cases that spawn the bundled
+      # node.exe and hash the real yt-dlp.exe. Those binaries are NOT committed
+      # (架构 §2.7 / O-05), so a clean runner must fetch them before `npm test`.
+      # Only these two keys: ffmpeg is neither needed by the gates nor stable
+      # enough as a rolling `latest` asset. The fetcher verifies yt-dlp against
+      # the official SHA2-256SUMS and has bounded retries + timeouts.
+      - name: Fetch bundled yt-dlp.exe for L2 tests
+        run: node scripts/fetch-runtime.mjs --only=ytdlp
+      - name: Fetch bundled node.exe for L2 tests
+        run: node scripts/fetch-runtime.mjs --only=node
+
       - name: Tests (unit + contract with coverage gate)
         run: npm test
 

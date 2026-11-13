@@ -31,4 +31,6 @@ resources/runtime/win-x64/node.zip
 .DS_Store
 Thumbs.db
 *.log
+# Recorded progress fixtures ARE test data, not scratch logs (D-157).
+!tests/fixtures/*.log
 !reports/.gitkeep

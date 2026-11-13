@@ -333,7 +333,7 @@ the same gates:
 | Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** (the detail-page cancel fix applies to live mode only) |
 | `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
 
-The 2026-11-13 audit-and-repair round (D-150…D-156, not yet released) added
+The 2026-11-13 audit-and-repair round (D-150…D-157, not yet released) added
 user-cancellable pre-checks, snapshot write/validation hardening, IPv6
 allowlisting, a bounded stdout line-assembly buffer, component-updater network
 policy and GitHub Actions CI. It passed the same gates:
@@ -349,8 +349,13 @@ policy and GitHub Actions CI. It passed the same gates:
 
 A GitHub Actions workflow (`ci.yml`) now runs typecheck, the full test suite,
 coverage, layering and the frozen-file gate on every push to `main` and every
-PR; packaging is a separate manual workflow. **The CI run itself is only
-verified after the first push** — the numbers above come from the local run.
+PR; packaging is a separate manual workflow. The first push triggered run #1,
+which failed on a clean runner because three kinds of assets were missing: two
+recorded `.log` fixtures were accidentally ignored, the bundled `node.exe` /
+`yt-dlp.exe` are intentionally not committed, and Windows checkout uses CRLF
+while the licence test compares LF bytes. D-157 fixes only the environment
+(fixtures committed, runtime fetched before tests, inputs normalized) without
+relaxing a single assertion; the numbers above come from the local run.
 
 Design invariants worth knowing if you plan to modify the code:
 

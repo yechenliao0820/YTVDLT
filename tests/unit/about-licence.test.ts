@@ -16,10 +16,15 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
-const license = readFileSync(join(ROOT, 'LICENSE'), 'utf8');
-const settingsHtml = readFileSync(join(ROOT, 'packages', 'ui', 'src', 'pages', 'settings', 'index.html'), 'utf8');
-const aboutJs = readFileSync(join(ROOT, 'packages', 'ui', 'src', 'about', 'about.js'), 'utf8');
-const messagesJs = readFileSync(join(ROOT, 'packages', 'ui', 'src', 'i18n', 'messages.js'), 'utf8');
+// D-157: Windows runners check text blobs out with CRLF while the repository
+// stores LF. Normalize at the INPUT boundary so every assertion below still
+// compares identical bytes on both hosts — no assertion is relaxed.
+const readLf = (rel: string): string =>
+  readFileSync(join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
+const license = readLf('LICENSE');
+const settingsHtml = readLf('packages/ui/src/pages/settings/index.html');
+const aboutJs = readLf('packages/ui/src/about/about.js');
+const messagesJs = readLf('packages/ui/src/i18n/messages.js');
 
 /** The LICENSE is: preamble --- English --- Chinese --- notes. */
 function englishPart(): string {
