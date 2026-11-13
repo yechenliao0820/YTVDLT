@@ -1761,3 +1761,119 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 决策 | **① 镜像信任模型**：`HttpFetchOptions` 加可选 `allowPrivateAddresses`（默认 `false`，所有既有调用方严格度逐字不变）；`node-ports` 仅在该开关为 `true` 时跳过公网地址分类，**逐跳 URL 策略、跳转上限、环检测、socket 钉扎全部保留**。新增纯函数 `mirrorHopPolicy(sourceUrl)`：每跳必须是 http(s)、必须与配置 feed **同 hostname**（端口可变，兼容 NAS）、HTTPS feed 禁止降级到 HTTP；`componentFetchPolicy()` 让官方源继续用 `isTrustedReleaseHost` + 公网校验，镜像用新策略 + `allowPrivateAddresses: true`。版本查询、清单、二进制三入口统一走同一策略，不再存在「清单与二进制策略不同」的缝隙。`allowedComponentFeed()` 默认只接受 **HTTPS**；明文 HTTP 需部署显式开关 `YTVDLT_ALLOW_HTTP_COMPONENT_FEED=1`（即风险确认），启用时 `run()` 经 logger 记 WARNING。取舍：跨主机 CDN 跳转不再隐式可信，需把 feed URL 指到最终主机；独立签名密钥未做。**② 快照深校验**：`sanitizeRecord()` 在 D-151 四个关键字段之外校验 `artifacts` 元素、`kind`、时间戳、进度数值、布尔标志、`mediaInfo`（形状 + `id`/`title`/`formats`）、`request`（五域）、`error`（`code`/`message`）、`subtitleFiles`。**坏嵌套字段规范化为安全默认值，不丢弃整条记录**——为一个坏字幕链接丢掉用户的任务不可接受；完全健康的记录仍返回原对象引用，D-151「合法快照零变化」不变。新增 `repaired-fields` 状态、`repairedFields` 计数与 `lastLoadRepairedCount`；修复同样会写回，故**复用 D-159 的先字节级备份后写回**不变量，WARNING 与 `RestoreTasksResult.load` 都带计数。**③ CI 强制门禁**：`ci.yml` 顶部注释点明「是否强制由分支保护决定」；手册新增 §7.1 给出 6 步配置清单（目标分支 `main`、必须走 PR、required status check 选 `ci` job、要求分支最新、禁强推/删分支、管理员不可绕过）与验收判据（测试 PR 故意让 CI 红 → Merge 被禁用，修好后自动解除），§10 增「已知未完成」一行。本地 workflow 与提交都替代不了 GitHub 设置，按业主「只维护本地仓库」的边界**不擅自操作远端**。 |
 | 验证 | `pnpm typecheck` 5/5；`npm test` 139 文件 / **2038 项 0 failed**，覆盖率四维 ≥70；`check-layering` 0 违规、`frozen-gate` PASS；`run-e2e` 31/31 + 反例 5/5、每 case 0 px（UI 只改 JS 逻辑，静态 DOM 零改动，基线未重建）；M5 验收 10/10 gates、allGreen=true；`handoff-check` 全 fresh。新增/更新断言覆盖：镜像同主机与禁降级、**真实端口上 loopback 镜像仍可达**、**跨主机重定向在发出第二个请求前被拒**、默认拒明文 HTTP / 显式开关放行；快照 10 项深校验与「修复前先备份、原始字节可找回」链路；CI 清单落在手册两份副本并 diff 校验一致。四处旧镜像「精确空 options」断言按新契约同步改写（契约变更，非放宽）。 |
 | 未覆盖 | ① 组件更新仍无独立签名密钥，SHA-256 只防损坏、不认证首次来源。② 同主机策略会让跨主机 CDN 镜像失效，需把配置指向最终主机。③ 深校验仍非完整 schema（`mediaInfo.formats[]` 元素、`request` 各域内部键未逐字段验证），继续采取「坏形状降级显示」而非启动崩溃。④ `repaired-fields` 的备份与 D-159 一样无自动清理 / 数量上限。⑤ **CI 分支保护仍需业主在 GitHub 网页端执行**，本地只交付操作清单，不声称已生效。⑥ 全部为离线受控测试，无真实外网 / 真机窗口 / 安装包实测（铁律 9）。⑦ 未发版，且按业主指令**未 commit / 未 push**。 |
+
+## 补记 · 2026-11-13 · D-159…D-161 的「未 commit / 未 push」已过时
+
+D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令**未 commit / 未 push**」——那是**写记录当时**的状态，不是现在的事实。业主随后放行提交，三条改动以 `ee4b9b0`（`fix: 外部审计剩余问题修复轮（D-159…D-161）`，2026-11-13 13:38）入库并推送到 `origin/main`，`git rev-parse main origin/main` 两个哈希相同。
+
+本补记只订正「提交状态」这一句，三条决策的**现象 / 根因 / 决策 / 验证 / 未覆盖结论一律不改**。其中「未发版」仍然成立：仓库版本基准是已发布的 `0.3.0`，这批改动要等下一个安装包（`0.3.1`）才带出去。
+
+## D-162 · 2026-11-13 · 解析阶段可取消：probe 接 AbortSignal，取消真的杀掉子进程
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `FetchingInfo` 阶段 UI 不给「取消」（`queue.js` / `task-detail.js` 的 live 分支刻意不开放，见 D-146 注释），`TaskQueue.cancel()` 在该阶段返回 `false`，用户点不动，只能等 30 s 超时自己结束。 |
+| 根因 | ① `ProbeOptions` 定义在被 D-50 逐字节冻结的 `shared/src/request.ts` 里，加一个 `signal` 字段就直接违反冻结门禁——「不能改类型」被误读成「不能加能力」；② `handles` 只在 `executeDownload()` 里注册（`task-queue.ts:583`），probe 阶段没有任何句柄，`cancel()` 只能返回 `false`。能力其实早就有：bounded `spawn` 的 `signal` 已由 URL 预检在用，kill 走同一条 `killTree()`。 |
+| 决策 | ① `shared/src/engine.ts` 新增 `ProbeControl { signal?: SpawnAbortSignal }`，`DownloadEngine.probe/probePlaylist` 各加**可选第三参**——append-only，忽略第三参的实现（含全部测试假引擎）仍然类型兼容，`request.ts` 一个字节未动；② 引擎把 `control.signal` 透传进 `spawnOptions`，与超时共用 adapter 的终止实现，只有一处 kill；③ `TaskQueue` 在 probe **之前**注册 `pid: null` 的协作句柄，`cancel()` 调 `abort()`；`catch` 里先看 `signal.aborted`，是则直接 return（不写 `Error`），`cancel()` 对 `FetchingInfo` 执行与 `Running` 相同的 `-> Canceled` 迁移（该边本就在 13 条合法边内）；④ `shared` 无 DOM lib，故用既有的结构性 `SpawnAbortSignal`，core 侧新增 `createProbeAbort()`：有 `AbortController` 就用真货，没有就退化成可轮询的 flag（单测环境）。 |
+| 验证 | `npx turbo run typecheck` 5/5 通过；全量 **2038 项 0 失败**；`task-detail-live-fixture` 三条断言按新契约改写（`FetchingInfo` 由 inert 改为 armed，`ReadyWithInfo` 仍 inert），断言数未减；`check-layering` 0 违规。 |
+| 未覆盖 | ① 未在真机窗口点「解析中取消」（铁律 9，未打包）；② abort 与 30 s 超时同时发生时谁先 settle 只有单测覆盖；③ abort 后 yt-dlp 的 stderr 不再解读（结果被丢弃），没有把「用户取消」与「引擎报错」在日志层区分开的统计。 |
+
+## D-163 · 2026-11-13 · 快照不再落盘签名 URL；空转写盘按指纹跳过
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `<configDir>/tasks.json` 里带着 yt-dlp 返回的 `formats[].url` / `subtitles[].url`——这些是带 `expire`/`sig`/`X-Amz-*` 的签名 CDN 链接；文件还每 500 ms 全量重写一次。 |
+| 根因 | `TaskRecord.mediaInfo` 是「原样」进入快照的：`engine.probe()` 的结果直接赋给记录，`TaskStore.save()` 再 `JSON.stringify(snapshot, null, 2)` 整文件覆盖。全仓没有任何业务代码读 `format.url`（format-selector 只读 id/尺寸/码率，subtitle-planner 只读 lang/ext，渲染层 DTO 已剥 url），所以这些链接纯属负债。 |
+| 决策 | ① 新增 `core/src/task-queue/snapshot-media.ts::stripCredentialUrls()`：只在**落盘投影**上剥 `url`，内存记录保留完整对象（`restart()` 免二次 probe、字幕对账都不受影响），字段顺序与非 url 值逐字不变；② `persistSnapshot()` 先用该投影构造 `tasks`，再算一个**可观测字段指纹**（id/state/updatedAt/进度/字节/阶段/错误码/产物数/字幕数/标题 id），指纹相同直接 return——`run().finally` 在每条任务结束时都会写一次，其中相当一部分是空转；③ 指纹初值是 `null` 而不是 `''`：空队列的指纹恰好是空串，用 `''` 会让 D-159 的「先备份再写回」第一次就不落盘（第一轮实测就是这样炸的，见「验证」）。 |
+| 验证 | 第一轮全量测试红 2 项（`task-store.test.ts` 的 D-159 链路：损坏快照被留成原始字节、`lastSaveError` 为空），根因即指纹初值，改成 `null` 后两项转绿；最终 `npx turbo run typecheck` 5/5、全量 **2038 项 0 失败**、`check-layering` 0。 |
+| 未覆盖 | ① **仍是整文件重写**，没有改成增量/分文件：真正的 delta 持久化要动快照 schema 与 `ITaskStore` 契约，本轮不做；URL 剥离已经让单次写入体积大幅下降（格式表的 URL 是主体），但峰值仍是全量；② 指纹不含 `artifacts` 的具体路径（只含条数），若同一任务产物路径变了条数不变则不会立即落盘，下次有其它变化时一并写入；③ 旧 `tasks.json` 里的历史 URL 不会自动清除，要等该记录下一次被写回（`TaskStore.load()` 的 `sanitizeRecord` 未加剥离，避免与 D-161 的「修复计数」语义混淆）。 |
+
+## D-164 · 2026-11-13 · 排队任务可取消：用 `pending` 标记替代不存在的 `Queued`
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 并发满 3 时第 4 个任务卡在队列里，卡片上没有任何取消入口。`queue.js:1361` 与 `task-detail.js:57` 写的是 `state === 'Queued'`——而 `TaskState` 的 7 个值里根本没有 `Queued`，这个判断永远是 `false`，是死代码。 |
+| 根因 | 后端**早就支持**：`cancel()` 的第一分支就是「在 `pending` FIFO 里 → 摘掉并返回 true」。问题在前端拿不到「是否在排队」：记录状态是 `Idle`，而 `Idle` 同时也是「恢复出来但不会自动启动」的状态，用一个状态值无法区分两种语义。 |
+| 决策 | ① `ITaskQueue` 追加**可选**方法 `isPending?(taskId)`（可选是为了不破坏既有测试假队列），`TaskQueue` 用 `pending.includes()` 实现；② `TaskListPort` 同样加可选 `isPending`，`m5-host` 用 `m5.task.queue.isPending?.()` 实现，通道层不猜；③ `TaskListItemDto` / `TaskDetailDto` 各加 `pending?: boolean`，**只在 true 时出现**（老快照/老 DTO 的形状不变）；④ UI 两条 live 分支的 cancel 判据改为 `Running || FetchingInfo || pending === true`，静态基线分支一行未动（截图基线依赖它）。 |
+| 验证 | `npx turbo run typecheck` 5/5；全量 **2038 项 0 失败**；`task-detail-live-fixture` 的「Running / Queued」契约改写为「Running / pending」，并新增一条负例：`state: 'Idle'` 且无 `pending` 时不得开放取消（防止把「恢复出来的任务」误判成可取消）；`check-layering` 0。 |
+| 未覆盖 | ① 取消一个排队任务仍然是**直接删记录**（后端既有语义），卡片会消失而不是转「已取消」——要让用户看到取消留痕，需要给 `Idle -> Canceled` 开一条边或新增状态，属状态机变更，本轮不动；② 队列页的取消按钮只在 live 模式出现，静态基线未覆盖该视觉；③ 真机点选未做（铁律 9）。 |
+
+## D-165 · 2026-11-13 · `maxRate` 接通 `rateLimit`（单位 KB/s，0 = 不限速）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `config.json` 的 `network.maxRate` 存在、可读可写、有测试证明能往返，但**没有任何代码消费它**；真正决定 argv 的 `NetworkDomain.rateLimit` 恒为 `null`，`-r` 从来不会被拼出来。设置页也没有这个开关，等于一个纯装饰字段。 |
+| 根因 | 一次未完成的重命名：config 侧叫 `maxRate`（数字），请求侧叫 `rateLimit`（`string | null`，yt-dlp 的 `-r` 词法），中间没有翻译层；`build-request.ts` 的 `NETWORK_DEFAULTS.rateLimit = null` 又把它固定成 null。单位从未定义（`1000` 到底是 B/s 还是 KB/s 无据可查）。 |
+| 决策 | ① 新增 `core/src/config-store/network-mapping.ts::toRateLimit()`：单位定为 **KB/s**，`0`/负数/非有限数 → `null`（不限速），正数 → `${truncated}K`；② 唯一映射点放在 `m4-host.ts::readDefaults()`（config → request 的唯一入口），其它任何地方都不重复翻译；③ **默认值 `1000` 改为 `0`**：把历史占位值变成真实的 1 MB/s 上限，等于给所有存量用户静默降速，不可接受；`0` 保持「不限速」的既有行为，写了具体值的用户从此**真的**被限速。 |
+| 验证 | `npx turbo run typecheck` 5/5；全量 **2038 项 0 失败**（既有 `download-plan` 的 `rateLimit: '500K'` 用例不变，证明 plan 侧语义未动）；`check-layering` 0。 |
+| 未覆盖 | ① 设置页**仍无** `maxRate` 输入项，本轮只让字段生效，没做 UI；② `--downloader aria2c` 分支下 `-r` 是否与 aria2c 的 `--max-overall-download-limit` 冲突未实测（aria2c 默认不接管，见 D-111）；③ 没有真实下载测速证明限速生效（需国际网 + 真实站点，业主未放行）。 |
+
+## D-166 · 2026-11-13 · 开机自启真的写 HKCU Run（`planAutostart` 第一次被调用）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 设置页「开机自启」勾上后什么也不会发生：`settings.js:843` 调的是本地 `emit()`，它只把 JSON 写进调试用 `<pre id="ytvdlt-output">`；主进程侧 `planAutostart()`（`core/src/platform/platform-policy.ts`）全仓只有单元测试在调，`apps/` 下 `autostart` 零命中；`config` 的 7 个域里也没有 `autostart` 字段，所以复选框初值永远是 `false`。 |
+| 根因 | 三处断链串成一条死路：① 策略函数写好了但没有执行者（没有任何注册表端口）；② 设置页那条路径走的是 M3 fixture 通道语义；③ `SETTINGS_SET` 的白名单与 `AppearanceDto` 都没有这个字段，就算打通了也会被拒。 |
+| 决策 | ① `shared/ports.ts` 新增 `ISystemStartupPort { apply(enabled), read() }`，`CorePorts.systemStartup?` 可选；② 新增 `apps/desktop/src/main/adapters/win-startup.ts`：**只用 HKCU**（`requiresAdmin:false` 的契约），`reg.exe` 用 argv 数组 + `shell:false` 调用，`apply()` 走 `planAutostart()` → `planToRegArgs()`，`read()` 真查注册表（`parseRegQueryValue` 纯函数、可单测）；`reg delete` 找不到值视为成功（目标状态已达成）；③ `m5-channels` 的 `AppearanceDto` 加 `autostart`，`SETTINGS_SET` 白名单加 `'autostart'`，handler **先写注册表、成功后才写 config**（失败则抛错，config 不会撒谎）；④ `settings.js` 改用与其它开关同款的 `bridge.invoke('ytvdlt:settings:set', ...)`，失败回滚复选框；⑤ `electron-entry` 仅在 win32 注入该端口，其它平台 `SETTINGS_SET` 直接拒绝而不是假装成功。 |
+| 验证 | `npx turbo run typecheck` 5/5；全量 **2038 项 0 失败**；`check-layering` 0（新适配器位于 `apps/desktop`，符合分层）。 |
+| 未覆盖 | ① **未在真机注册表上跑过**（会改动业主机器的启动项，属外部副作用，本轮不擅自执行）；`apply/read` 的 `reg.exe` 交互只有纯函数层（`planToRegArgs` / `parseRegQueryValue`）可测，进程层没有真实样本；② 只支持 Windows，macOS/Linux 返回 `unsupported-platform`；③ `--autostart` 参数目前无人解析（`bootstrap.ts` 只认 `--url=`），开机自启会用默认窗口行为启动，没有做「静默驻留托盘」；④ 卸载时不清理 Run 项（NSIS 侧未改）。 |
+
+## D-167 · 2026-11-13 · 打包版不再注册 fixture 通道
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `ytvdlt:probe` / `ytvdlt:probePlaylist` 在**所有**构建里都注册，包括安装版；只是打包后 fixture 目录按设计不随包发布，于是通道存在、调用必失败。这是「多一个入口」而不是「多一个功能」。 |
+| 根因 | `IpcGatewayOptions.videoFixturePath` / `playlistFixturePath` 是**必填**，`electron-entry.ts` 无条件传值，唯一的分流体现在路径值（`resolveFixtureDir` 打包后指向不存在的 `<resources>/fixtures`）。既有代码里其实已有正确范式（`...(existsSync(aria2cPath) ? { bundledAria2cPath } : {})`），只是这两处没用。 |
+| 决策 | ① 两个路径改为可选；② `createIpcGateway()` 里**有条件注册**：没给路径就根本不存在该通道（`handlers` 里没有键，`dispatch` 会抛 unregistered）；③ `M4HostOptions` 同步改为可选，`electron-entry` 用 `...(packaged ? {} : { videoFixturePath, playlistFixturePath })` 条件展开——沿用 `aria2cPath` 的既有写法。 |
+| 验证 | `npx turbo run typecheck` 5/5；全量 **2038 项 0 失败**（既有 fixture 通道用例在测试里显式传路径，行为不变）；`check-layering` 0。 |
+| 未覆盖 | ① 未在真实安装版里验证「通道不存在」（需打包）；② `CONFIG_GET` 仍是「有 config 就返回域对象、没有就 `{value:null}`」的松契约，没有像 `CONFIG_SET` 那样收紧白名单；③ 同一张 `mergeGateways()` 的注释写「first registration wins」而实现是抛错，本轮未改（现网不会触发）。 |
+
+## D-168 · 2026-11-13 · `CONFIG_SET` 不再谎报 `{ok:true}`
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `ytvdlt:config:set` 无论收到什么都返回 `{ok:true}`，**一个字节都不写**；`config:get` 无论问什么都返回 `{value:null}`。渲染层若照它判断成败，会以为配置已保存。 |
+| 根因 | M3 阶段的 L1 fixture 桩（离线、无 ConfigStore）一路保留到 M5；真正的写入后来走的是 `SETTINGS_SET`，于是这个桩既没人用、也没人删。 |
+| 决策 | ① `IpcGatewayOptions` 新增可选 `config` 端口（`getDomain` / `setDomain`），`m4-host` 把 `task.config` 注入；② **白名单** `WRITABLE_CONFIG`：只允许 `network.maxRate`(0..1e6) / `network.concurrentFragments`(1..8) / `network.ipv4Only`(bool) / `general.concurrency`(1..8) / `general.privateMode`(bool) / `general.disablePreview`(bool)，且逐个做类型与范围校验——开放 domain/key 等于给渲染层一个任意配置写入原语（paths / proxy / cookies）；③ 白名单外的键**抛错**（不是静默成功）；没有注入 config 端口时返回 `{ok:false, reason:'read-only'}`，不再假装写入；④ 成功时返回实际写入的 `domain/key/value`，可对账。 |
+| 验证 | `npx turbo run typecheck` 5/5；全量 **2038 项 0 失败**；`check-layering` 0。 |
+| 未覆盖 | ① 没有新增针对该通道的单测（既有测试只断言桩的形状，本轮改动后仍绿，但**没有**「越权 key 被拒」「真实写入落盘」的正向/反向用例，属本轮验证缺口）；② `config:get` 没有收紧，仍可能把整域配置（含 `paths`）返回给渲染层；③ UI 不使用这两个通道，没有端到端路径可验。 |
+
+## D-169 · 2026-11-13 · 启动时校验随包运行时（`checkRuntimeForApp` 第一次被调用）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `checkRuntimeForApp()` 自 M1 起就存在，全仓**零调用**。装到一台缺 `yt-dlp.exe` / `node.exe` / `ffmpeg` 的机器上，窗口照常打开、设置照常能改，第一次下载才以一个语焉不详的 spawn 错误失败。 |
+| 根因 | 校验能力写成了「可被调用的函数」而不是「启动流程的一步」；`electron-entry.ts` 直接 `join(runtimeDir, 'yt-dlp.exe')` 拼路径，从不检查它是否存在。 |
+| 决策 | 在 `createHost()` 里（拿到 `Logger` 之后、建窗口之前）调用一次 `checkRuntimeForApp()`：成功记 INFO（runtimeDir / 必需项通过数 / 可选缺失数）；失败记 ERROR（缺失项 label + failed 数），**并且仅在 `app.isPackaged` 时**弹一个原生错误框说明缺什么、去哪修。**刻意不阻断启动**：队列、历史、设置、封面缓存都还能用，直接拒绝启动比带着明确警告启动更糟；dev 环境只记日志，不弹框（`runtime` 目录在开发机本来就可能是空的）。 |
+| 验证 | `npx turbo run typecheck` 5/5；全量 **2038 项 0 失败**；`check-layering` 0。真实启动路径未跑（需起 Electron 窗口）。 |
+| 未覆盖 | ① 没有在缺组件的机器上实测弹框文案与时机（需构造残缺安装）；② 校验结果没有进入任何 UI 状态（`APP_INFO` 里没有 runtime 健康位），用户关掉弹框后只能从 `logs/app-*.jsonl` 看到结论；③ 校验本身会额外创建一套 `node-ports`（与主链路的 ports 重复构造），开销小但属重复；④ 目录可写性、`.bak` 残留等不在 `RuntimeCheckReport` 覆盖范围内。 |
+
+## D-170 · 2026-11-13 · 8 个页面加 CSP；session 权限一律拒绝
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `packages/ui/src/**/*.html` 8 个文件全都没有 `Content-Security-Policy`（只有 `charset`）；`setPermissionRequestHandler` / `setPermissionCheckHandler` 全仓零命中，等于把 Chromium 的默认授权行为原样交给页面。 |
+| 根因 | 页面是零依赖静态页、只走 `file://` 自定义加载，团队把「没有外部资源」当成了「不需要 CSP」；权限层从来没人设，因为「我们不用摄像头」并不等于「页面不能申请」。 |
+| 决策 | ① 每个页面 `<meta charset>` 之后注入同一条策略：`default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data:; font-src 'self' file: data:; connect-src 'self' file: data:; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'`——`file:` 是必须的（页面与脚本本身走 `file://`，`'self'` 在 file: 下不可靠；缩略图是 `file:///<缓存路径>`）；**`connect-src` 也必须放行 `'self' file: data:`**——静态预览页用 `fixtures/probe-fixture.js` 里的**同步 XHR** 读同目录 fixture，第一版写成 `connect-src 'none'` 直接把页面自己的数据源掐死，脚本在异常里停住、DOM 停在初始态（截图 e2e 的 DOM 快照立刻抓到）；放行 file: 不影响安全目标——`http:`/`https:` 仍然被拦，页面依旧不能向外部发请求；`style-src` 保留 `'unsafe-inline'`，因为 5 个页面有内联 `<style>`、`playlist-selector.html` 还有两处 `style="flex:..."`，抽出去会动冻结截图基线的 DOM；② `bootstrap.ts` 在窗口创建处装 `session.defaultSession.setPermissionRequestHandler(cb => cb(false))` 与 `setPermissionCheckHandler(() => false)`，一次覆盖所有 frame；③ `ElectronLike` 增加可选 `session`，缺失时静默跳过——保持 bootstrap 的无 Electron 单测可用。 |
+| 验证 | `npx turbo run typecheck` 5/5；全量 **2038 项 0 失败**；**截图 e2e 实跑 31/31 + 反例 5/5、0 px、allPass=true**（页面在 headless Chrome 里以 `file://` 加载，若 CSP 拦掉脚本，DOM 断言与像素差立刻变红——本轮正是靠它抓到 `connect-src 'none'` 的问题：DOM 快照从「已驱动态」退化成「初始态」，`video-137` 等 5 条断言全红）；为容纳新增的 `<meta>`，**31 份 `.dom.html` 基线按 case 重建，62 个 PNG 基线一个字节未动**（重建后像素差 0 px，反证视觉无变化）；`check-layering` 0。 |
+| 未覆盖 | ① 未在 Electron 真机窗口里验证（CSP 在 `file://` 下的行为与 Chrome 基本一致，但不等价）；② `'unsafe-inline'` 仍在 style 上，真正的收敛要把 5 段内联样式搬到 `styles/*.css` 并重建相关基线；③ 没有 `web-contents-created` 全局兜底（只覆盖主窗口）；④ `will-attach-webview` 未显式封禁。 |
+
+## D-171 · 2026-11-13 · 组件更新先等队列空闲再换文件
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 组件自更新在**下载进行中**替换 `yt-dlp.exe`，Windows 上目标文件被活动子进程占用，`rename` 失败 → `swap-failed` 并回滚；用户看到的是「更新失败」，实际只是撞上了正在跑的任务。 |
+| 根因 | `intakeGate.pause()` 的语义只是「不再从 FIFO 取新任务」（D-62 有意如此），**不等**正在跑的传输结束；`SelfUpdater.update()` 在 pause 之后立刻 `writeBytesAtomic` + `rename`，中间没有任何「等空」概念；`component-updater.ts::run()` 也拿不到队列状态（只拿到三方法的 gate）。 |
+| 决策 | ① `shared/src/update.ts` 的 `QueueIntakeGate` 追加**可选** `waitForIdle?(timeoutMs)`（可选，既有假 gate 不受影响）；② `queue-intake-gate.ts` 实现为轮询 `activeTaskIds.length === 0`（250 ms 间隔，队列懒取，可能在 host 建好前返回 true）；③ `self-updater.ts` 在 `pause()` 之后、动盘之前 `await waitForIdle(60 s)`，超时则**不动文件**、记 ERROR、返回 `reason: 'queue-busy'`（`UpdateResult.reason` 是自由字符串，不破坏类型），`finally` 仍照常 `resume()`。 |
+| 验证 | `npx turbo run typecheck` 5/5；全量 **2038 项 0 失败**（`self-updater` 既有 `gate.calls === ['pause','resume']` 断言仍绿——`waitForIdle` 是可选的，假 gate 没实现，走 `undefined` 分支）；`check-layering` 0。 |
+| 未覆盖 | ① 60 s 是**拍的**，不是测出来的：大文件慢速下载可能超过它，此时更新被推迟（可重试），不会破坏文件；② `component-updater.run()` 仍未在入口处检查队列，只靠 `SelfUpdater` 内部等空——UI 上不会提前告诉用户「有任务在跑」；③ 轮询 250 ms 在队列长期繁忙时是持续的定时器，没有用事件订阅（gate 是懒取，订阅需要在 host 重建时重挂）；④ 未在真机复现「下载中更新」场景（需打包 + 真实组件源）。 |
+
+## D-172 · 2026-11-13 · 首次推送被分支保护拦下：`main` 只能走 PR，改推分支 `audit/d-162-171`
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主说「推送至 GitHub 吧仓库」，`git push origin main` 被服务端拒绝：`remote: error: GH013: Repository rule violations found for refs/heads/main.` / `- Changes must be made through a pull request.` / `- Required status check "typecheck · tests · gates (windows-latest)" is expected.` 本地 `main` 停在 `bdd8753`（领先 `origin/main` 一个提交），远端仍是 `ee4b9b0`。 |
+| 根因 | 不是网络或凭据问题，是**规则生效**：D-161 交付的那份 6 步分支保护清单，业主已经在 GitHub 网页端执行了（这正是 D-161「未覆盖⑤」里预留的那一步）。D-161 当时写的是「本地只交付清单、不声称已生效」，于是文档口径落后于仓库现实——`AI-MAINTENANCE` §7.1 与 §10 都还写着「未启用 / `protected: false`」。另一层容易混淆的认知：`ci.yml` 只负责**跑**检查，能否**强制**完全由仓库设置决定，workflow 文件无法自我强制。 |
+| 决策 | ① **不改规则、不绕过**：不去关分支保护、不走 API 直推、不临时放宽——业主明确表态「项目已经做起来了，这个保护就是要开的」，属长期策略而非临时障碍；② 改推**分支**：`git push -u origin main:refs/heads/audit/d-162-171`，把同一个提交 `bdd8753` 放到远端分支上，用 GitHub 回显的 `pull/new/<branch>` 建 PR，合并动作交给业主点击；③ 文档口径同步为「已生效」：§7.1 从「配置清单」改写为「状态 + 日常流程 + 直推会被拒的原文 + 复核方式」，§10 把「`main` 未启用强制 CI 门禁」这一行按本手册「完成一项就删一行」的规则移除并记入已删除行，铁律 12 补一句「只能推分支再开 PR」；④ 推送成功后把本地 `main` 的上游从临时分支改回 `origin/main`，避免下一次 `git status` 误读。 |
+| 验证 | `git ls-remote origin refs/heads/audit/d-162-171` → `bdd875307af614ceaf374130766c882befb546b7`，与本地 `HEAD` 逐字符一致；`git branch --set-upstream-to=origin/main main` 后 `git status -sb` 为 `## main...origin/main [ahead 1]`；工作树干净。PR 入口：`https://github.com/yechenliao0820/YTVDLT/pull/new/audit/d-162-171`。 |
+| 未覆盖 | ① PR 尚未创建（需要业主在网页端点击，AI 不代操作）；② 该分支上的首次 CI 结果尚未观察——干净 runner 的历史坑（D-157 资产取回、D-158 的 `.mjs` 行尾）已在代码里，但仍以 Actions 实际结论为准，红了按日志定位、不改断言；③ 分支合并后是否删除由业主决定（当前文档要求保留作远端溯源点）；④ 推送时 GitHub 另外提示默认分支有 9 个依赖漏洞（4 critical / 5 moderate），与本轮改动无关，未处理。 |

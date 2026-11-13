@@ -15,12 +15,25 @@ import { IPC_CHANNELS } from '@ytvdlt/shared';
 import { mapProbeResult, toMediaInfo, toPlaylistInfo, assertHttpUrl } from '@ytvdlt/engine-ytdlp';
 import type { MediaInfo, PlaylistInfo } from '@ytvdlt/shared';
 
+/**
+ * D-167: the two `PROBE*` channels are L1 *development* fixtures (D-31). They
+ * used to be registered in every build — packaged included — and only failed
+ * later, when the (deliberately unshipped) JSON could not be read. A channel
+ * that cannot work must not exist: the paths are now optional and the handlers
+ * are only registered when a fixture directory was actually provided.
+ */
 export interface IpcGatewayOptions {
   /** Injected text reader (production: fs.readText; tests: in-memory fixture). */
   readText: (path: string) => Promise<string>;
-  /** Absolute paths of the two L1 recorded fixtures. */
-  videoFixturePath: string;
-  playlistFixturePath: string;
+  /** Absolute paths of the two L1 recorded fixtures. Absent = dev-only channels. */
+  videoFixturePath?: string;
+  playlistFixturePath?: string;
+  /**
+   * D-168: real config writer for `CONFIG_SET`. Before this, the channel
+   * answered `{ok:true}` without writing anything — a silent lie. Absent means
+   * the channel reports `read-only` instead of pretending.
+   */
+  config?: IpcConfigPort;
   /**
    * M4-4: explicit batch enqueue. Injected by the task host so the gateway
    * stays free of TaskQueue imports; absent = the channel reports `enqueued:false`
@@ -38,6 +51,45 @@ export interface IpcRegistrar {
 }
 
 export type IpcHandler = (payload: unknown) => Promise<unknown>;
+
+/** The narrow slice of `ConfigStore` the gateway is allowed to touch. */
+export interface IpcConfigPort {
+  getDomain(name: 'general' | 'format' | 'subtitle' | 'paths' | 'network' | 'advanced' | 'saved_links'): unknown;
+  setDomain(
+    name: 'general' | 'format' | 'subtitle' | 'paths' | 'network' | 'advanced' | 'saved_links',
+    patch: Record<string, unknown>,
+  ): Promise<void>;
+}
+
+/**
+ * D-168: the ONLY keys `CONFIG_SET` may write, with their type check.
+ *
+ * An open `domain/key/value` channel would be a remote-configuration primitive
+ * (paths, cookies, proxy) reachable from the renderer. The renderer's real
+ * appearance writes go through `SETTINGS_SET`, which has its own whitelist; this
+ * table exists so a legacy caller cannot use `CONFIG_SET` as a back door.
+ */
+const WRITABLE_CONFIG: Readonly<Record<string, (value: unknown) => unknown>> = {
+  'network.maxRate': (value) => assertRange(value, 0, 1_000_000),
+  'network.concurrentFragments': (value) => assertRange(value, 1, 8),
+  'network.ipv4Only': (value) => assertBoolean(value),
+  'general.concurrency': (value) => assertRange(value, 1, 8),
+  'general.privateMode': (value) => assertBoolean(value),
+  'general.disablePreview': (value) => assertBoolean(value),
+};
+
+function assertRange(value: unknown, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error('[ipc] config value must be a finite number');
+  }
+  if (value < min || value > max) throw new Error(`[ipc] config value out of range ${min}..${max}`);
+  return Math.trunc(value);
+}
+
+function assertBoolean(value: unknown): boolean {
+  if (typeof value !== 'boolean') throw new Error('[ipc] config value must be a boolean');
+  return value;
+}
 
 /** Recursively strip every own property named `url` (credential red line). */
 export function omitUrl(value: unknown): unknown {
@@ -93,18 +145,27 @@ export function createIpcGateway(options: IpcGatewayOptions): IpcGateway {
     handlers.set(channel, handler);
   };
 
-  register(IPC_CHANNELS.PROBE, async (payload) => {
-    validatePayload(IPC_CHANNELS.PROBE, payload);
-    const raw: unknown = JSON.parse(await options.readText(options.videoFixturePath));
-    return omitUrl(toMediaInfo(raw)) as Omit<MediaInfo, 'formats'>;
-  });
+  // D-167: registered ONLY when a fixture directory was provided (dev / tests).
+  // A packaged build ships no fixtures, so the channel must not exist at all —
+  // it used to exist and fail on read, which is a surface without a purpose.
+  const videoFixturePath = options.videoFixturePath;
+  if (videoFixturePath !== undefined) {
+    register(IPC_CHANNELS.PROBE, async (payload) => {
+      validatePayload(IPC_CHANNELS.PROBE, payload);
+      const raw: unknown = JSON.parse(await options.readText(videoFixturePath));
+      return omitUrl(toMediaInfo(raw)) as Omit<MediaInfo, 'formats'>;
+    });
+  }
 
-  register(IPC_CHANNELS.PROBE_PLAYLIST, async (payload) => {
-    validatePayload(IPC_CHANNELS.PROBE_PLAYLIST, payload);
-    const raw: unknown = JSON.parse(await options.readText(options.playlistFixturePath));
-    // `mapProbeResult` dispatches on `_type === 'playlist'`; L1 only, no spawn.
-    return omitUrl(mapProbeResult(raw)) as PlaylistInfo;
-  });
+  const playlistFixturePath = options.playlistFixturePath;
+  if (playlistFixturePath !== undefined) {
+    register(IPC_CHANNELS.PROBE_PLAYLIST, async (payload) => {
+      validatePayload(IPC_CHANNELS.PROBE_PLAYLIST, payload);
+      const raw: unknown = JSON.parse(await options.readText(playlistFixturePath));
+      // `mapProbeResult` dispatches on `_type === 'playlist'`; L1 only, no spawn.
+      return omitUrl(mapProbeResult(raw)) as PlaylistInfo;
+    });
+  }
 
   register(IPC_CHANNELS.DIALOG_OPEN, async (payload) => {
     const record = validatePayload(IPC_CHANNELS.DIALOG_OPEN, payload);
@@ -160,13 +221,32 @@ export function createIpcGateway(options: IpcGatewayOptions): IpcGateway {
   });
 
   register(IPC_CHANNELS.CONFIG_GET, async (payload) => {
-    validatePayload(IPC_CHANNELS.CONFIG_GET, payload);
-    return { value: null };
+    const record = validatePayload(IPC_CHANNELS.CONFIG_GET, payload);
+    const domain = record['domain'];
+    if (options.config === undefined || typeof domain !== 'string') return { value: null };
+    const bucket = options.config.getDomain(domain as Parameters<IpcConfigPort['getDomain']>[0]);
+    return { value: bucket ?? null };
   });
 
   register(IPC_CHANNELS.CONFIG_SET, async (payload) => {
-    validatePayload(IPC_CHANNELS.CONFIG_SET, payload);
-    return { ok: true };
+    const record = validatePayload(IPC_CHANNELS.CONFIG_SET, payload);
+    const domain = record['domain'];
+    const key = record['key'];
+    if (typeof domain !== 'string' || typeof key !== 'string') {
+      throw new Error('[ipc] config domain/key must be strings');
+    }
+    // D-168: unknown keys are refused, not silently "accepted".
+    const check = WRITABLE_CONFIG[`${domain}.${key}`];
+    if (check === undefined) {
+      throw new Error(`[ipc] config key is not writable: ${domain}.${key}`);
+    }
+    if (options.config === undefined) return { ok: false, reason: 'read-only' };
+    const value = check(record['value']);
+    await options.config.setDomain(
+      domain as Parameters<IpcConfigPort['setDomain']>[0],
+      { [key]: value },
+    );
+    return { ok: true, domain, key, value };
   });
 
   return {

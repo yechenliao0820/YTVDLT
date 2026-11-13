@@ -20,7 +20,7 @@ import type {
 import {
   CommandTemplateStore, NotificationCenter, TaskDetailService,
   buildDownloadRequest, buildErrorReport, buildPlaylistBatchRecordsByUrl, expandEnvVars, formatErrorReport,
-  PRIVATE_OUTPUT_DIR, resolveDownloadTempDir,
+  PRIVATE_OUTPUT_DIR, resolveDownloadTempDir, toRateLimit,
   type ClipboardPort, type IArtifactVerifier, type DesktopNotification,
 } from '@ytvdlt/core';
 import { createTaskHost, type TaskHost } from './task-host.js';
@@ -32,8 +32,9 @@ export interface M4HostOptions {
   engine: DownloadEngine;
   verifier: IArtifactVerifier;
   jsRuntimePath: string;
-  videoFixturePath: string;
-  playlistFixturePath: string;
+  /** D-167: dev-only L1 fixtures. Absent in a packaged build → no PROBE channel. */
+  videoFixturePath?: string;
+  playlistFixturePath?: string;
   appVersion: string;
   engineVersion: string;
   snapshotPath?: string;
@@ -167,6 +168,7 @@ function readDefaults(
 } {
   const cast = <T>(domain: 'format' | 'subtitle' | 'paths' | 'network' | 'advanced'): T =>
     config.getDomain(domain) as unknown as T;
+  const rawNetwork = config.getDomain('network') as Record<string, unknown>;
   const network = cast<Partial<NetworkDomain>>('network');
   // D-118: `paths.tempDir` stays EXACTLY as the user stored it (usually '').
   // Resolving it to a concrete directory is the per-task job of
@@ -179,7 +181,14 @@ function readDefaults(
     paths,
     // D-111: configured downloader only — '' / unset means "use yt-dlp's own",
     // a path means "the user's exe", and 'bundled' opts into the shipped one.
-    network: { ...network, aria2cPath: resolveAria2cPath(network.aria2cPath, bundledAria2cPath) },
+    // D-165: `maxRate` (KB/s) becomes the plan's `rateLimit` here — this is the
+    // one place config turns into a request, so the translation lives here and
+    // nowhere else.
+    network: {
+      ...network,
+      rateLimit: toRateLimit(rawNetwork['maxRate']),
+      aria2cPath: resolveAria2cPath(network.aria2cPath, bundledAria2cPath),
+    },
     advanced: cast<Partial<AdvancedDomain>>('advanced'),
   };
 }
@@ -661,8 +670,9 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
 
   const gateway = createIpcGateway({
     readText: (path: string) => ports.fs.readText(path),
-    videoFixturePath: options.videoFixturePath,
-    playlistFixturePath: options.playlistFixturePath,
+    ...(options.videoFixturePath === undefined ? {} : { videoFixturePath: options.videoFixturePath }),
+    ...(options.playlistFixturePath === undefined ? {} : { playlistFixturePath: options.playlistFixturePath }),
+    config: task.config,
     enqueuePlaylistBatch,
   });
 

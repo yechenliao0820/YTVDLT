@@ -1,25 +1,27 @@
-# YTVDLT 交付报告（未发版 · 目标 0.3.0）
+# YTVDLT 交付报告（0.3.0 · 已发布 2026-11-12）
 
-> **0.3.0 构建补记（2026-11-12）**：安装包已在本地产出
+> **0.3.0 构建与发布补记（2026-11-12）**：安装包已在本地产出
 > `dist-0.3.0/YTVDLT Setup 0.3.0.exe`（226,282,986 B，SHA-256
-> `5d93f92307e3b91ac72e5fa372332caa8766e265d0709254dd87d38287940af3`），决策到
-> **D-139**，全量 **138 文件 / 1829 通过 / 2 跳过 / 0 失败**，覆盖率四维最低
-> **86.73%**，M5 验收 **10/10 门禁、allGreen=true**。**仍未创建 GitHub Release**，
-> **未做真机窗口点选**。本补记推翻了下面原文的「未打包」状态；历史数字以本节为准。
-> 产物考据见 `docs/BUILD-HISTORY.md` 的「0.3.0 构建」。
+> `5d93f92307e3b91ac72e5fa372332caa8766e265d0709254dd87d38287940af3`），并同日创建
+> **GitHub Release v0.3.0**（资产 `YTVDLT.Setup.0.3.0.exe` /
+> `YTVDLT.Setup.0.3.0.exe.blockmap` / `latest.yml`，说明英文，铁律 14）；Release 上 exe 的
+> `digest` 与本地 SHA-256 逐字符一致。决策到 **D-139**，全量 **138 文件 / 1829 通过 /
+> 2 跳过 / 0 失败**，覆盖率四维最低 **86.73%**，M5 验收 **10/10 门禁、allGreen=true**。
+> **未做真机窗口点选**。本补记推翻了下面原文的「未打包、未发版」状态；历史数字以本节为准。
+> 产物与发布考据见 `docs/BUILD-HISTORY.md` 的「0.3.0 构建」与「发布」两节。
 
 > 交付日期：2026-11-11 ｜ 交付人：Buddy ｜ 接收人：LeoLee
-> 状态：字幕功能已提交（`57a1f3d` / `3abc4b0`）；TXT 批量导入（D-129）、播放列表批量（D-130）、审查修复（D-131）、真实在线验证与 `subtitleOutcome` 修复（D-132）、**下一阶段三项开发任务（D-133 / D-134）**随本文件所在提交一起入库。**未打包、未发版、未升版本号（仓库仍为 0.2.9）**。本节是交付口径与验收结论，不是发布记录；发版时按 §7 的十进制进位规则取 `0.3.0`，并另在 `CHANGELOG.md` 补版本行、在 Release 用英文说明（铁律 14）。
+> 状态：字幕功能已提交（`57a1f3d` / `3abc4b0`）；TXT 批量导入（D-129）、播放列表批量（D-130）、审查修复（D-131）、真实在线验证与 `subtitleOutcome` 修复（D-132）、**下一阶段三项开发任务（D-133 / D-134）**随本文件所在提交一起入库。**已于 2026-11-12 打包并发布 GitHub Release v0.3.0；仓库版本基准随之为 `0.3.0`（下次打包前升 `0.3.1`）**。本节是交付口径与验收结论；版本行见 `CHANGELOG.md`，Release 说明为英文（铁律 14）。
 
 ## 一、交付物
 
 | 交付物 | 位置 | 说明 |
 |---|---|---|
 | 源码提交 | `main` @ `57a1f3d` + 本文件所在提交 | 字幕功能 80 文件；批量导入 / 播放列表 / 审查修复 / 在线验证见 D-129…D-132；下一阶段三项任务见 D-133 / D-134 |
-| 决策记录 | `docs/DECISIONS.md` D-126…**D-134** | 字幕入队与产物、TXT 导入、播放列表批量、`keepSubtitleFile` 修复、在线验收与 `subtitleOutcome` 修复、**最低画质修复 + 有界子进程输出上限（D-133）**、**动态支持的网站列表 + URL 支持六态预检（D-134）** |
+| 决策记录 | `docs/DECISIONS.md` D-126…**D-139** | 字幕入队与产物、TXT 导入、播放列表批量、`keepSubtitleFile` 修复、在线验收与 `subtitleOutcome` 修复、**最低画质修复 + 有界子进程输出上限（D-133）**、**动态支持的网站列表 + URL 支持六态预检（D-134）**；补记轮追加 D-135…D-139（第 2 轮校验修复、验收映射补登记、两轮独立审计的边界加固、预检接 UI 与命令模板入口） |
 | 测试入口 | `npm test`（离线）/ `npm run test:online`（真实国际网） | 在线套件默认排除，不显式运行不联网 |
 | 离线取证脚本 | `scripts/task01-format-evidence.mjs`、`scripts/task03-site-evidence.mjs`、`scripts/task03-classify-evidence.mjs` | 分别产出格式选择、站点目录、分类映射证据；脚本本身入库（中间产物 `reports/*` 被 gitignore） |
-| 安装包 | **无** | 本轮未打包（铁律 9：非点名不打包） |
+| 安装包 | `dist-0.3.0/YTVDLT Setup 0.3.0.exe` | 226,282,986 B（215.8 MiB），SHA-256 `5d93f923…40af3`；2026-11-12 业主点名后打包，同日发布为 Release **v0.3.0**（GitHub 资产名 `YTVDLT.Setup.0.3.0.exe`，空格被规范化成点号） |
 
 ## 一·B、下一阶段三项开发任务（D-133 / D-134）
 
@@ -67,11 +69,11 @@
 | 全量单测 + 契约 | **121 文件 / 1752 项通过**，0 失败（覆盖率四维最低 **86.48%**，门限 70）。数值随代码变动，引用前现跑 `node scripts/run-tests.mjs all --coverage` / `node scripts/handoff-check.mjs`（D-135 R1-08） |
 | 离线集成（真实随包 yt-dlp / ffmpeg / ffprobe） | **12 文件 / 40 项通过**（含取消、重试哈希、双语字幕产物、argv 解析、最低画质本地夹具） |
 | 截图 E2E | **31/31 case + 反例 5/5**，基线零重建、像素差 0 px |
-| 真实站点（YouTube） | **已在线实测（2026-11-11，D-132）**：① 播放列表 `PLpODSd__yLPULp9c7RaFXF4W8yxRnMZgd`（Learning English Podcast）真解析 **20 / 20** 条（declared=fetched=20、available=20、unavailable=0、truncated=false、总时长 19,505 s），renderer DTO 序列化后无任何条目 URL；选 **3 条** 360p 批量入队 → 3 个独立 taskId / 独立 tempDir / 全部 `Completed`，产物 17.1 / 29.6 / 33.5 MB `.webm`，标题与时长逐条对应；② 单视频 `DTu4yvmc0Fc`（实际标题「DeepSeek Harness Just Changed AI Forever」，356 s，public；人工字幕 0 种 / 自动字幕 157 种）→ 自动字幕 `en` + 内嵌 + `keepSubtitleFile=false` → `Completed`，MKV 9.6 MB，`ffprobe` 内嵌 1 条 `subrip` eng 轨，输出目录无外置字幕；③ 本轮测量暴露并修复 `subtitleOutcome` 误判（D-132）。证据：`reports/live-audit/*.json`、`reports/l2-tmp/youtube-live-*`。**范围限制：只测 3 条、只覆盖自动字幕、未走 Electron 窗口 UI、未打包安装版**。**注意：T1/T2/T3 三项未纳入本次在线测试，见「已知边界」第 10 条** |
+| 真实站点（YouTube） | **已在线实测（2026-11-11，D-132）**：① 播放列表 `PLpODSd__yLPULp9c7RaFXF4W8yxRnMZgd`（Learning English Podcast）真解析 **20 / 20** 条（declared=fetched=20、available=20、unavailable=0、truncated=false、总时长 19,505 s），renderer DTO 序列化后无任何条目 URL；选 **3 条** 360p 批量入队 → 3 个独立 taskId / 独立 tempDir / 全部 `Completed`，产物 17.1 / 29.6 / 33.5 MB `.webm`，标题与时长逐条对应；② 单视频 `DTu4yvmc0Fc`（实际标题「DeepSeek Harness Just Changed AI Forever」，356 s，public；人工字幕 0 种 / 自动字幕 157 种）→ 自动字幕 `en` + 内嵌 + `keepSubtitleFile=false` → `Completed`，MKV 9.6 MB，`ffprobe` 内嵌 1 条 `subrip` eng 轨，输出目录无外置字幕；③ 本轮测量暴露并修复 `subtitleOutcome` 误判（D-132）。证据：`reports/live-audit/*.json`、`reports/l2-tmp/youtube-live-*`。**范围限制：只测 3 条、只覆盖自动字幕、未走 Electron 窗口 UI、测试时尚未打包安装版**（该次在线测试早于 2026-11-12 的打包与发布）。**注意：T1/T2/T3 三项未纳入本次在线测试，见「已知边界」第 10 条** |
 | 真实 UI 全链路（本地夹具） | 外置：`Completed`，mp4 + 2 个 vtt 且记录关联正确；内嵌：`Completed`，MKV 内 ffprobe 2 条 `webvtt` 轨（eng/zho） |
 | 离线取证（引擎自述） | `scripts/task03-site-evidence.mjs`（仅 127.0.0.1 与本地进程）：catalog = **1754 条 / 1308 站点 / 445 子提取器 / 136 broken**（与真实 `--list-extractors` 1755 行去重后逐项吻合；唯一重复名是 `generic`，从无 broken 同名重复）；precheck = 本地含媒体页 `SUPPORTED`(HTML5MediaEmbed) / 无媒体页 `NO_MEDIA` / 404 与拒连端口 `INDETERMINATE` / 非 http 与非 URL 经白名单 `UNSUPPORTED`。`scripts/task03-classify-evidence.mjs`：**10/10 映射通过** |
 | 变异测试（自证 UI 测试非空转） | 注入硬编码兜底名单 → 1 项失败；清空失败文案 → 8 项失败；GenericIE 注释改为恒显示 → 1 项失败。三处变异均被捕获，还原后与变异前**逐字节一致** |
-| M5 交付验收（`node scripts/acceptance.mjs --milestone M5`） | **10/10 门禁 PASS、allGreen=true**；27 条断言 = 24 PASS + 3 如实 SKIPPED（N1/N2 延后项 + D-118 断点续传默认跳过）；`releaseReady=false` 仍成立，因为**未打包**（N1）。数值为 2026-11-11 快照，引用前现跑（D-135 / D-136） |
+| M5 交付验收（`node scripts/acceptance.mjs --milestone M5`） | **10/10 门禁 PASS、allGreen=true**；27 条断言 = 24 PASS + 3 如实 SKIPPED（N1/N2 延后项 + D-118 断点续传默认跳过）；`releaseReady=false` **仍然成立，但和是否打包无关**——`scripts/acceptance.mjs:1579` 把这个字段硬编码为 `false`，打包、发版都不会让它转真；M5 的实际阻塞项是 `M5_BLOCKERS` 里的 N1/N2/N3（electron 安装、引擎预编译包下载、国际出口）。数值为 2026-11-11 快照，引用前现跑（D-135 / D-136） |
 | `check-layering` / `frozen-gate` / `request.ts` 冻结 | 0 violations / exit 0 / 无差异；`check-runtime` 3/3 必需组件 OK（yt-dlp 2026.10.26 / ffmpeg n9.0.2 / node v24.22.2） |
 | 铁律遵守 | 无新增 devDependencies（D-61）；`electron-builder.yml` 的 `files` glob 未改（D-75，靠 `build-desktop.mjs` 的 `cpSync` 整树拷贝使新 UI 文件自动进包） |
 
@@ -82,7 +84,7 @@
 3. 独立字幕重试未实现：引擎非零退出仍整体 `Error`，`restart` 重跑整个任务（可能产生副本名），不能用忽略退出码伪装成功。
 4. 同语言人工 / 自动不能分别下载两份，界面只提供「包含自动字幕」。
 5. 内嵌强制 MKV，不承诺保留 MP4；`keepSubtitleFile=false` **已在 D-131 修复**：内嵌完成后按本任务 yt-dlp 精确报告的字幕清单，把独立字幕副本移入回收站，并同步更新任务产物、字幕关联与历史记录；UI 提示已改为「未勾选保留的独立字幕副本会移入回收站，可自行恢复」。**真实 YouTube 自动字幕场景下 yt-dlp 嵌入后会自行删除外置副本，输出目录无残留（`_recycled` 为空）；人工字幕场景的回收动作由离线真实引擎 `<track>` 用例证明（回收站收到 2 个字幕文件）。** 失败／取消／异常退出时的残留仍未验证。
-6. 未打包、未做安装/升级/卸载验证；播放器对 `webvtt` 内嵌轨的识别未测；需登录或 Cookie 的受限视频未测。
+6. **已打包并发布 v0.3.0，但未做安装 / 升级 / 卸载验证**（也未走「应用内下载整包 → 安装 → 重启」自更新闭环）；播放器对 `webvtt` 内嵌轨的识别未测；需登录或 Cookie 的受限视频未测。
 7. 本轮未重跑覆盖率（本机 safe-delete 守卫限制），不引用历史 85.99% 作为本次结果。
 8. 下一决策编号原写 D-129；**口径订正**：D-129 / D-130 为批量导入与播放列表批量，D-131 为独立审查修复，D-132 为真实在线验收与 `subtitleOutcome` 修复，后续从 **D-133** 起。
 9. **口径变更记录（D-131 → D-132）**：第 3 节「真实站点（YouTube）」曾因「只有文档、没有任何日志／产物／测试记录」被 2026-11-11 独立审查改为「未验证」；随后业主放行国际网，完成真实在线测试并补齐证据，现改为「已在线实测」并注明范围限制。**前后两次结论都不矛盾：当时确实无证据，现在确实有证据。** 本次只以 `reports/live-audit/` 与 `reports/l2-tmp/youtube-live-*` 为准，不沿用旧口径。`keepSubtitleFile=false` 的实现缺陷已修复（D-131），`ipc-bridge.js` 通道登记与 `TXT_IMPORT_ENQUEUE` 的 `kind` 校验已补齐。详见 `docs/DECISIONS.md` D-131 / D-132 与工作区 `handoff/INDEPENDENT_CODE_AUDIT_REPORT.md`、`handoff/ONLINE_VERIFICATION_REPORT.md`。

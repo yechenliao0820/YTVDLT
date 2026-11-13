@@ -118,6 +118,19 @@ export interface ElectronLike {
   readonly clipboard: {
     readText(): string;
   };
+  /**
+   * D-170: the default session is where Chromium asks "may this page use the
+   * camera / mic / notifications / clipboard-read / geolocation?". Nothing in
+   * this app needs any of them, and no handler was installed — Electron's
+   * default is to grant some of them. Optional so the existing unit-test fake
+   * stays valid.
+   */
+  readonly session?: {
+    readonly defaultSession: {
+      setPermissionRequestHandler?(handler: (contents: unknown, permission: string, callback: (granted: boolean) => void) => void): void;
+      setPermissionCheckHandler?(handler: (contents: unknown, permission: string) => boolean): void;
+    };
+  };
 }
 
 export interface BootstrapOptions {
@@ -450,6 +463,15 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
     if (!isTrustedLocalPage(url, options.pageUrl)) event.preventDefault();
   }) as () => void);
   window.webContents.setWindowOpenHandler?.(() => ({ action: 'deny' }));
+
+  // D-170: deny every permission request and every synchronous permission
+  // check. A local page has no business asking for the camera, the microphone,
+  // geolocation, clipboard-read or OS notifications, and `YTVDLT` never calls
+  // `Notification` from the renderer (notifications are native, main-side).
+  // Denying at the session level is the only place that covers every frame.
+  const defaultSession = electron.session?.defaultSession;
+  defaultSession?.setPermissionRequestHandler?.((_contents, _permission, callback) => { callback(false); });
+  defaultSession?.setPermissionCheckHandler?.(() => false);
 
   window.webContents.on('context-menu', ((_event: unknown, params: {
     isEditable: boolean;

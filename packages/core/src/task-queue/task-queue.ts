@@ -24,6 +24,8 @@ import {
   primaryMediaArtifact, subtitleArtifactsOf, mediaArtifactsOf,
 } from '../artifact-classify/index.js';
 import { assertTransition } from './state-machine.js';
+import { stripCredentialUrls } from './snapshot-media.js';
+import { createProbeAbort } from './probe-abort.js';
 
 export interface TaskQueueDeps {
   ports: CorePorts;
@@ -73,6 +75,25 @@ export function normalizeConcurrency(value: unknown): number {
 
 const nowIso = (ports: CorePorts): string => ports.clock.nowIso();
 
+/**
+ * D-163: cheap, observable-change fingerprint of the snapshot.
+ *
+ * Deliberately NOT a hash of the serialised JSON: the point is to skip the
+ * stringify + full-file rewrite, so the comparison must not cost one itself.
+ * Every field the task list / detail view can display is included, and nothing
+ * else — a change that is invisible to the user does not deserve a disk write.
+ */
+function snapshotFingerprint(tasks: readonly TaskRecord[]): string {
+  return tasks.map((task) => [
+    task.id, task.state, task.updatedAt, task.kind,
+    task.lastPercent ?? '', task.lastDownloadedBytes ?? '', task.lastTotalBytes ?? '',
+    task.lastSpeedBps ?? '', task.lastEtaSec ?? '',
+    task.lastStage ?? '', task.error?.code ?? '', task.artifacts.length,
+    task.subtitleFiles?.length ?? '', task.subtitleOutcome ?? '',
+    task.mediaInfo?.id ?? '',
+  ].join('|')).join('\n');
+}
+
 /** Windows path equality: case-insensitive, slash-insensitive. */
 function pathKeyOf(path: string): string {
   return path.replace(/\//g, '\\').toLowerCase();
@@ -92,6 +113,14 @@ export class TaskQueue implements ITaskQueue {
   private intakePausedFlag = false;
   private readonly persistIntervalMs: number;
   private lastPersistAt = 0;
+  /**
+   * D-163: fingerprint of the last snapshot that actually reached disk.
+   * `null` (not `''`) is the initial value on purpose: an empty queue's
+   * fingerprint IS `''`, and starting from `''` made the very first
+   * `restoreTasks()` write a no-op — which broke the D-159 guarantee that a
+   * damaged `tasks.json` is only replaced AFTER the backup is verified.
+   */
+  private lastPersistedFingerprint: string | null = null;
   /**
    * T2: true while the latest persist attempt failed. Snapshot persistence
    * failures used to be swallowed silently; they are now logged — but only
@@ -120,6 +149,17 @@ export class TaskQueue implements ITaskQueue {
   /** How many tasks are waiting for a slot. */
   get pendingCount(): number {
     return this.pending.length;
+  }
+
+  /**
+   * D-164: true while the record is parked in the FIFO and has not started.
+   *
+   * The UI needs this to know that the card can be cancelled *before* a slot
+   * frees up. It cannot be derived from `state`: a parked record is `Idle`,
+   * which is also what a restored-but-never-run task looks like.
+   */
+  isPending(taskId: string): boolean {
+    return this.pending.includes(taskId);
   }
 
   /**
@@ -260,15 +300,36 @@ export class TaskQueue implements ITaskQueue {
       // --- 1) probe (unless mediaInfo was already cached by restart) ---
       if (record.mediaInfo === null) {
         this.transition(record, 'FetchingInfo');
+        // D-162: a probe used to be the one phase the user could not cancel —
+        // `cancel()` returned `false` because no handle existed yet. Register a
+        // cooperative handle BEFORE awaiting: the signal kills the child (same
+        // adapter path as the 30 s timeout), and the catch below treats an
+        // aborted probe as "already cancelled" instead of inventing an error.
+        const probeControl = createProbeAbort();
+        this.handles.set(record.id, {
+          pid: null,
+          cancel: async (): Promise<boolean> => {
+            probeControl.abort();
+            return true;
+          },
+        });
         try {
           record.mediaInfo = await this.deps.engine.probe(record.url, {
             jsRuntimePath: this.deps.jsRuntimePath,
-          });
+          }, { signal: probeControl.signal });
         } catch (error) {
+          if (probeControl.signal.aborted) return;
           record.error = toAppError(error);
           this.transition(record, 'Error');
           return;
+        } finally {
+          this.handles.delete(record.id);
         }
+        // The kill is only observable asynchronously: a cancel that landed
+        // while the last stdout chunk was in flight leaves the record in
+        // `Canceled`, and `Canceled -> ReadyWithInfo` is a legal but WRONG edge
+        // here (it would resurrect a cancelled task).
+        if (probeControl.signal.aborted || record.state !== 'FetchingInfo') return;
         this.transition(record, 'ReadyWithInfo');
       } else if (record.state === 'Idle') {
         // Stage 3: a per-task `MediaInfo` can now arrive already probed (a spent
@@ -613,7 +674,12 @@ export class TaskQueue implements ITaskQueue {
       // run settles as `Canceled` no matter how the process dies).
       return false;
     }
-    if (record.state === 'Running') this.transition(record, 'Canceled');
+    // D-162: `FetchingInfo -> Canceled` is a legal edge (§4.5) and the probe now
+    // owns a handle, so a task cancelled mid-probe must land in `Canceled`
+    // rather than silently flipping to `Error` when the child dies.
+    if (record.state === 'Running' || record.state === 'FetchingInfo') {
+      this.transition(record, 'Canceled');
+    }
     return true;
   }
 
@@ -714,12 +780,26 @@ export class TaskQueue implements ITaskQueue {
    */
   private async persistSnapshot(): Promise<void> {
     if (this.deps.taskStore === undefined) return;
+    // D-163: minimise before serialising — signed CDN links never touch disk.
+    const tasks: TaskRecord[] = this.list().map((record) => (record.mediaInfo === null
+      ? { ...record, artifacts: [...record.artifacts] }
+      : {
+        ...record,
+        artifacts: [...record.artifacts],
+        mediaInfo: stripCredentialUrls(record.mediaInfo),
+      }));
+    // D-163: a no-op write is still a full-file rewrite. `run().finally` fires
+    // on every task end, and progress ticks can land on an unchanged record
+    // (two streams, retries), so skip the write when nothing observable moved.
+    const fingerprint = snapshotFingerprint(tasks);
+    if (fingerprint === this.lastPersistedFingerprint) return;
     try {
       await this.deps.taskStore.save({
         schemaVersion: 1,
         savedAt: nowIso(this.deps.ports),
-        tasks: this.list() as TaskRecord[],
+        tasks,
       });
+      this.lastPersistedFingerprint = fingerprint;
       this.snapshotPersistFailed = false;
     } catch (error) {
       if (this.snapshotPersistFailed) return;

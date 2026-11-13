@@ -218,4 +218,10 @@ export interface ITaskQueue {
   pauseIntake(): void;
   /** Clear the flag and immediately refill free slots (FIFO order preserved). */
   resumeIntake(): void;
+  /**
+   * D-164 (append-only, optional): true while the record is parked in the FIFO
+   * and has not started. Optional so existing test doubles keep compiling; the
+   * production queue always implements it.
+   */
+  isPending?(taskId: string): boolean;
 }

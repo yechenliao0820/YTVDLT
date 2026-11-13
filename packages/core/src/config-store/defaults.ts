@@ -62,6 +62,10 @@ export const DEFAULT_DOMAINS: Readonly<Record<ConfigDomainName, Record<string, u
     language: '',
     privateMode: false,
     disablePreview: false,
+    // D-166: written by the 「开机自启」 switch through SETTINGS_SET, applied to
+    // `HKCU\...\CurrentVersion\Run` (no elevation). `false` for a fresh install
+    // — an app must not add a startup entry the user never asked for.
+    autostart: false,
   },
   format: {
     quality: 'best',
@@ -93,7 +97,11 @@ export const DEFAULT_DOMAINS: Readonly<Record<ConfigDomainName, Record<string, u
     tempDir: '',
   },
   network: {
-    maxRate: 1000,
+    // D-165: KB/s; 0 = unlimited. Read by `toRateLimit()` (config-store), which
+    // turns it into yt-dlp's `-r` token. Was 1000 with no reader and no unit —
+    // a placeholder that lied. 0 keeps the historical behaviour (no limit) so
+    // nobody is silently capped after the upgrade.
+    maxRate: 0,
     concurrentFragments: 8,
     ipv4Only: false,
   },

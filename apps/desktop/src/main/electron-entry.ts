@@ -12,7 +12,7 @@
  * still the renderer's probe path; replacing it with `engine.probe()` belongs to
  * the same N1 block.
  */
-import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeTheme, shell, Tray } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, shell, Tray } from 'electron';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -23,7 +23,9 @@ import { createNodePorts } from './adapters/node-ports.js';
 import { createElectronShellPort } from './adapters/electron-shell-port.js';
 import { createPathPicker } from './adapters/path-picker.js';
 import { createLocalFileStatusPort, createTrashFilesPort } from './adapters/local-file-status-port.js';
+import { createWinStartup } from './adapters/win-startup.js';
 import { resolveFixtureDir, resolveRuntimeDir } from './runtime-paths.js';
+import { checkRuntimeForApp } from './runtime-resolver.js';
 import { createNodeProbePort, resolveDataDir } from './data-dir.js';
 import { createQueueIntakeGate } from './adapters/queue-intake-gate.js';
 import { LocalDirUpdateSource } from './adapters/local-dir-update-source.js';
@@ -171,6 +173,43 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       shell: createElectronShellPort(shell),
     });
     const logger = new Logger({ ports, appVersion });
+    // D-169: the runtime was never checked at start-up. `checkRuntimeForApp()`
+    // existed since M1 and had ZERO callers, so a build shipped without
+    // `yt-dlp.exe` / `node.exe` / `ffmpeg` opened a perfectly normal window and
+    // failed on the first download with a confusing spawn error. Check once, log
+    // the full report, and tell the user in their own words when a REQUIRED
+    // component is missing. Deliberately non-fatal: the queue, history, settings
+    // and cover cache still work, and refusing to start would be worse.
+    const runtimeReport = await checkRuntimeForApp().catch((error: unknown) => {
+      void logger.warn('runtime', 'start-up check threw', {
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    });
+    if (runtimeReport !== null && runtimeReport.allRequiredOk) {
+      await logger.info('runtime', 'start-up check ok', {
+        runtimeDir: runtimeReport.runtimeDir,
+        requiredOk: runtimeReport.summary.requiredOk,
+        optionalMissing: runtimeReport.summary.optionalMissing,
+      });
+    } else if (runtimeReport !== null) {
+      const missing = runtimeReport.items
+        .filter((item) => item.required && item.status !== 'OK')
+        .map((item) => item.label)
+        .join(', ');
+      await logger.error('runtime', 'start-up check failed', {
+        runtimeDir: runtimeReport.runtimeDir,
+        missing,
+        failed: runtimeReport.summary.failed,
+      });
+      if (packaged) {
+        dialog.showErrorBox(
+          'YTVDLT - runtime incomplete',
+          `These required components are missing or damaged in://n${runtimeReport.runtimeDir}//n//n${missing}//n//nDownloads will fail until the installation is repaired.`,
+        );
+      }
+    }
+
     const mapper = new ErrorMapper();
     const verifier = new ArtifactVerifier({ ports });
     const enginePath = join(runtimeDir, 'yt-dlp.exe');
@@ -305,8 +344,13 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       siteSupportNetwork: () => readSiteSupportNetwork(configRef),
       siteSupportLogger: logger,
       jsRuntimePath: join(runtimeDir, 'node.exe'),
-      videoFixturePath: join(fixtureDir, 'info-video.json'),
-      playlistFixturePath: join(fixtureDir, 'info-flat-playlist.json'),
+      // D-167: L1 fixtures are a development surface (D-31). In a packaged
+      // build the directory does not even exist, so the channels are NOT
+      // registered instead of being registered and failing on read.
+      ...(packaged ? {} : {
+        videoFixturePath: join(fixtureDir, 'info-video.json'),
+        playlistFixturePath: join(fixtureDir, 'info-flat-playlist.json'),
+      }),
       appVersion,
       engineVersion: 'unknown (resolved at runtime by check-runtime)',
       dataDir: dataDir.dataDir,
@@ -315,6 +359,10 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       componentUpdate: componentUpdateProxy,
       appUpdate: appUpdateProxy,
       thumbnails,
+      // D-166: `planAutostart` was policy with no caller; this is the caller.
+      // Windows only — elsewhere the port stays undefined and SETTINGS_SET
+      // refuses instead of pretending the toggle worked.
+      ...(process.platform === 'win32' ? { systemStartup: createWinStartup({ exePath: process.execPath }) } : {}),
       // 0.2.1 (D-98): the output root is user-selectable. Expansion happens here
       // (main owns `process.env`); the channel layer only persists/validates.
       // D-117: `%USERVIDEOS%` is NOT a Windows variable — `app.getPath('videos')`

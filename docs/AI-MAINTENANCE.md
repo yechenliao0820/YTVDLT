@@ -36,7 +36,7 @@
 9. **默认只打安装版**（`--win nsis`）。便携版与更新清单属点名项，业主说「打包」才跑；不要主动打包（一次约 5 分钟）。
 10. **改了本手册或 `BUILD-HISTORY.md` 要同步外层阅读副本**：业主在 `C:/Users/leolee/Desktop/YTVDLT/docs/` 放了副本，两边不一致会让人拿着旧规则干活。
 11. **版本号按 §7 的十进制进位规则取**，任一段都不写两位数；发版前查 `CHANGELOG.md` 确认下一版号。
-12. **维护完成后不要主动推送仓库或发布 Release**。等业主明确说「上传仓库」/「发布 release」再执行；执行后把仓库地址、分支、提交号与上传方法一起交给业主或下一位接手者（见 §11）。推送和发布是对外动作，不是收尾的自动步骤。
+12. **维护完成后不要主动推送仓库或发布 Release**。等业主明确说「上传仓库」/「发布 release」再执行；执行后把仓库地址、分支、提交号与上传方法一起交给业主或下一位接手者（见 §11）。推送和发布是对外动作，不是收尾的自动步骤。**`main` 已受分支保护（§7.1）：任何推送只能推分支再开 PR，直推 `main` 会被 GH013 拒绝；不要试图找 API 绕过或临时关规则。**
 13. **`README.md` 与 `README.zh-CN.md` 必须同时改**（D-100）：英文是默认门面，中文是镜像，两份章节一一对应、顶部各有语言切换行。只改一份等于制造两种真相；`docs/assets/` 里的截图随之更新时也要确认两份引用一致。
 14. **GitHub Release 说明一律用英文**：Release 页面是仓库门面，面向国际读者；中文只写进 `CHANGELOG.md` / `DECISIONS.md` 这类内部文档。发版时把英文说明贴进 Release，不要把中文正文直接发出去（`DECISIONS.md` 里的 D-xx 编号可以保留，作为可追溯的括注）。
 
@@ -297,33 +297,50 @@ ui（零依赖） ← preload ← apps/desktop
 
 收尾一律跑 `node scripts/handoff-check.mjs`；输出不齐说明有文档没跟上。
 
-### 7.1 CI 强制门禁（GitHub 端配置，本地代码无法替代）
+### 7.1 CI 强制门禁（GitHub 端已生效；本地 workflow 替代不了）
 
-**事实边界**：`.github/workflows/ci.yml` 让 CI 在 `push main` 与所有 PR 上自动运行
-（`windows-latest`；`pnpm typecheck` → `npm test`（四维 ≥70 覆盖率门）→
-`check-layering` → `frozen-gate`），但 workflow 文件**不能强制自己必须过**。
-「有自动化 CI」与「有强制 CI 门禁」是两件事：是否强制由仓库
-`Settings → Branches / Rulesets` 决定，只能由业主在 GitHub 网页端（或经授权的
-API）设置。不要因为 Actions 页是绿的就以为 `main` 被保护了；
-`handoff-check.mjs` 不检查这一项。
+**状态（2026-11-13 实测，非计划）**：`main` 的分支保护**已开启并真实拦截**。直推 `main` 得到：
 
-配置清单（Ruleset 路径；Classic branch protection rule 的同名项等价）：
+```
+remote: error: GH013: Repository rule violations found for refs/heads/main.
+remote: - Changes must be made through a pull request.
+remote: - Required status check "typecheck · tests · gates (windows-latest)" is expected.
+```
 
-| 步骤 | 设置项 | 值 |
-|---|---|---|
-| 1 | Target branches | `main` |
-| 2 | Require a pull request before merging | 开；日常改动走 PR，不在 `main` 上直接 push |
-| 3 | Require status checks to pass | 开；添加本 workflow 的 `ci` job（下拉列表里可能显示 `typecheck · tests · gates (windows-latest)`，**以实际条目为准**） |
-| 4 | Require branches to be up to date before merging | 开；避免「过了 CI 的旧分支」盖掉新 `main` |
-| 5 | Block force pushes / Restrict deletions | 开 |
-| 6 | Include administrators / Do not allow bypassing | 开，否则以上规则对管理员无效 |
+即两条硬约束：① 一切改动必须走 PR；② 必须等名为
+`typecheck · tests · gates (windows-latest)` 的检查通过才能合并。
+**这是业主定下的长期策略**（项目已进入对外维护阶段），不是待办事项，
+不要提议关闭它，也不要因为「只是改文档」就想直推。
 
-验收判据（**不要拿 `main` 试**）：开一个测试 PR 故意让某一步失败 → Merge 按钮
-被禁用并提示 required check 未通过；修好后门禁自动解除。CI 红了按日志定位，
-不得为变绿改测试结论（铁律 6 / 8）。
+**日常流程（唯一正确姿势）**
 
-> 本环境只维护本地工作树。未经业主明确指令，**不修改远端仓库设置、不 commit、
-> 不 push**。本小节是给业主执行的操作清单，不是「已完成」的记录。
+1. 在本地提交（可以直接提交在 `main` 上，也可以先建分支）；
+2. 推**分支**：`git push -u origin main:refs/heads/<branch>`（或 `git push -u origin <branch>`）；
+3. 用 GitHub 回显的 `https://github.com/<owner>/YTVDLT/pull/new/<branch>` 建 PR；
+4. 等 `ci` job 绿 → Merge（这一步由业主点击，AI 不代点）。
+
+**为什么不能直推**：`.github/workflows/ci.yml` 在 `push main` 与所有 PR 上跑
+（`windows-latest`；`pnpm typecheck` → `npm test`（四维 ≥70）→ `check-layering` →
+`frozen-gate`），但 workflow 文件**不能强制自己必须过**——强制力完全来自仓库设置。
+`handoff-check.mjs` 不检查这一项，所以「本地全绿」不等于「可以合并」。
+
+**规则现状**（原是 D-161 交付的 6 步清单，现已在网页端落地；复核方式=Settings → Rules）：
+
+| 项 | 值 |
+|---|---|
+| Target branches | `main` |
+| Require a pull request | 开 —— 直推被拒（已实测） |
+| Required status checks | 开 —— `typecheck · tests · gates (windows-latest)`（以实际条目为准） |
+| Require branches up to date | 开 —— 避免「过了 CI 的旧分支」盖掉新 `main` |
+| Block force pushes / Restrict deletions | 开 |
+| Include administrators | 开 —— 管理员也不能绕过 |
+
+**验收判据**：开一个测试 PR 故意让某一步失败 → Merge 被禁用并提示 required check 未通过；
+修好后门禁自动解除。CI 红了按日志定位，不得为变绿改测试结论（铁律 6 / 8）。
+
+> 本环境只维护本地工作树：**未经业主明确指令不 commit、不 push、不改远端设置**。
+> 业主说「推送」时，按上面的分支 + PR 流程执行，并在交付里给出分支名、提交号与 PR 入口。
+> 不要在 PR 合并后删掉分支——它是这次改动的远端溯源点（需要清理时由业主决定）。
 
 ---
 
@@ -399,6 +416,8 @@ API）设置。不要因为 Actions 页是绿的就以为 `main` 被保护了；
 
 33. **「本机全绿」不等于「CI 全绿」**（D-157 实测）：干净 runner 缺三类本机才有的东西——被 `*.log` 误伤的测试 fixture（本机有、仓库没有）、按架构 §2.7 不入库的随包 `node.exe` / `yt-dlp.exe`、以及 Windows 检出的 CRLF（仓库 blob 是 LF，按 LF 分隔标记切分的许可测试会假失败）。修 CI 只补环境：把 fixture 入库、测试前用 `fetch-runtime --only=ytdlp/node` 取回二进制、在测试**输入边界**归一化行尾；**不许改断言、不许跳过用例、不许下调覆盖率门限**。补充（D-158）：Windows 把带 `#!/usr/bin/env node` 的 `.mjs` 检出成 CRLF 时，Vitest 收集期会报 `SyntaxError: Invalid or unexpected token` 且错误指向测试文件的 `import` 行；用 `.gitattributes` 的 `*.mjs text eol=lf` 钉住行尾即可，不要改测试。
 
+34. **静态页的 CSP 必须放行 `connect-src file:`**（D-170 实测）：`packages/ui/src/fixtures/probe-fixture.js` 用**同步 XHR** 读同目录的 fixture JSON，这是 8 个页面唯一的数据来源。把 CSP 写成 `connect-src 'none'`（「页面不联网」的直觉写法）会让页面自己的数据源失效：`XMLHttpRequest` 抛异常 → 脚本停住 → DOM 停在初始态，视觉上不白屏，**只有 `--dump-dom` 快照能看出来**。正确写法是 `connect-src 'self' file: data:`：`file:` 给页面自己，`http(s)` 仍然被拦（这才是安全目标）。排查手法：截图基线像素没变但 DOM 快照整片退化成初始态 → 先怀疑 CSP 掐了脚本，别先去查渲染。
+35. **快照里绝不能出现媒体 URL，且写盘不能靠「每次都写」**（D-163 实测）：`MediaInfo.formats[].url` / `subtitles[].url` 是带 `sig`/`expire` 的签名 CDN 链接，任何业务代码都不读它们（格式化选择器只读 id/尺寸/码率，字幕规划只读 lang/ext，渲染层 DTO 已剥 url），所以落盘前必须过 `stripCredentialUrls()`。配套的指纹短路有个**必须记住的初值细节**：空队列的指纹是空串，`lastPersistedFingerprint` 必须以 `null` 起手，写成 `''` 会让 `restoreTasks()` 的第一次写回被当成「无变化」而跳过——D-159 的「损坏快照先备份再覆盖」当场失效，测试会红在 `task-store.test.ts` 的 D-159 用例上。
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 
@@ -426,11 +445,11 @@ API）设置。不要因为 Actions 页是绿的就以为 `main` 被保护了；
 | **更新器首次下载没有独立可信签名基准**：信任根是 TLS + GitHub 域；发布端缺 `digest` 时本地 `.sha256` sidecar 只保证「后来没变」，不认证首次来源 | `main/app-update-service.ts`、`main/adapters/http-download.ts`；口径见 D-137「未覆盖」 |
 | **IPC / 导航边界未做真机窗口验证**：sender、主 frame、`will-navigate`、`setWindowOpenHandler` 目前只有假 Electron 单测；打包后真机点一遍待业主指令（铁律 9） | `main/bootstrap.ts`、`tests/unit/ipc-trust-boundary.test.ts` |
 | **本轮加固缺在线 / 安装包证据**：HTTP 逐跳、有界读取、IPC 边界全部是离线受控测试（127.0.0.1 + 假 Electron）；真实站点预检六态矩阵与 Windows 安装包验收需业主放行国际网并点名打包（铁律 9） | `tests/unit/http-network-boundary.test.ts`；口径见 D-137「未覆盖」 |
-| **`main` 未启用强制 CI 门禁**：CI 会自动跑，但 GitHub 没要求通过才能合并（外部审计实测 `protected: false`、rulesets 为空）。分支保护只能在 GitHub 网页端配置，本地 workflow 与提交都替代不了 | 操作步骤与验收判据见 §7.1；业主执行前不要当成已生效 |
 
 > 这张表会随开发推进变短。**完成一项就删一行**，不要留着写「已做」——那是本手册最容易腐烂的地方。
 >
 > 已删除的行（留存最近一次的移除记录，便于回溯）：
+> - **「`main` 未启用强制 CI 门禁」** —— 业主已于 2026-11-13 在网页端开启（D-172 记录了首次实测拦截：直推 `main` 返回 GH013，必须走 PR + required check）；规则现状见 §7.1。
 > - **「最低画质」是空选项** —— 由 D-133 修复（`RESOLUTION_QUALITIES` 补 `lowest → '+res'` 相对排序，绝不硬编码分辨率）。
 > - **「URL 预检未做真实站点验证」的「未验证」部分** —— 由 D-135 在线补跑（`npm run test:online` 2/2、预检对 YouTube 实测 `SUPPORTED`）；该行**没有整行删除**，因为「真机窗口 / 真实 Cookie 对照」仍未做，改为上面那一行。
 > - **「DNS 重绑定未防护」** —— 由 D-143 关闭（每跳解析全部地址 → `allowResolvedAddress` 逐个校验 fail-closed → socket 钉扎在已验证地址上，TOCTOU 窗口消灭）；残余局限（resolver 被控持的解析投毒、`allowAnyHttpUrl` 无地址钩子、无真实外网实测）见 D-143「未覆盖」。

@@ -30,5 +30,21 @@ export function createQueueIntakeGate(getQueue: () => ITaskQueue | null | undefi
     isPaused(): boolean {
       return current()?.intakePaused === true;
     },
+    /**
+     * D-171: poll `activeTaskIds` until the queue is empty. Polling (not an
+     * event subscription) is deliberate: the gate is a lazy getter over a queue
+     * that may not exist yet, and a subscription would have to be re-attached
+     * every time the host is rebuilt.
+     */
+    async waitForIdle(timeoutMs: number): Promise<boolean> {
+      const deadline = Date.now() + Math.max(0, timeoutMs);
+      for (;;) {
+        const queue = current();
+        if (queue === null) return true;
+        if (queue.activeTaskIds.length === 0) return true;
+        if (Date.now() >= deadline) return false;
+        await new Promise<void>((resolve) => { setTimeout(resolve, 250); });
+      }
+    },
   };
 }

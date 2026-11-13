@@ -44,6 +44,9 @@ export interface SelfUpdaterDeps {
 /** `SHA2-256SUMS` line: `<64 hex>  [*]<file>`. */
 const CHECKSUM_LINE = /^([a-fA-F0-9]{64})\s+\*?(.+?)\s*$/;
 
+/** D-171: how long a component swap waits for running downloads to finish. */
+export const QUEUE_IDLE_TIMEOUT_MS = 60_000;
+
 /**
  * `yt-dlp --version` → `2026.10.26`; `aria2c --version` → `aria2 1.35.0` → `1.35.0`.
  * Kept here (not in the caller) so every surface reports the same string.
@@ -193,8 +196,20 @@ export class SelfUpdater {
       return this.result(fromVersion, fromVersion, false, 'checksum-mismatch');
     }
 
-    // 3) Pause intake, swap, verify, clean up.
+    // 3) Pause intake, wait for the slots to drain, swap, verify, clean up.
     intakeGate?.pause();
+    // D-171: `pause()` stops new work only; a transfer that is already running
+    // keeps `yt-dlp.exe` open and the rename below fails. Wait for the queue to
+    // go idle, and refuse to swap at all when it does not.
+    const idle = intakeGate?.waitForIdle === undefined
+      ? true
+      : await intakeGate.waitForIdle(QUEUE_IDLE_TIMEOUT_MS);
+    if (!idle) {
+      await logger.error('self-update', 'queue still busy; update deferred', {
+        timeoutMs: QUEUE_IDLE_TIMEOUT_MS,
+      });
+      return this.result(fromVersion, fromVersion, false, 'queue-busy');
+    }
     try {
       if (await ports.fs.exists(enginePath)) {
         await ports.fs.writeBytesAtomic(`${enginePath}.bak`, await ports.fs.readBytes(enginePath));
