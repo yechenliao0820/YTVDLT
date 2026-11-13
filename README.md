@@ -333,7 +333,7 @@ the same gates:
 | Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** (the detail-page cancel fix applies to live mode only) |
 | `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
 
-The 2026-11-13 audit-and-repair round (D-150…D-157, not yet released) added
+The 2026-11-13 audit-and-repair round (D-150…D-158, not yet released) added
 user-cancellable pre-checks, snapshot write/validation hardening, IPv6
 allowlisting, a bounded stdout line-assembly buffer, component-updater network
 policy and GitHub Actions CI. It passed the same gates:
@@ -342,7 +342,7 @@ policy and GitHub Actions CI. It passed the same gates:
 |---|---|
 | `pnpm typecheck` | 5/5 workspace packages successful |
 | Unit / contract / integration tests | **2,000 passed across 139 files, 0 failed** |
-| Coverage | statements 89.44% / branches 86.37% / functions 92.22% / lines 89.44% (floor 70, not raised) |
+| Coverage | statements 89.44% / branches 86.38% / functions 92.22% / lines 89.44% (floor 70, not raised) |
 | Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** |
 | `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
 | M5 acceptance | 10/10 gates PASS, allGreen=true |
@@ -355,7 +355,10 @@ recorded `.log` fixtures were accidentally ignored, the bundled `node.exe` /
 `yt-dlp.exe` are intentionally not committed, and Windows checkout uses CRLF
 while the licence test compares LF bytes. D-157 fixes only the environment
 (fixtures committed, runtime fetched before tests, inputs normalized) without
-relaxing a single assertion; the numbers above come from the local run.
+relaxing a single assertion. A follow-up (D-158) pins `.mjs` files to LF in
+`.gitattributes`: Windows runners otherwise check those shebang-bearing
+scripts out with CRLF, which breaks test collection. The numbers above come
+from the local run.
 
 Design invariants worth knowing if you plan to modify the code:
 

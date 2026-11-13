@@ -368,7 +368,7 @@ ui（零依赖） ← preload ← apps/desktop
 31. **「无报告的遗留物」先甄别再续写**（T5 / T6 两次实测）：被取消或限额杀死的 Agent 可能留下编译不过的骨架（`dropUtf8Prefix` 无定义），也可能留下「新测试全过、覆盖面未审计」的半成品（T5 的 30/30 掩盖了 7 项既有测试回归与 M5 `file-coverage` 红门）。接手顺序固定：`git diff` 逐文件对照任务书 → 全包 typecheck → 定向测试 → 全量测试 → 只补缺口，已实现且测过的绝不重写。
 32. **动态 DOM 的节点移除不能假设 `parentNode` 存在**（D-156 实测）：测试沙箱的节点暴露 `parent` 而非 `parentNode`，`!== null` 挡不住 `undefined`，一次 `removeChild` 的未处理 rejection 会连带击穿**无关**的测试文件。照 D-139 Star 弹窗的三连守卫写：`parent !== null && parent !== undefined && typeof parent.removeChild === 'function'`；创建前先确认 `<body>` 可挂。静态预览没有真实 body，动态能力在那里就该不可见。
 
-33. **「本机全绿」不等于「CI 全绿」**（D-157 实测）：干净 runner 缺三类本机才有的东西——被 `*.log` 误伤的测试 fixture（本机有、仓库没有）、按架构 §2.7 不入库的随包 `node.exe` / `yt-dlp.exe`、以及 Windows 检出的 CRLF（仓库 blob 是 LF，按 LF 分隔标记切分的许可测试会假失败）。修 CI 只补环境：把 fixture 入库、测试前用 `fetch-runtime --only=ytdlp/node` 取回二进制、在测试**输入边界**归一化行尾；**不许改断言、不许跳过用例、不许下调覆盖率门限**。
+33. **「本机全绿」不等于「CI 全绿」**（D-157 实测）：干净 runner 缺三类本机才有的东西——被 `*.log` 误伤的测试 fixture（本机有、仓库没有）、按架构 §2.7 不入库的随包 `node.exe` / `yt-dlp.exe`、以及 Windows 检出的 CRLF（仓库 blob 是 LF，按 LF 分隔标记切分的许可测试会假失败）。修 CI 只补环境：把 fixture 入库、测试前用 `fetch-runtime --only=ytdlp/node` 取回二进制、在测试**输入边界**归一化行尾；**不许改断言、不许跳过用例、不许下调覆盖率门限**。补充（D-158）：Windows 把带 `#!/usr/bin/env node` 的 `.mjs` 检出成 CRLF 时，Vitest 收集期会报 `SyntaxError: Invalid or unexpected token` 且错误指向测试文件的 `import` 行；用 `.gitattributes` 的 `*.mjs text eol=lf` 钉住行尾即可，不要改测试。
 
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 

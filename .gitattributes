@@ -1,0 +1,7 @@
+# Repository blobs are LF. GitHub Actions' windows-latest runner otherwise
+# checks text files out with CRLF, and a CRLF shebang in scripts/lib/*.mjs
+# makes esbuild/Vitest fail test collection with
+# "SyntaxError: Invalid or unexpected token" (D-158).
+# Pin ESM scripts to LF on every platform; other extensions are intentionally
+# untouched (CI run #2 proved they have no comparable failure).
+*.mjs text eol=lf

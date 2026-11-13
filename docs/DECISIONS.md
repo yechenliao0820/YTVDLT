@@ -1721,3 +1721,13 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 决策 | 只补环境，**不改任何断言、不跳过用例、不下调覆盖率门限**（铁律 6 / 8）。① `.gitignore` 加 `!tests/fixtures/*.log` 例外，两个 fixture 入库。② `ci.yml` 在 `Tests` 前加两个 `fetch-runtime` 步骤，只取 `--only=ytdlp` 与 `--only=node`（yt-dlp 经官方 SHA2-256SUMS 校验、下载器有 3 次重试与 180 s 超时）；**不下载 ffmpeg 的 76 MB 滚动 latest 包、不启用离线集成套件**，把 CI 的外网依赖压到最小。③ `about-licence.test.ts` 在**输入边界**把四个读入文件统一成 LF（行尾归一化），断言与比对基准一字未动。④ 同步修订 `ci.yml` 顶部「有意排除」注释、README 双语、CHANGELOG、维护手册坑 33、验收断言 `A-D157` 与外层手册副本。 |
 | 验证 | 本地：`pnpm typecheck` 5/5；`npm test` 139 文件 / 2000 项 0 failed，覆盖率四维 ≥70；`check-layering` 0 违规、`frozen-gate` PASS；e2e 31/31 + 5/5 反例、0 px；M5 验收 10/10 gates、allGreen=true；`handoff-check` 全 fresh。**CI run #2 需推送后确认**——本条不预写结论。 |
 | 未覆盖 | ① `fetch-runtime` 依赖 `nodejs.org` 与 yt-dlp GitHub Release 可达，外网抖动会让 CI 红（下载器有界重试但不保证成功）；② ffmpeg 与离线集成套件仍未进 CI，随包运行时的完整校验（`check-runtime`）也未在 CI 跑；③ Windows 检出的 CRLF 只在许可测试做了输入归一化，将来若新增按 LF 逐字比对的文件仍需在输入边界同样处理；④ CI 真实结论以 Actions 页为准，红了按日志定位，不得为变绿改测试结论。 |
+
+## D-158 · 2026-11-13 · CI run #2 剩余失败：CRLF shebang 与 `.mjs` 行尾钉扎
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-157 修复推送后，CI run #2（`43350166417`）仍为 failure：Tests 步骤只剩 **2 个测试文件在收集阶段失败**（`browser-discovery.test.ts` / `vitest-run-guard.test.ts`，均 `SyntaxError: Invalid or unexpected token`，位置指向 `import {` 行），137 个文件通过；Layering / Frozen 被 skip。前 8 步（含两个新增 `fetch-runtime`）全 success，说明 D-157 的三类缺资产已解决。 |
+| 根因 | Windows runner 的 `actions/checkout` 把 `scripts/lib/find-browser.mjs` 与 `scripts/lib/vitest-run.mjs` 检出成 CRLF；这两个文件以 shebang 开头，CRLF 的 shebang 使 esbuild / Vitest 转换时报语法错，错误被归因到测试文件的 import 行。仓库 blob 与本机工作树都是 LF，故本地 2000 项全绿。**本地把这两个 `.mjs` 临时转成 CRLF 精确复现同样 2 个 SyntaxError、恢复后工作树干净**——根因是实测而非猜测。 |
+| 决策 | 新增 `.gitattributes` 写 `*.mjs text eol=lf`：Git 在 checkout 时对所有平台强制 LF，优先级高于 runner 的 `core.autocrlf`，一次解决 shebang 问题且**不动任何源码、断言、用例或门限**（铁律 6 / 8）。范围刻意只覆盖 `.mjs`——run #2 已证明其它扩展名没有同类失败，避免把现存 CRLF 文件卷进一次大规模行尾规范化。同步追加 DECISIONS / CHANGELOG / README 双语 / 手册坑 33 / 验收 `A-D158` / 外层手册副本。 |
+| 验证 | 本地：`pnpm typecheck` 5/5；`npm test` 139 文件 / 2000 项 0 failed，覆盖率四维 ≥70；`check-layering` 0、`frozen-gate` PASS；e2e 31/31 + 5/5 反例 0 px；M5 验收 10/10 gates；`handoff-check` 全 fresh。**CI run #3 需推送后确认**——本条不预写结论。 |
+| 未覆盖 | ① 只钉住 `.mjs`；若将来新增带 shebang 的其它扩展名脚本，或新增按 LF 逐字比对的文件，仍需在输入边界或 `.gitattributes` 同样处理；② CI 的外网下载依赖（yt-dlp / node.exe Release）仍在，网络抖动会让 run 红；③ ffmpeg / 离线集成 / 完整 `check-runtime` 仍未进 CI；④ CI 真实结论以 Actions 页为准，红了按日志定位，不得为变绿改测试结论。 |
