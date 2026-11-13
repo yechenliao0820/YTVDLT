@@ -840,7 +840,23 @@
     var autostart = doc.getElementById('settings-autostart');
     if (autostart !== null) {
       autostart.checked = settingsInjected().autostart === true;
-      autostart.addEventListener('change', function () { emit('autostart', autostart.checked); });
+      // D-166: this used to call `emit()`, which only wrote a debug <pre> — the
+      // switch was decoration. Persist through the same channel the other
+      // switches use; the main process writes the HKCU Run entry first and only
+      // then the config, so a failure leaves the toggle telling the truth.
+      autostart.addEventListener('change', function () {
+        var bridge = global.ytvdltBridge;
+        if (bridge && typeof bridge.invoke === 'function') {
+          try {
+            var pending = bridge.invoke('ytvdlt:settings:set', { autostart: autostart.checked });
+            if (pending && typeof pending.catch === 'function') {
+              pending.catch(function () { autostart.checked = !autostart.checked; });
+            }
+          } catch (error) {
+            autostart.checked = !autostart.checked;
+          }
+        }
+      });
     }
     // 0.2.1 (D-93 / D-94): the two update switches persist through SETTINGS_SET,
     // which is the only channel that actually writes config.json.

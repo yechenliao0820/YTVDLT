@@ -43,6 +43,16 @@ export interface QueueIntakeGate {
   pause(): void;
   resume(): void;
   isPaused(): boolean;
+  /**
+   * D-171 (optional): wait until no task occupies a slot.
+   *
+   * `pause()` only stops NEW work — the running transfers keep their handles and
+   * keep writing bytes while the updater renames `yt-dlp.exe` underneath them.
+   * On Windows a rename over a file an active child has open fails, which is how
+   * "component update" used to become `swap-failed` mid-download. Returns
+   * `false` on timeout; the caller must then NOT touch the file.
+   */
+  waitForIdle?(timeoutMs: number): Promise<boolean>;
 }
 
 /** `electron-updater` generic feed. */

@@ -65,17 +65,18 @@
 | 项 | 值 |
 |---|---|
 | 触发 | 业主 2026-11-12 说「打包吧」（铁律 9 的点名项） |
-| 版本号 | 打包时临时把根 `package.json` 与 `apps/desktop/package.json` 改成 `0.3.0`（`0.2.9` 按十进制进位），**打包后立刻 `git checkout --` 还原为 `0.2.9`**；仓库的发版基准没有变 |
-| 目标 | **只打 NSIS 安装版**（`--win nsis`）；未打便携版、未创建 Release |
+| 版本号 | 打包时临时把根 `package.json` 与 `apps/desktop/package.json` 改成 `0.3.0`（`0.2.9` 按十进制进位），**打包后立刻 `git checkout --` 还原**——那一刻仓库基准仍停在 `0.2.9`。**发布（2026-11-12）后基准已更新为 `0.3.0`**：两处 `version` 已随提交改为 `0.3.0`；**下次打包前须先升 `0.3.1`**，否则会再打出一个 0.3.0 的包 |
+| 目标 | **只打 NSIS 安装版**（`--win nsis`）；未打便携版；**打包时**未创建 Release（发布结果见下方「发布」行） |
 | 命令 | `node scripts/build-desktop.mjs` → `electron-builder --config apps/desktop/electron-builder.yml --config.directories.output=dist-0.3.0 --win nsis --publish never` |
 | 产物 | `dist-0.3.0/YTVDLT Setup 0.3.0.exe` — **226,282,986 B** |
 | SHA-256 | `5d93f92307e3b91ac72e5fa372332caa8766e265d0709254dd87d38287940af3` |
 | blockmap | `YTVDLT Setup 0.3.0.exe.blockmap` — 237,729 B |
-| latest.yml | `version: 0.3.0`，sha512 已写入，`releaseDate` 2026-11-12T05:54:50Z（本地文件，未上传） |
+| latest.yml | `version: 0.3.0`，sha512 已写入，`releaseDate` 2026-11-12T05:54:50Z；**已作为 Release 资产上传**（341 B） |
 | 版本资源 | `win-unpacked/YTVDLT.exe` FileVersion **0.3.0** / ProductVersion **0.3.0.0**；Setup 文件版本 0.3.0 |
 | asar | `win-unpacked/resources/app.asar` — 1,292,817 B；直接 grep 命中 `settings-template-save` 与 `queue.precheck.confirm.title`，确认 D-139 的 UI 真的进了包 |
 | 运行时 | `resources/runtime/` 含 `aria2c.exe` / `ffmpeg/` / `node.exe` / `runtime-manifest.json` / `SHA2-256SUMS` |
 | 签名 | 未签名（无证书），SmartScreen 首次运行会提示 |
-| 未做 | **没有启动真机窗口点选**（安装包已产出但未运行）；未打便携版；未上传任何 Release 资产 |
+| 未做 | **没有启动真机窗口点选**（安装包已产出但未运行）；未打便携版；**打包时**未上传任何 Release 资产（上传发生在随后的发布步骤，见下行） |
+| 发布 | **2026-11-12 创建 GitHub Release `v0.3.0`**（`published_at` 05:58:56Z），上传 `YTVDLT.Setup.0.3.0.exe`（226,282,986 B，Release `digest` 与本地 SHA-256 逐字符一致）/ `YTVDLT.Setup.0.3.0.exe.blockmap`（237,729 B）/ `latest.yml`（341 B）；说明英文（铁律 14）。仓库版本基准自此为 `0.3.0` |
 | 产物命名差异 | 本地产物是 `YTVDLT Setup 0.3.0.exe`（**空格**），但 **GitHub 会把资产名里的空格规范化成点号**，上传后实际是 `YTVDLT.Setup.0.3.0.exe`。`latest.yml` 首次上传时仍写空格名，会导致 electron-updater 拼出 404；已改成点号并重传，三条下载链接 HEAD 全部 200。**以后发版：以 GitHub 返回的资产名为准，`latest.yml` 必须写资产名而不是本地文件名** |
 

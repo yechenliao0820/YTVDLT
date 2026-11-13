@@ -199,6 +199,19 @@ export interface HttpPort {
   getBytes(url: string, opts?: HttpFetchOptions): Promise<Uint8Array>;
 }
 
+/**
+ * D-166: the "start with Windows" switch.
+ *
+ * Deliberately boolean-only: the registry path, the value name and the quoted
+ * command line are decided by the Windows adapter (`planAutostart`), not by the
+ * renderer and not by the channel layer. `read()` exists so the settings toggle
+ * can show the REAL state instead of trusting `config.json`.
+ */
+export interface ISystemStartupPort {
+  apply(enabled: boolean): Promise<{ ok: boolean; reason?: string }>;
+  read(): Promise<boolean>;
+}
+
 export interface CorePorts {
   fs: FileSystemPort;
   hash: HashPort;
@@ -210,4 +223,6 @@ export interface CorePorts {
   shell?: IShellPort;
   /** M5 optional (D-67): absent means "this build cannot fetch updates". */
   http?: HttpPort;
+  /** D-166 optional: absent means "this platform cannot register a startup entry". */
+  systemStartup?: ISystemStartupPort;
 }

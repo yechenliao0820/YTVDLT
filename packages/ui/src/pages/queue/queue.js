@@ -293,6 +293,8 @@
     return {
       id: item.id,
       state: item.state,
+      // D-164: "waiting for a slot" is not a state; the DTO says it explicitly.
+      pending: item.pending === true,
       kind: item.kind || 'video',
       title: item.title || item.id,
       uploader: item.uploader || '—',
@@ -1353,12 +1355,15 @@
     var running = task.state === 'Running' || task.state === 'FetchingInfo';
     var retryable = task.state === 'Error' || task.state === 'Canceled';
     if (live.active) {
-      // D-76: match what the queue can actually do. `TaskQueue.cancel()` drops a
-      // pending (Queued) task and kills a Running one; during FetchingInfo /
-      // ReadyWithInfo there is no cancellable handle, so offering the button
-      // would only produce a refusal.
+      // D-76 / D-162 / D-164: match what the queue can actually do.
+      //  - `Running` — the transfer has a kill handle;
+      //  - `FetchingInfo` — the probe now carries an AbortSignal, so cancelling
+      //    during "解析中" really kills the child (before D-162 it refused);
+      //  - `pending` — parked in the FIFO, `TaskQueue.cancel()` drops it.
+      // `ReadyWithInfo` still has no handle: it is a zero-length phase that
+      // ends in `Running` immediately, so it is not offered.
       return {
-        cancel: task.state === 'Running' || task.state === 'Queued',
+        cancel: task.state === 'Running' || task.state === 'FetchingInfo' || task.pending === true,
         retry: retryable,
         // D-120: live builds expose "open file" on the card so the freshness
         // check is reachable where the user sees the finished task. Injected

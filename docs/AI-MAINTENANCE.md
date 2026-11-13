@@ -399,6 +399,8 @@ API）设置。不要因为 Actions 页是绿的就以为 `main` 被保护了；
 
 33. **「本机全绿」不等于「CI 全绿」**（D-157 实测）：干净 runner 缺三类本机才有的东西——被 `*.log` 误伤的测试 fixture（本机有、仓库没有）、按架构 §2.7 不入库的随包 `node.exe` / `yt-dlp.exe`、以及 Windows 检出的 CRLF（仓库 blob 是 LF，按 LF 分隔标记切分的许可测试会假失败）。修 CI 只补环境：把 fixture 入库、测试前用 `fetch-runtime --only=ytdlp/node` 取回二进制、在测试**输入边界**归一化行尾；**不许改断言、不许跳过用例、不许下调覆盖率门限**。补充（D-158）：Windows 把带 `#!/usr/bin/env node` 的 `.mjs` 检出成 CRLF 时，Vitest 收集期会报 `SyntaxError: Invalid or unexpected token` 且错误指向测试文件的 `import` 行；用 `.gitattributes` 的 `*.mjs text eol=lf` 钉住行尾即可，不要改测试。
 
+34. **静态页的 CSP 必须放行 `connect-src file:`**（D-170 实测）：`packages/ui/src/fixtures/probe-fixture.js` 用**同步 XHR** 读同目录的 fixture JSON，这是 8 个页面唯一的数据来源。把 CSP 写成 `connect-src 'none'`（「页面不联网」的直觉写法）会让页面自己的数据源失效：`XMLHttpRequest` 抛异常 → 脚本停住 → DOM 停在初始态，视觉上不白屏，**只有 `--dump-dom` 快照能看出来**。正确写法是 `connect-src 'self' file: data:`：`file:` 给页面自己，`http(s)` 仍然被拦（这才是安全目标）。排查手法：截图基线像素没变但 DOM 快照整片退化成初始态 → 先怀疑 CSP 掐了脚本，别先去查渲染。
+35. **快照里绝不能出现媒体 URL，且写盘不能靠「每次都写」**（D-163 实测）：`MediaInfo.formats[].url` / `subtitles[].url` 是带 `sig`/`expire` 的签名 CDN 链接，任何业务代码都不读它们（格式化选择器只读 id/尺寸/码率，字幕规划只读 lang/ext，渲染层 DTO 已剥 url），所以落盘前必须过 `stripCredentialUrls()`。配套的指纹短路有个**必须记住的初值细节**：空队列的指纹是空串，`lastPersistedFingerprint` 必须以 `null` 起手，写成 `''` 会让 `restoreTasks()` 的第一次写回被当成「无变化」而跳过——D-159 的「损坏快照先备份再覆盖」当场失效，测试会红在 `task-store.test.ts` 的 D-159 用例上。
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 

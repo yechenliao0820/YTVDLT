@@ -21,7 +21,7 @@ import type {
   PlaylistPreviewDto, PlaylistPreviewCancelDto, PlaylistBatchEnqueueDto,
   PlaylistPrecheckReport,
   ExtractorCatalogResult, UrlSupportResult, ExtractorCatalogFailure,
-  SupportedSitesDto, UrlSupportCheckDto, SpawnAbortSignal,
+  SupportedSitesDto, UrlSupportCheckDto, SpawnAbortSignal, ISystemStartupPort,
 } from '@ytvdlt/shared';
 import {
   ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES, STAR_PROMPT_ACTIONS,
@@ -52,6 +52,8 @@ import type { StarPromptPort } from './star-prompt-service.js';
 export interface TaskListPort {
   list(): readonly TaskRecord[];
   get(taskId: string): TaskRecord | undefined;
+  /** D-164 (optional): parked in the FIFO waiting for a slot. */
+  isPending?(taskId: string): boolean;
 }
 
 export interface TaskDetailPort {
@@ -237,6 +239,8 @@ export interface M5ChannelDeps {
   readonly templates: CommandTemplateStore;
   readonly config: IConfigStore;
   readonly systemAppearance: SystemAppearancePort;
+  /** D-166: absent on non-Windows / test builds; SETTINGS_SET then refuses. */
+  readonly systemStartup?: ISystemStartupPort;
   /** Optional hook: the Electron layer repaints native windows (title bar). */
   readonly onAppearanceChanged?: (snapshot: AppearanceDto) => void;
   /** D-67: absent means the build ships no updater (button stays disabled). */
@@ -307,6 +311,8 @@ export interface AppInfoDto {
 export interface TaskListItemDto {
   readonly id: string;
   readonly state: string;
+  /** D-164: parked in the FIFO; present only when true (old snapshots stay lean). */
+  readonly pending?: boolean;
   readonly kind: string;
   readonly title: string;
   readonly uploader: string | null;
@@ -355,6 +361,8 @@ export interface TaskListItemDto {
 export interface TaskDetailDto {
   readonly id: string;
   readonly state: string;
+  /** D-164: parked in the FIFO; present only when true. */
+  readonly pending?: boolean;
   readonly kind: string;
   readonly title: string;
   /** Masked: `token=***REDACTED***`, never the raw signed URL. */
@@ -387,6 +395,8 @@ export interface AppearanceDto {
   /** 0.2.1 (D-93 / D-94): two independent startup-check switches. */
   readonly autoCheckAppUpdate: boolean;
   readonly autoCheckEngineUpdate: boolean;
+  /** D-166: mirrors `general.autostart` (the HKCU Run entry). */
+  readonly autostart: boolean;
   readonly systemAccent: string | null;
   readonly prefersDark: boolean;
   readonly prefersReducedMotion: boolean;
@@ -416,7 +426,7 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   [IPC_CHANNELS.SETTINGS_GET]: [],
   [IPC_CHANNELS.SETTINGS_SET]: [
     'theme', 'accent', 'motion', 'language', 'privateMode',
-    'autoCheckAppUpdate', 'autoCheckEngineUpdate',
+    'autoCheckAppUpdate', 'autoCheckEngineUpdate', 'autostart',
   ],
   [IPC_CHANNELS.COMPONENT_STATUS]: [],
   [IPC_CHANNELS.COMPONENT_UPDATE]: [],
@@ -598,10 +608,15 @@ export function toTaskListItem(
   record: TaskRecord,
   thumbnailPath: string | null = null,
   fileState?: LocalFileState,
+  pending = false,
 ): TaskListItemDto {
   return {
     id: record.id,
     state: record.state,
+    // D-164: `state` alone cannot express "waiting for a slot" — a parked task
+    // is `Idle`, exactly like a restored task that will never start on its own.
+    // The UI needs the distinction to offer a cancel that actually works.
+    ...(pending ? { pending: true } : {}),
     kind: record.kind,
     title: record.mediaInfo?.title ?? record.id,
     uploader: record.mediaInfo?.uploader ?? null,
@@ -639,10 +654,11 @@ export function toTaskListItem(
 }
 
 /** Detail view keeps the URL but masked — same rule as the error report. */
-export function toTaskDetail(record: TaskRecord): TaskDetailDto {
+export function toTaskDetail(record: TaskRecord, pending = false): TaskDetailDto {
   return {
     id: record.id,
     state: record.state,
+    ...(pending ? { pending: true } : {}),
     kind: record.kind,
     title: record.mediaInfo?.title ?? record.id,
     url: maskUrlSecrets(record.url),
@@ -688,6 +704,7 @@ function readAppearance(deps: M5ChannelDeps): AppearanceDto {
     motion: normalizeMotionMode(deps.config.get('general', 'motion')),
     language: String(deps.config.get('general', 'language')).toLowerCase().startsWith('en') ? 'en' : 'zh-CN',
     privateMode: deps.config.get('general', 'privateMode') === true,
+    autostart: deps.config.get('general', 'autostart') === true,
     autoCheckAppUpdate: deps.config.get('advanced', 'autoCheckAppUpdate') !== false,
     autoCheckEngineUpdate: deps.config.get('advanced', 'autoCheckEngineUpdate') !== false,
     systemAccent: deps.systemAppearance.accent(),
@@ -890,6 +907,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
         record,
         deps.thumbnails === undefined ? null : deps.thumbnails.pathOf(record.id),
         states[record.id],
+        deps.queue.isPending?.(record.id) === true,
       )),
     };
   });
@@ -899,7 +917,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     const taskId = assertTaskId(record['taskId']);
     const task = deps.queue.get(taskId);
     if (task === undefined) return { found: false, task: null };
-    return { found: true, task: toTaskDetail(task) };
+    return { found: true, task: toTaskDetail(task, deps.queue.isPending?.(taskId) === true) };
   });
 
   handlers.set(IPC_CHANNELS.TASK_ACTION, async (payload) => {
@@ -1902,6 +1920,22 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       if (typeof value !== 'boolean') throw new Error(`[m5-ipc] invalid ${key}`);
       advancedPatch[key] = value;
     }
+    // D-166: the registry is written FIRST. If `reg` fails, the config keeps
+    // saying what is actually true on disk instead of promising a startup entry
+    // that does not exist.
+    if (record['autostart'] !== undefined) {
+      if (typeof record['autostart'] !== 'boolean') {
+        throw new Error('[m5-ipc] autostart must be a boolean');
+      }
+      const port = deps.systemStartup;
+      if (port === undefined) throw new Error('[m5-ipc] autostart is not available in this build');
+      const applied = await port.apply(record['autostart']);
+      if (!applied.ok) {
+        throw new Error(`[m5-ipc] autostart failed: ${applied.reason ?? 'unknown'}`);
+      }
+      patch['autostart'] = record['autostart'];
+    }
+
     if (Object.keys(patch).length > 0) await deps.config.setDomain('general', patch);
     if (Object.keys(advancedPatch).length > 0) await deps.config.setDomain('advanced', advancedPatch);
     const snapshot = readAppearance(deps);

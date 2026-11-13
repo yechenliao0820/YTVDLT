@@ -295,7 +295,7 @@ download output (D-144), truly atomic config writes (D-145), and a
 detail-page cancel button aligned with what the queue can actually do
 (D-146) — is described in
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-146).
+[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-161).
 
 ## Engineering and verification
 
@@ -333,17 +333,29 @@ the same gates:
 | Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** (the detail-page cancel fix applies to live mode only) |
 | `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
 
-The 2026-11-13 audit-and-repair round (D-150…D-158, not yet released) added
+The 2026-11-13 audit-and-repair rounds (D-150…D-171, not yet released) added
 user-cancellable pre-checks, snapshot write/validation hardening, IPv6
 allowlisting, a bounded stdout line-assembly buffer, component-updater network
-policy and GitHub Actions CI. It passed the same gates:
+policy and GitHub Actions CI, then followed up with backup-before-write on a
+corrupt task snapshot, per-`operationId` pre-check cancellation, a mirror trust
+model, deep snapshot validation and a branch-protection checklist. A further
+round closed ten external-audit findings: a probe can now be cancelled (the
+metadata child is killed through the same abort surface as the timeout), the
+saved snapshot no longer contains signed CDN URLs, parked tasks expose a real
+cancel, `network.maxRate` actually reaches `-r`, the start-with-Windows switch
+writes the HKCU Run key, the dev-only fixture IPC channels are absent from
+packaged builds, `config:set` writes the whitelisted keys instead of answering
+`ok` unconditionally, the bundled runtime is verified once at start-up, every
+page carries a Content-Security-Policy and denies all session permissions, and a
+component update waits for the queue to drain before swapping a file. They
+passed the same gates:
 
 | Gate | Result |
 |---|---|
 | `pnpm typecheck` | 5/5 workspace packages successful |
-| Unit / contract / integration tests | **2,000 passed across 139 files, 0 failed** |
-| Coverage | statements 89.44% / branches 86.38% / functions 92.22% / lines 89.44% (floor 70, not raised) |
-| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** |
+| Unit / contract / integration tests | **2,038 passed across 139 files, 0 failed** |
+| Coverage | statements 90.13% / branches 87.07% / functions 93.27% / lines 90.13% (floor 70, not raised) |
+| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift; 31 DOM baselines rebuilt for the CSP meta line, zero PNG baselines changed** |
 | `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
 | M5 acceptance | 10/10 gates PASS, allGreen=true |
 

@@ -13,7 +13,7 @@
 import type {
   DownloadEngine, MediaInfo, PlaylistInfo, DownloadRequest, EngineEvent,
   CancelHandle, UpdateResult, ProbeOptions, CorePorts, AppError, ErrorContext,
-  Artifact, EngineUpdateSource, QueueIntakeGate,
+  Artifact, EngineUpdateSource, QueueIntakeGate, ProbeControl,
   ExtractorCatalogResult, UrlSupportResult,
 } from '@ytvdlt/shared';
 import {
@@ -159,7 +159,7 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
     return result.stdout.trim().split(/\r?\n/)[0] ?? '';
   }
 
-  async probe(url: string, opts: ProbeOptions): Promise<MediaInfo> {
+  async probe(url: string, opts: ProbeOptions, control?: ProbeControl): Promise<MediaInfo> {
     let argv: string[];
     try {
       assertAbsoluteRuntimePaths(this.deps.enginePath, opts.jsRuntimePath);
@@ -183,6 +183,10 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
       // affected while a runaway body is turned into a bounded failure.
       maxStdoutBytes: METADATA_MAX_STDOUT_BYTES,
       maxStderrBytes: METADATA_MAX_STDERR_BYTES,
+      // D-162: a probe the user cancelled must die with its subprocess. Same
+      // kill path as the timeout (the adapter owns it), so there is exactly one
+      // implementation of "stop this child".
+      ...(control?.signal === undefined ? {} : { signal: control.signal }),
     };
     assertSafeSpawnOptions(spawnOptions);
 

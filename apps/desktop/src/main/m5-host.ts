@@ -21,6 +21,7 @@ import {
 } from './m5-channels.js';
 import type { IpcGateway, IpcHandler } from './ipc-gateway.js';
 import type { LocalFileStatusPort } from './local-file-status.js';
+import type { ISystemStartupPort } from '@ytvdlt/shared';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
 import { assertHttpUrl } from '@ytvdlt/engine-ytdlp';
 import { createTxtImportService } from './txt-import-service.js';
@@ -34,6 +35,8 @@ import { createStarPromptService } from './star-prompt-service.js';
 export interface M5HostOptions extends M4HostOptions {
   /** OS probe (nativeTheme + registry accent); injected so tests stay offline. */
   readonly systemAppearance: SystemAppearancePort;
+  /** D-166: HKCU Run entry writer; absent on non-Windows builds. */
+  readonly systemStartup?: ISystemStartupPort;
   /** Called after SETTINGS_SET so the Electron layer can repaint native chrome. */
   readonly onAppearanceChanged?: (snapshot: AppearanceDto) => void;
   /** Resolved data directory (portable vs %APPDATA%%) — shown in the About box. */
@@ -203,6 +206,8 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
   const queue: TaskListPort = {
     list: () => m4.task.queue.list(),
     get: (taskId: string) => m4.task.queue.get(taskId),
+    // D-164: the queue owns the FIFO; the channel layer must not guess.
+    isPending: (taskId: string) => m4.task.queue.isPending?.(taskId) === true,
   };
 
   // Live playlist probe: the real yt-dlp engine, an opaque UUID ticket and the
@@ -262,6 +267,7 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     templates: m4.commandTemplates,
     config: m4.task.config,
     systemAppearance: options.systemAppearance,
+    ...(options.systemStartup === undefined ? {} : { systemStartup: options.systemStartup }),
     ...(options.onAppearanceChanged === undefined ? {} : { onAppearanceChanged: options.onAppearanceChanged }),
     ...(options.componentUpdate === undefined ? {} : { componentUpdate: options.componentUpdate }),
     ...(options.appUpdate === undefined ? {} : { appUpdate: options.appUpdate }),

@@ -189,22 +189,34 @@ function pageOf(sandbox: Record<string, unknown>): { availability: Availability 
 }
 
 describe('D-146 · live cancel availability matches what TaskQueue can do', () => {
-  const detailFor = (state: string) => ({
+  const detailFor = (state: string, pending = false) => ({
     found: true,
-    task: { id: 't9', state, percent: 0, errorCode: null, artifacts: [], url: 'https://example.org/v' },
+    task: {
+      id: 't9', state, percent: 0, errorCode: null, artifacts: [], url: 'https://example.org/v',
+      ...(pending ? { pending: true } : {}),
+    },
   });
 
-  it('live: FetchingInfo / ReadyWithInfo keep cancel inert — no handle, cancel() would refuse', async () => {
-    for (const state of ['FetchingInfo', 'ReadyWithInfo']) {
-      const { actions, flush } = boot({ live: true, taskId: 't9', detail: detailFor(state) });
-      await flush();
-      expect(actions.get('cancel')?.getAttribute('aria-disabled')).toBe('true');
-    }
+  // D-162 REVISES the D-146 rule: the probe now carries an AbortSignal, so
+  // `FetchingInfo` is cancellable and the button must be armed. `ReadyWithInfo`
+  // is still inert — it is a zero-length phase with no process to kill.
+  it('live: FetchingInfo arms cancel (D-162 probe handle); ReadyWithInfo stays inert', async () => {
+    const fetching = boot({ live: true, taskId: 't9', detail: detailFor('FetchingInfo') });
+    await fetching.flush();
+    expect(fetching.actions.get('cancel')?.getAttribute('aria-disabled')).toBe('false');
+
+    const ready = boot({ live: true, taskId: 't9', detail: detailFor('ReadyWithInfo') });
+    await ready.flush();
+    expect(ready.actions.get('cancel')?.getAttribute('aria-disabled')).toBe('true');
   });
 
-  it('live: Running / Queued arm cancel — the queue page rule (D-76), now shared', async () => {
-    for (const state of ['Running', 'Queued']) {
-      const { actions, flush } = boot({ live: true, taskId: 't9', detail: detailFor(state) });
+  // D-164 REVISES the D-76 rule: the queue's parked-task marker is `pending`,
+  // not the non-existent `Queued` state string that never matched anything.
+  it('live: Running and FIFO-parked (pending) tasks arm cancel', async () => {
+    for (const model of [{ state: 'Running', pending: false }, { state: 'Idle', pending: true }]) {
+      const { actions, flush } = boot({
+        live: true, taskId: 't9', detail: detailFor(model.state, model.pending),
+      });
       await flush();
       expect(actions.get('cancel')?.getAttribute('aria-disabled')).toBe('false');
     }
@@ -218,12 +230,15 @@ describe('D-146 · live cancel availability matches what TaskQueue can do', () =
     expect(calls.filter((entry) => entry.channel === 'ytvdlt:task:action')).toHaveLength(0);
   });
 
-  it('availability contract: live branch drops FetchingInfo / ReadyWithInfo, keeps Running / Queued', () => {
+  it('availability contract: live branch = Running | FetchingInfo | pending', () => {
     const { sandbox } = boot({ live: true, taskId: 't9', detail: detailFor('Running') });
     const { availability } = pageOf(sandbox);
     expect(availability({ state: 'Running' }, true).cancel).toBe(true);
-    expect(availability({ state: 'Queued' }, true).cancel).toBe(true);
-    expect(availability({ state: 'FetchingInfo' }, true).cancel).toBe(false);
+    expect(availability({ state: 'FetchingInfo' }, true).cancel).toBe(true);
+    expect(availability({ state: 'Idle', pending: true }, true).cancel).toBe(true);
+    // A restored-but-never-run task is also `Idle`; without the marker it must
+    // NOT offer a cancel the queue would refuse.
+    expect(availability({ state: 'Idle' }, true).cancel).toBe(false);
     expect(availability({ state: 'ReadyWithInfo' }, true).cancel).toBe(false);
   });
 
