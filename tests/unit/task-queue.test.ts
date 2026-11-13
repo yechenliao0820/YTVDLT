@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   canTransition, assertTransition, allTransitions, TASK_STATES,
-  LEGAL_TRANSITIONS, IllegalTaskTransitionError, TaskQueue, HistoryStore,
+  LEGAL_TRANSITIONS, IllegalTaskTransitionError, TaskQueue, HistoryStore, TaskStore,
 } from '@ytvdlt/core';
 import type {
   DownloadEngine, EngineEvent, DownloadRequest, HistoryEntry, MediaInfo, TaskRecord,
@@ -487,5 +487,77 @@ describe('D-101 · 重复下载：给出独立文件名，而不是报错', () =
     expect(finished?.state).toBe('Completed');
     expect(finished?.error).toBeNull();
     expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(title)s.%(ext)s');
+  });
+});
+
+// --- T2 · persistSnapshot failure is visible, never fatal -------------------
+
+describe('T2 · persistSnapshot failure is visible but never fatal', () => {
+  /**
+   * Queue wired to a TaskStore whose `tasks.json` write fails while `fail` is
+   * set. ONLY the snapshot path is sabotaged: history/config writes keep
+   * working, so the task itself completes and the test isolates exactly the
+   * persist-failure visibility being pinned.
+   */
+  const setupFailingStore = () => {
+    const mem = createInMemoryPorts();
+    mem.state.files.set(PRIMARY, 'video-bytes');
+    mem.state.files.set(artifactFor('t1'), 'video-bytes');
+    mem.state.files.set(artifactFor('t2'), 'video-bytes');
+    const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    let fail = true;
+    mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (fail && path.endsWith('tasks.json')) {
+        throw new Error('simulated snapshot write failure');
+      }
+      await inner(path, text);
+    };
+    const engineState = newEngineState('completed');
+    const queue = new TaskQueue({
+      ports: mem.ports, engine: fakeEngine(engineState), verifier: okVerifier(),
+      history: new HistoryStore({ ports: mem.ports }), taskStore: new TaskStore({ ports: mem.ports }),
+      jsRuntimePath: 'C:/runtime/node.exe', persistIntervalMs: 0,
+    });
+    return { mem, queue, setFail: (value: boolean) => { fail = value; } };
+  };
+
+  const warnings = (mem: ReturnType<typeof createInMemoryPorts>): string[] =>
+    mem.state.logLines.filter((line) => line.includes('snapshot.persist.failed'));
+
+  it('a completed download survives a failing store and emits exactly ONE warning', async () => {
+    const { mem, queue } = setupFailingStore();
+    await queue.enqueue(record('t1'));
+    await tick();
+
+    // The download path is untouched by the persistence failure.
+    const finished = queue.get('t1');
+    expect(finished?.state).toBe('Completed');
+    expect(finished?.error).toBeNull();
+    // ONE warning per failure episode — not one per persist attempt
+    // (persistIntervalMs: 0 makes the progress tick + the final finally both
+    // persist; only the first failure may log).
+    expect(warnings(mem)).toHaveLength(1);
+    const line = JSON.parse(warnings(mem)[0] as string) as {
+      ts: string; level: string; scope: string; event: string; payload: { error: string };
+    };
+    expect(line.level).toBe('WARNING');
+    expect(line.scope).toBe('task-queue');
+    expect(line.event).toBe('snapshot.persist.failed');
+    expect(line.payload.error).toContain('simulated snapshot write failure');
+  });
+
+  it('a successful save resets the episode, so the NEXT failure warns again', async () => {
+    const { mem, queue, setFail } = setupFailingStore();
+    setFail(false);
+    await queue.enqueue(record('t1'));
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Completed');
+    expect(warnings(mem)).toHaveLength(0);
+
+    setFail(true);
+    await queue.enqueue(record('t2'));
+    await tick();
+    expect(queue.get('t2')?.state).toBe('Completed');
+    expect(warnings(mem)).toHaveLength(1);
   });
 });

@@ -88,6 +88,17 @@ export const IPC_CHANNELS = {
   // a "list" channel.
   SUPPORTED_SITES: 'ytvdlt:sites:list',
   URL_SUPPORT_CHECK: 'ytvdlt:sites:check',
+  // T5 (append-only): user-level cancellation + progress for the URL pre-check.
+  //   CANCEL takes NO payload on purpose — the semantics are "stop the current
+  //   in-flight pre-check", not "cancel batch #N", so the renderer never needs
+  //   (and never receives) a batch id, a URL list or a ticket. This is the same
+  //   zero-input rule as APP_INFO / STAR_PROMPT_CHECK.
+  //   STATUS takes NO payload either and answers `{active, checked, total}` for
+  //   the batch pre-checks; the dialogs poll it (the project's established
+  //   pattern for progress — APP_UPDATE_STATUS is polled by design too), so no
+  //   event-push machinery and no listener that could hang without a teardown.
+  URL_SUPPORT_CHECK_CANCEL: 'ytvdlt:sites:checkCancel',
+  URL_SUPPORT_CHECK_STATUS: 'ytvdlt:sites:checkStatus',
   // D-148 (append-only): the "Star on GitHub" nudge. Two channels on purpose:
   //   CHECK  takes NO payload (same zero-input rule as APP_INFO) — the renderer
   //          can only ask "may the prompt show now?", the frequency decision

@@ -12,7 +12,7 @@
  * validated URLs from THAT pick. Enqueue re-validates every one of them with
  * the same engine whitelist before handing them to `TaskQueue.enqueueBatch()`.
  */
-import type { DownloadKind, FormatDomain } from '@ytvdlt/shared';
+import type { DownloadKind, FormatDomain, SpawnAbortSignal } from '@ytvdlt/shared';
 import {
   parseTxtUrlList, TXT_IMPORT_LIMITS,
   type TxtImportItem, type TxtImportParseResult,
@@ -77,6 +77,15 @@ export interface TxtImportEnqueueOptions {
   readonly quality?: FormatDomain['quality'];
   readonly audioQuality?: FormatDomain['audioQuality'];
   readonly audioFormat?: 'auto' | 'mp3' | 'm4a';
+  /**
+   * T5 (append-only): the user's cancellation for this batch's pre-check.
+   * Forwarded to `precheckBatch`, which stops starting new checks and lets
+   * in-flight ones settle as CANCELLED; when it fires, this service returns
+   * the `cancelled` result WITHOUT calling `enqueueBatch`.
+   */
+  readonly precheckSignal?: SpawnAbortSignal;
+  /** T5: line-wise pre-check progress for the renderer's "checked / total". */
+  readonly onPrecheckProgress?: (checked: number, total: number) => void;
 }
 
 export interface TxtImportEnqueueDto {
@@ -100,6 +109,13 @@ export interface TxtImportEnqueueDto {
    * look", which the UI must say out loud instead of implying coverage.
    */
   readonly precheck?: PrecheckSummary;
+  /**
+   * T5 (append-only): true when the user cancelled the in-flight pre-check and
+   * NOTHING was enqueued by this call. Cancelling is the user saying "stop",
+   * not the gate misjudging a link, so the batch must not enqueue; the gate
+   * itself still fails open for a CANCELLED verdict. Absent on older replies.
+   */
+  readonly cancelled?: boolean;
 }
 
 export interface TxtImportServicePort {
@@ -277,12 +293,36 @@ export function createTxtImportService(options: TxtImportServiceOptions): TxtImp
       // INDETERMINATE looked identical to one where all 6 were confirmed.
       let precheck: PrecheckSummary | undefined;
       if (options.siteSupport !== undefined && accepted.length > 0) {
-        const outcome = await precheckBatch(accepted, options.siteSupport);
+        const outcome = await precheckBatch(accepted, options.siteSupport, {
+          ...(input.precheckSignal === undefined ? {} : { signal: input.precheckSignal }),
+          ...(input.onPrecheckProgress === undefined
+            ? {} : { onProgress: input.onPrecheckProgress }),
+        });
         for (const block of outcome.blocked) {
           failures.push({ url: block.url, reason: block.code });
         }
         precheck = outcome.summary;
         enqueueable = [...outcome.allowed];
+        // T5: the user cancelled the pre-check — the batch stops here. Nothing
+        // is enqueued, no download task is created; the caller reports the
+        // cancellation from the `cancelled` flag (and its own signal view).
+        if (input.precheckSignal?.aborted === true) {
+          return {
+            ok: false,
+            code: 'PRECHECK_CANCELLED',
+            cancelled: true,
+            requested: urls.length,
+            enqueued: 0,
+            // T5: only REAL refusals are failures. URLs the abort left
+            // unexamined were not refused — counting them as failed would be
+            // the same dishonesty the pre-check summary is designed to avoid
+            // (and matches the playlist batch's cancelled reply).
+            failed: failures.length,
+            taskIds: [],
+            failures,
+            ...(precheck === undefined ? {} : { precheck }),
+          };
+        }
       }
 
       if (enqueueable.length === 0) {

@@ -1,0 +1,100 @@
+# YTVDLT CI — 建立者：T7（外部审计项：仓库此前无任何 GitHub Actions）。
+#
+# 触发：push 到 main + 所有 Pull Request。Runner：windows-latest（本项目是
+# Windows 专项：随包 yt-dlp.exe / NSIS / Electron 45 均按 Windows 假设构建）。
+#
+# 步骤顺序 = 维护手册 §7 的本地改动流程（typecheck → npm test → 分层门禁 → 冻结门禁）。
+#
+# ── 明确不放进本 CI 的内容（均为有意排除，不是遗漏）────────────────────────
+# 1) e2e 截图基线（scripts/run-e2e.mjs + tests/e2e/baselines）：需要
+#    chrome-headless-shell（D-105 对构建版本门槛严格）与显示环境，像素级
+#    基线在无显示器 CI 上的光栅化结果不可信 —— 后续项，不进本轮 CI。
+# 2) 在线测试 vitest.online.config.ts（npm run test:online，D-132）：真实国际网
+#    真实下载；默认 vitest.config.ts 已把 tests/integration/online/** 排除在
+#    默认套件之外，本 CI 跑 `npm test` 不会联网。
+# 3) 离线集成用例（npm run test:integration:offline）：tests/integration/offline/
+#    需要 resources/runtime/win-x64/yt-dlp.exe 与 node.exe（.gitignore 明确不入库，
+#    本机由 fetch:runtime 下载）。CI 要跑需先加 fetch-runtime 步骤 —— 后续项。
+# 4) 安装包打包（约 5 分钟且属业主点名项，手册 §0 铁律 9）：见同目录
+#    desktop-pack.yml —— 仅 workflow_dispatch 手动触发，永不随 push/PR 运行。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一分支/PR 的旧 run 被新 push 取代时取消旧 run，省 runner 时间。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: typecheck · tests · gates (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # pnpm 版本不在这里硬编码：pnpm/action-setup@v4 未传 version 时自动读取
+      # 根 package.json 的 "packageManager": "pnpm@9.15.9" 字段。
+      # 已核对 pnpm-lock.yaml 顶部 lockfileVersion: '9.0'，与 pnpm 9.x 系列一致
+      # （若将来仓库缺失 packageManager 字段，才需要改从 lockfileVersion 推断）。
+      - name: Install pnpm (version from package.json packageManager)
+        uses: pnpm/action-setup@v4
+
+      # Node 版本依据（仓库无 .nvmrc）：
+      #   - 根 package.json "engines": { "node": ">=22" }
+      #   - docs/BUILD.md 环境表实测基线为 Node 22.x
+      #   - devDependencies @types/node ^22.15 与 22 LTS 匹配
+      # 故取 22 LTS（当前 22.x，满足 engines >=22）。
+      - name: Setup Node 22 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # --frozen-lockfile：CI 必须按 pnpm-lock.yaml 精确安装（R3 门禁的另一半：
+      # 依赖只允许来自锁文件，不允许临时解析）。
+      # 说明：electron@45 的 postinstall 会下载预编译二进制（约 100 MB）。虽然
+      # unit/contract 测试用假 Electron stub，这里仍保持默认安装不设
+      # ELECTRON_SKIP_BINARY_DOWNLOAD=1 —— 不给首轮 CI 引入任何「跳过了什么」
+      # 的未知变量；若日后要提速可再评估该开关。
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 照抄根 package.json scripts："typecheck": "turbo run typecheck"
+      # （五个 workspace 包各自执行 tsc --noEmit -p tsconfig.json）。
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # 照抄根 package.json scripts："test": "node scripts/run-tests.mjs all --coverage"
+      #   - all = tests/unit + tests/contract（v8 覆盖率）；
+      #   - vitest.config.ts 强制 lines/branches/functions/statements 四维 >=70 门限，
+      #     不达标直接非零退出；
+      #   - 沙箱批量删除守卫（scripts/lib/vitest-run.mjs，决策 D-29 + D-32）只在
+      #     子进程输出出现 SAFE_DELETE_BULK_CONFIRM_REQUIRED 标记时才介入：GitHub
+      #     runner 无该沙箱守卫，测试全绿 → vitest exit 0 → 守卫判 CLEAN 放行；
+      #     测试真实失败 → 守卫判 REJECTED（GUARD_MARKER_ABSENT）→ 非零退出使
+      #     本 job 失败。守卫在干净 CI 下不需要任何环境变量，守卫会自动在
+      #     spawn 前清理 reports/vitest-results.json / coverage/coverage-summary.json
+      #     旧证据（单文件 unlink），无历史 reports/ 产物也能跑通。
+      - name: Tests (unit + contract with coverage gate)
+        run: npm test
+
+      # 分层依赖检查（core 禁 import node:*/electron；结果写 reports/layering.json，
+      # 目录不存在时脚本自建，gitignore 不影响）。
+      - name: Layering check
+        run: node scripts/check-layering.mjs
+
+      # 冻结门禁（D-50 request.ts 逐字节 / D-61 devDependencies 白名单 / 锁文件
+      # 无依赖消失）。脚本对 HEAD 做 git diff / git show —— actions/checkout 的
+      # 浅克隆含 HEAD，满足其比较基准。
+      - name: Frozen gate
+        run: node scripts/frozen-gate.mjs

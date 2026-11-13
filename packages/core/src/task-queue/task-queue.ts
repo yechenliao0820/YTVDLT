@@ -92,6 +92,14 @@ export class TaskQueue implements ITaskQueue {
   private intakePausedFlag = false;
   private readonly persistIntervalMs: number;
   private lastPersistAt = 0;
+  /**
+   * T2: true while the latest persist attempt failed. Snapshot persistence
+   * failures used to be swallowed silently; they are now logged — but only
+   * ONCE per failure episode (reset by the next successful save), because a
+   * persistently broken disk would otherwise emit one warning per progress
+   * tick (persistIntervalMs can be 0).
+   */
+  private snapshotPersistFailed = false;
 
   constructor(deps: TaskQueueDeps) {
     this.deps = deps;
@@ -690,6 +698,20 @@ export class TaskQueue implements ITaskQueue {
     return restored;
   }
 
+  /**
+   * T2: persist the queue snapshot; a failure is VISIBLE but never fatal.
+   *
+   * Semantics (unchanged): `taskStore.save()` rejections are caught so a
+   * broken snapshot can never blow up the download path. What changed: the
+   * failure is no longer silent. The warning goes through the EXISTING
+   * `CorePorts.logSink` facility (the same port Logger / ConfigStore write
+   * through, same `{ts, level, scope, event, payload?}` line shape), so it
+   * lands in `logs/app-*.jsonl` via the production adapter with zero new
+   * wiring. One line per failure episode (see `snapshotPersistFailed`); the
+   * payload carries only the error message — never snapshot content or URLs.
+   * The store also keeps the error on `TaskStore.lastSaveError` for offline
+   * diagnostics.
+   */
   private async persistSnapshot(): Promise<void> {
     if (this.deps.taskStore === undefined) return;
     try {
@@ -698,7 +720,20 @@ export class TaskQueue implements ITaskQueue {
         savedAt: nowIso(this.deps.ports),
         tasks: this.list() as TaskRecord[],
       });
-    } catch { /* snapshot persistence must never break execution */ }
+      this.snapshotPersistFailed = false;
+    } catch (error) {
+      if (this.snapshotPersistFailed) return;
+      this.snapshotPersistFailed = true;
+      try {
+        await this.deps.ports.logSink.appendJsonl(JSON.stringify({
+          ts: nowIso(this.deps.ports),
+          level: 'WARNING',
+          scope: 'task-queue',
+          event: 'snapshot.persist.failed',
+          payload: { error: error instanceof Error ? error.message : String(error) },
+        }));
+      } catch { /* a dead log sink must not break the queue either */ }
+    }
   }
 }
 

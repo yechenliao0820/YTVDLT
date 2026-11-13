@@ -1,0 +1,81 @@
+# 安装包打包 —— 手动骨架（T7 建立本轮 CI 时一并登记，默认绝不自动运行）。
+#
+# 本文件唯一的触发器是 workflow_dispatch：只有业主在 GitHub Actions 页面
+# 手动点「Run workflow」才会执行；push / pull_request 一律不触发。
+# 为什么不进常规 CI：打包约 5 分钟（手册 §0 铁律 9「默认只打安装版，
+# 业主说『打包』才跑」），且产物安装包属业主点名项。
+#
+# 命令来源：docs/BUILD.md §4 的实测打包命令（含三个必带参数，缺一不可）。
+# 与本机打包的两点差异：
+#   - 不设 ELECTRON_BUILDER_BINARIES_MIRROR（那是国内镜像，GitHub runner
+#     直连官方源更快）；
+#   - electron-builder 会就地改写根 package.json（手册 §9 坑 2）—— 在 CI
+#     runner 上是临时环境、不会回流仓库，无需还原；本机打包才必须手工还原。
+# 输出目录：显式指定 dist/（根 .gitignore 已忽略）；需要按版本留档时把
+#   --config.directories.output=dist 改成 dist-<version>（BUILD.md §4）。
+
+name: Desktop pack (manual only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'electron-builder --win targets (nsis = 安装版；portable 属点名项，业主点名才填)'
+        required: false
+        default: 'nsis'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    name: Build Windows installers
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 与 ci.yml 相同的运行时配方（pnpm 读 packageManager；Node 22 依据 engines）。
+      - name: Install pnpm (version from package.json packageManager)
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node 22 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 手册 §9 坑 1：必须先 build-desktop 再 electron-builder，顺序反了
+      # asar 里就是旧前端。
+      - name: Build desktop bundle (esbuild)
+        run: node scripts/build-desktop.mjs
+
+      # BUILD.md §4 原命令；CSC_IDENTITY_AUTO_DISCOVERY=false 跳过签名探测
+      # （CI 无证书）。electron-builder.yml 的 publish 是 generic + .invalid
+      # 占位 URL，不会向 GitHub 发布，因此本步骤无需任何 secrets。
+      - name: Package NSIS installer
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: >
+          npx electron-builder
+          --config apps/desktop/electron-builder.yml
+          --config.directories.buildResources=apps/desktop/build
+          -c.extraMetadata.main=apps/desktop/dist/main/main.cjs
+          --config.directories.output=dist
+          --win ${{ inputs.targets }}
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ytvdlt-installers
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/latest.yml
+          if-no-files-found: error
+          retention-days: 14

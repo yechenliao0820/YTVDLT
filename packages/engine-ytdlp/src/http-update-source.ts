@@ -9,8 +9,15 @@
  *
  * Networking is injected (`HttpPort`), so this class has no `node:https`/
  * `fetch` import and is fully testable offline.
+ *
+ * The URL policy is injected too (component-update hardening): this package
+ * sits BELOW the main process, so it cannot import `isTrustedReleaseHost` —
+ * the caller picks the policy for the source it assembled and hands the
+ * predicate in. `component-updater.ts` passes the GitHub allowlist for
+ * official feeds and deliberately nothing for operator mirrors (the port's
+ * bounded permissive transport is the mirror policy; see the rationale there).
  */
-import type { EngineUpdateSource, HttpPort } from '@ytvdlt/shared';
+import type { EngineUpdateSource, HttpFetchOptions, HttpPort } from '@ytvdlt/shared';
 
 export interface HttpUpdateSourceOptions {
   /** Directory URL, with or without a trailing slash. */
@@ -20,6 +27,13 @@ export interface HttpUpdateSourceOptions {
   readonly http: HttpPort;
   /** Defaults to `SHA2-256SUMS`. */
   readonly checksumsName?: string;
+  /**
+   * Per-hop URL policy forwarded to every `getText` / `getBytes` call, so the
+   * port re-checks the initial URL AND every redirect hop (and, for a caller
+   * policy, also validates resolved addresses). Absent = the port's bounded
+   * permissive default — an explicit mirror-mode choice, not an oversight.
+   */
+  readonly urlPolicy?: (rawUrl: string) => boolean;
 }
 
 function joinUrl(base: string, name: string): string {
@@ -34,12 +48,26 @@ export class HttpUpdateSource implements EngineUpdateSource {
     this.options = options;
   }
 
+  /**
+   * Options for every fetch of THIS source. A configured policy rides on each
+   * call; no policy means `{}` — the port's bounded permissive transport
+   * (per-hop http(s) validity, redirect cap, loop detection, socket pinning)
+   * is then the whole policy, which is what the mirror mode wants.
+   */
+  private fetchOptions(): HttpFetchOptions {
+    const policy = this.options.urlPolicy;
+    return policy === undefined ? {} : { urlPolicy: policy };
+  }
+
   async fetchChecksums(): Promise<string> {
     const name = this.options.checksumsName ?? 'SHA2-256SUMS';
-    return this.options.http.getText(joinUrl(this.options.baseUrl, name));
+    return this.options.http.getText(joinUrl(this.options.baseUrl, name), this.fetchOptions());
   }
 
   async fetchEngineBinary(): Promise<Uint8Array> {
-    return this.options.http.getBytes(joinUrl(this.options.baseUrl, this.options.fileName));
+    return this.options.http.getBytes(
+      joinUrl(this.options.baseUrl, this.options.fileName),
+      this.fetchOptions(),
+    );
   }
 }

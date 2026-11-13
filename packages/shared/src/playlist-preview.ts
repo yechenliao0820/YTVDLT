@@ -18,7 +18,10 @@ export type PlaylistPreviewCode =
   | '' | 'INVALID_URL' | 'NOT_PLAYLIST' | 'UNSUPPORTED_SITE' | 'EMPTY_PLAYLIST'
   | 'TIMEOUT' | 'NETWORK_ERROR' | 'PROBE_FAILED' | 'PREVIEW_UNAVAILABLE'
   | 'PREVIEW_EXPIRED' | 'PREVIEW_CONSUMED' | 'PREVIEW_UNKNOWN'
-  | 'PREVIEW_URL_MISMATCH' | 'EMPTY_SELECTION' | 'TOO_MANY_ITEMS';
+  | 'PREVIEW_URL_MISMATCH' | 'EMPTY_SELECTION' | 'TOO_MANY_ITEMS'
+  // T5 (append-only): the user cancelled the in-flight pre-check — nothing was
+  // enqueued. A cancellation is "the user said stop", not a gate judgement.
+  | 'PRECHECK_CANCELLED';
 
 /** One row of the selection UI. Deliberately has NO `url` field. */
 export interface PlaylistPreviewEntryDto {
@@ -82,6 +85,14 @@ export interface PlaylistBatchEnqueueDto {
    * the selection UI already identifies entries by id.
    */
   readonly precheck?: PlaylistPrecheckReport;
+  /**
+   * T5 (append-only): true when the user cancelled the in-flight pre-check and
+   * NOTHING was enqueued by this call. "Cancelled" is the user saying "stop",
+   * not the gate misjudging a link, so the batch must not enqueue; the gate
+   * itself still fails open for a CANCELLED verdict (it never blocks).
+   * Absent on every older reply, so existing consumers keep compiling.
+   */
+  readonly cancelled?: boolean;
 }
 
 /** Per-bucket tally of a playlist batch pre-check. Ids only — never URLs. */

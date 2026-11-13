@@ -120,7 +120,11 @@ filesystem. `scripts/check-layering.mjs` enforces the boundary.
   *not* reported as an unsupported site. The single-link box asks the engine
   **before** creating a task: a clear refusal is shown in the UI language, and
   an unconfirmed verdict (no media / indeterminate / timeout) asks whether to
-  queue it anyway instead of enqueueing silently. (D-134, D-139)
+  queue it anyway instead of enqueueing silently. **An in-flight pre-check can
+  now be cancelled** — the single-link box offers a stop button, and TXT /
+  playlist imports show "checked / total" alongside a cancel action. Cancelling
+  terminates the engine child process and **queues nothing**; the batch reply is
+  explicitly marked "cancelled". (D-134, D-139, D-156)
 - Real filenames: `--restrict-filenames` is no longer silently enabled, so CJK
   titles, spaces and punctuation survive. Existing configs are migrated
   (schema v1 → v2). A repeated download is saved as a separate ` (1)` / ` (2)`
@@ -328,6 +332,25 @@ the same gates:
 | Coverage | statements 88.3% / branches 86.3% / functions 91.4% / lines 88.3% (floor 70, not raised) |
 | Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** (the detail-page cancel fix applies to live mode only) |
 | `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
+
+The 2026-11-13 audit-and-repair round (D-150…D-156, not yet released) added
+user-cancellable pre-checks, snapshot write/validation hardening, IPv6
+allowlisting, a bounded stdout line-assembly buffer, component-updater network
+policy and GitHub Actions CI. It passed the same gates:
+
+| Gate | Result |
+|---|---|
+| `pnpm typecheck` | 5/5 workspace packages successful |
+| Unit / contract / integration tests | **2,000 passed across 139 files, 0 failed** |
+| Coverage | statements 89.44% / branches 86.37% / functions 92.22% / lines 89.44% (floor 70, not raised) |
+| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** |
+| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
+| M5 acceptance | 10/10 gates PASS, allGreen=true |
+
+A GitHub Actions workflow (`ci.yml`) now runs typecheck, the full test suite,
+coverage, layering and the frozen-file gate on every push to `main` and every
+PR; packaging is a separate manual workflow. **The CI run itself is only
+verified after the first push** — the numbers above come from the local run.
 
 Design invariants worth knowing if you plan to modify the code:
 

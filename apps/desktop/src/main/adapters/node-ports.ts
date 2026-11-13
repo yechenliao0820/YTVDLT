@@ -91,6 +91,25 @@ function replaceRetryDelay(ms: number): Promise<void> {
 }
 
 /**
+ * T2 (concurrent atomic writes): every temp file gets a UNIQUE name.
+ *
+ * The fixed `${path}.tmp` had a real race: two tasks finishing at once both
+ * opened/truncated/wrote the SAME scratch file and then raced the rename, so a
+ * save could fail outright or an older snapshot could overwrite a newer one.
+ * With `pid + monotonic counter` every in-flight write owns its own scratch
+ * file; the final rename stays the single atomic commit (D-145), so the target
+ * always ends up holding one of the fully written contents — never torn bytes.
+ * The counter is process-wide: within one process the pid is constant and the
+ * counter is monotonic, across processes the pid differs.
+ */
+let atomicWriteSeq = 0;
+
+function uniqueTmpPath(path: string): string {
+  atomicWriteSeq += 1;
+  return `${path}.${process.pid}-${atomicWriteSeq}.tmp`;
+}
+
+/**
  * D-145: replace `target` with `tmp` in ONE step — a plain rename.
  *
  * WHY IT IS ATOMIC: on Windows libuv implements `fs.rename` with
@@ -134,26 +153,40 @@ function fileSystemPort(): FileSystemPort {
     },
     async writeTextAtomic(path: string, text: string): Promise<void> {
       await fs.mkdir(dirname(path), { recursive: true });
-      const tmp = `${path}.tmp`;
-      const handle = await fs.open(tmp, 'w');
+      const tmp = uniqueTmpPath(path);
       try {
-        await handle.writeFile(text, 'utf8');
-        await handle.sync();
-      } finally {
-        await handle.close();
+        const handle = await fs.open(tmp, 'w');
+        try {
+          await handle.writeFile(text, 'utf8');
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      } catch (error) {
+        // T2 scratch hygiene: a failure BEFORE the rename leaves OUR tmp
+        // behind; remove exactly that file (best effort) and rethrow. The
+        // target is never touched here.
+        await fs.rm(tmp, { force: true }).catch(() => undefined);
+        throw error;
       }
       // D-145: atomic replace — the target is never deleted first.
       await renameReplaceExisting(tmp, path);
     },
     async writeBytesAtomic(path: string, data: Uint8Array): Promise<void> {
       await fs.mkdir(dirname(path), { recursive: true });
-      const tmp = `${path}.tmp`;
-      const handle = await fs.open(tmp, 'w');
+      const tmp = uniqueTmpPath(path);
       try {
-        await handle.writeFile(data);
-        await handle.sync();
-      } finally {
-        await handle.close();
+        const handle = await fs.open(tmp, 'w');
+        try {
+          await handle.writeFile(data);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      } catch (error) {
+        // T2 scratch hygiene: see writeTextAtomic.
+        await fs.rm(tmp, { force: true }).catch(() => undefined);
+        throw error;
       }
       // D-145: atomic replace — the target is never deleted first.
       await renameReplaceExisting(tmp, path);
@@ -264,6 +297,10 @@ function processPort(): ProcessPort {
       let timedOut = false;
       let settled = false;
       let overflowed = false;
+      /** T5: the caller's `signal` fired — the run was cancelled, not timed out. */
+      let aborted = false;
+      /** T5: the listener registered on the caller's signal, for teardown. */
+      let abortListener: (() => void) | null = null;
       /** D-137: a `close`/`error` event is the only PROOF that the tree exited. */
       let exitObserved = false;
       /** null = not attempted / still in flight; false = the tree kill failed. */
@@ -297,6 +334,12 @@ function processPort(): ProcessPort {
         settled = true;
         if (timer !== null) { clearTimeout(timer); timer = null; }
         if (settleTimer !== null) { clearTimeout(settleTimer); settleTimer = null; }
+        // T5: the caller's signal must not keep a listener after we settled
+        // (same listener-hygiene rule as the child's own events below).
+        if (abortListener !== null && opts.signal !== undefined) {
+          opts.signal.removeEventListener('abort', abortListener);
+          abortListener = null;
+        }
         // A settled result must never leave listeners behind (TASK-02 C:
         // "不能因为增加输出限制而引入新的进程泄漏或者监听器泄漏").
         child.stdout?.removeAllListeners();
@@ -379,6 +422,28 @@ function processPort(): ProcessPort {
         }, opts.timeoutMs);
       }
 
+      // T5 (append-only): `opts.signal` — the caller cancelled a bounded job.
+      // Same kill path as the timeout (killTree / taskkill /T /F — 坑 21), same
+      // bounded wait for EXIT EVIDENCE (坑 27: issuing a kill is not proof the
+      // tree died), and `close` arriving after the abort reports a poisoned
+      // `exitCode: null` exactly like a timeout kill, so no caller can mistake
+      // a cancelled run for a clean short one. No stderr marker is appended:
+      // the caller passed this signal, so it already knows the run was
+      // cancelled — the engine maps `signal.aborted` to the CANCELLED state.
+      if (opts.signal !== undefined) {
+        const onAbort = (): void => {
+          if (settled) return;
+          aborted = true;
+          void terminate().then(() => finish({
+            exitCode: null, stdout: currentStdout(),
+            stderr: currentStderr(), timedOut,
+          }));
+        };
+        abortListener = onAbort;
+        if (opts.signal.aborted) onAbort();
+        else opts.signal.addEventListener('abort', onAbort, { once: true });
+      }
+
       child.on('error', (error: Error) => {
         exitObserved = true;
         finish({
@@ -391,12 +456,13 @@ function processPort(): ProcessPort {
       child.on('close', (code: number | null) => {
         exitObserved = true;
         finish({
-          // An overflow OR timeout kill is NOT a clean exit: report a null code
-          // so the caller errors out instead of `JSON.parse`-ing a truncated
-          // blob. D-137: the timeout path now waits for the tree kill, so
-          // `close` can legitimately arrive first with taskkill's exit code (1);
-          // without `timedOut` here that code would masquerade as a real run.
-          exitCode: (overflowed || timedOut) ? null : code,
+          // An overflow OR timeout OR abort kill is NOT a clean exit: report a
+          // null code so the caller errors out instead of `JSON.parse`-ing a
+          // truncated blob. D-137: the timeout path now waits for the tree
+          // kill, so `close` can legitimately arrive first with taskkill's exit
+          // code (1); without `timedOut` here that code would masquerade as a
+          // real run.
+          exitCode: (overflowed || timedOut || aborted) ? null : code,
           stdout: currentStdout(),
           stderr: `${currentStderr()}${overflowNote()}`,
           timedOut,

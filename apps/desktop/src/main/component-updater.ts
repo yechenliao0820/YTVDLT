@@ -20,13 +20,22 @@
  * themselves. Each component may carry its own feed (`feedUrl`), which is what
  * lets yt-dlp point at `github.com/yt-dlp/yt-dlp/releases/latest/download`
  * while aria2c still follows the operator-configured mirror.
+ *
+ * Every fetch this module makes (version query, checksum manifest, component
+ * binary) carries the source-appropriate URL policy — see
+ * `componentSourceUrlPolicy` below. This chain REPLACES the executable yt-dlp
+ * runs, so it never fetches without a decided policy (the port's no-policy
+ * default exists for generic local traffic, not for this path).
  */
-import type { ComponentVersionCheck, ComponentVersionReport, CorePorts, QueueIntakeGate } from '@ytvdlt/shared';
+import type {
+  ComponentVersionCheck, ComponentVersionReport, CorePorts, HttpFetchOptions, QueueIntakeGate,
+} from '@ytvdlt/shared';
 import type { ILogger } from '@ytvdlt/core';
 import { compareVersions } from '@ytvdlt/core';
 import {
   HttpUpdateSource, SelfUpdater, normalizeToolVersion,
 } from '@ytvdlt/engine-ytdlp';
+import { isTrustedReleaseHost } from './github-releases.js';
 
 export interface ComponentSpec {
   /** Stable id used by the UI (`yt-dlp`, `aria2c`). */
@@ -110,6 +119,52 @@ export const normalizeVersion = normalizeToolVersion;
 
 function isHttpUrl(value: string | null | undefined): value is string {
   return typeof value === 'string' && /^https?:\/\//i.test(value.trim());
+}
+
+/**
+ * Per-hop URL policy for one fetch of the component update chain, chosen by
+ * WHERE the source URL points. The renderer can set none of these URLs — they
+ * come from the app-shipped component specs and the operator's
+ * `advanced.componentFeedUrl` — so the URL is the trust decision:
+ *
+ * - GitHub-family hosts (the official yt-dlp feed `github.com/yt-dlp/…` and
+ *   the `api.github.com` version API) share the app updater's trust root, so
+ *   `isTrustedReleaseHost` is reused directly; its coverage (`github.com`,
+ *   `*.github.com`, `*.githubusercontent.com`) is exactly where GitHub release
+ *   requests and their asset redirects land. The port turns a caller policy
+ *   into per-hop URL checks PLUS public-only resolved-address validation with
+ *   socket pinning (node-ports.ts `httpPort`), so a redirect to a non-GitHub
+ *   host — or a private/loopback address behind any hop — fails closed.
+ *
+ * - Everything else is an operator-configured mirror (intranet NAS, domestic
+ *   CDN, self-hosted directory). The operator explicitly pointed the app
+ *   there, so the per-hop URL rule is deliberately "any valid http(s) hop":
+ *   the user trusted this source AND the redirect chain it hands out (CDN
+ *   redirects are the norm for mirrors). A same-origin / allowlist rule was
+ *   considered and REJECTED: any caller `urlPolicy` makes the port classify
+ *   resolved addresses public-only, which would break every intranet mirror —
+ *   the primary mirror use-case. The mirror path therefore passes NO urlPolicy
+ *   and keeps the transport-level guards that stay on unconditionally: every
+ *   hop must still be a valid http(s) URL, the chain is capped at
+ *   `MAX_HTTP_REDIRECTS`, loops are detected, and the socket is pinned to the
+ *   resolved addresses (port default `allowAnyHttpUrl` +
+ *   `fetchFollowingRedirects`). Address classification is the one check
+ *   intentionally left out here.
+ *
+ * The split is a pure function of the URL, so there is no "sometimes checked,
+ * sometimes not" state: the official feed can never fall onto the mirror path
+ * (it is a GitHub URL by construction), and a mirror living on the GitHub
+ * trust root simply gets the stricter rules, which keep working there (GitHub
+ * asset redirects stay in-family).
+ */
+export function componentSourceUrlPolicy(url: string): ((rawUrl: string) => boolean) | undefined {
+  return isTrustedReleaseHost(url) ? isTrustedReleaseHost : undefined;
+}
+
+/** `extra` merged under the source-appropriate policy (policy wins). */
+function withSourcePolicy(url: string, extra: HttpFetchOptions = {}): HttpFetchOptions {
+  const policy = componentSourceUrlPolicy(url);
+  return policy === undefined ? extra : { ...extra, urlPolicy: policy };
 }
 
 /** Latest tag from a GitHub release payload; `null` when unusable. */
@@ -196,7 +251,10 @@ export function createComponentUpdater(deps: ComponentUpdaterDeps): ComponentUpd
           continue;
         }
         try {
-          const text = await http.getText(apiUrl, { timeoutMs: 15_000 });
+          // Component-update hardening: the version query carries the source's
+          // URL policy (official GitHub API → strict allowlist), so a redirect
+          // cannot walk the release JSON off the trusted hosts.
+          const text = await http.getText(apiUrl, withSourcePolicy(apiUrl, { timeoutMs: 15_000 }));
           const latestVersion = latestVersionFromReleaseJson(text);
           if (latestVersion === null) {
             results.push({
@@ -254,8 +312,14 @@ export function createComponentUpdater(deps: ComponentUpdaterDeps): ComponentUpd
       try {
         for (const component of usable) {
           const feed = feedOf(component) as string;
+          // Component-update hardening: manifest + binary get the same
+          // source-appropriate policy as the version query — strict GitHub
+          // allowlist for official feeds, bounded permissive transport for
+          // operator mirrors (`componentSourceUrlPolicy` rationale).
+          const feedPolicy = componentSourceUrlPolicy(feed);
           const source = new HttpUpdateSource({
             baseUrl: feed, fileName: component.fileName, http,
+            ...(feedPolicy === undefined ? {} : { urlPolicy: feedPolicy }),
           });
           const updater = new SelfUpdater({
             ports,

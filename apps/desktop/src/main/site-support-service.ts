@@ -23,7 +23,7 @@
  * which keeps it L0-testable with a stub.
  */
 import type {
-  ExtractorCatalog, ExtractorCatalogResult, UrlSupportResult, UrlSupportState,
+  ExtractorCatalog, ExtractorCatalogResult, SpawnAbortSignal, UrlSupportResult, UrlSupportState,
 } from '@ytvdlt/shared';
 import {
   DEFAULT_PLUGIN_SIGNATURE, EXTRACTOR_CACHE_TTL_MS, extractorCacheKey, isCacheableSupport,
@@ -98,6 +98,18 @@ interface VerdictSlot {
 /** Default verdict cache size. A session realistically checks tens of URLs. */
 const DEFAULT_MAX_VERDICTS = 200;
 const DEFAULT_VERDICT_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * T5 — the user moved on before the check finished. A VALUE, never an
+ * exception (the fail-open contract), and never cacheable (§3.7 already
+ * excludes CANCELLED from `isCacheableSupport`).
+ */
+function cancelledVerdict(url: string): UrlSupportResult {
+  return {
+    url, state: 'CANCELLED', extractor: '', cached: false,
+    reason: 'pre-check cancelled by the user',
+  };
+}
 
 export class SiteSupportService {
   private readonly options: SiteSupportServiceOptions;
@@ -213,11 +225,16 @@ export class SiteSupportService {
   /**
    * §3.3/§3.4 — pre-check ONE url, with the caches.
    *
+   * T5: `signal` is the user's cancellation for THIS call. It is forwarded to
+   * the engine (which kills the child and answers CANCELLED) and it disables
+   * in-flight sharing — a shared promise could not be killed on one caller's
+   * behalf without killing somebody else's check too.
+   *
    * `previousState` is NOT accepted from the caller: a cached verdict is only
    * ever produced here, so no caller can assert "this was already checked".
    */
-  async check(url: string, force = false): Promise<UrlSupportResult> {
-    return this.checkUrl(url, force);
+  async check(url: string, force = false, signal?: SpawnAbortSignal): Promise<UrlSupportResult> {
+    return this.checkUrl(url, force, signal);
   }
 
   /**
@@ -226,7 +243,17 @@ export class SiteSupportService {
    * name the operation the way their reader expects — one adapter satisfies
    * both, and no caller has to remember which spelling belongs where.
    */
-  async checkUrl(url: string, force = false): Promise<UrlSupportResult> {
+  async checkUrl(
+    url: string,
+    force = false,
+    signal?: SpawnAbortSignal,
+  ): Promise<UrlSupportResult> {
+    // T5: read through a lambda — the flag can flip while we await, and a fresh
+    // call per check never inherits a stale narrowing across an await.
+    const signalAborted = (): boolean => signal?.aborted === true;
+    // T5: a caller that already cancelled gets the CANCELLED state without
+    // touching the caches — "stop" must never be answered from memory.
+    if (signalAborted()) return cancelledVerdict(url);
     const engine = this.capability();
     if (engine === null) {
       return {
@@ -251,8 +278,13 @@ export class SiteSupportService {
       }
     }
 
-    const pending = this.verdictInflight.get(key);
-    if (pending !== undefined) return pending;
+    // T5: an abortable call never SHARES an in-flight check. Sharing would mean
+    // one caller's abort kills (or poisons) a concurrent caller's check, which
+    // is a worse failure than one duplicate engine spawn for the same URL.
+    if (signal === undefined) {
+      const pending = this.verdictInflight.get(key);
+      if (pending !== undefined) return pending;
+    }
 
     const opts: UrlSupportCheckOptions = {
       jsRuntimePath: this.options.jsRuntimePath,
@@ -261,6 +293,7 @@ export class SiteSupportService {
       // would let a config change between the two reads make the key describe a
       // different argv than the one actually spawned.
       ...network,
+      ...(signal === undefined ? {} : { signal }),
     };
     const task = engine.checkUrlSupport(url, opts)
       .then((result) => {
@@ -279,7 +312,9 @@ export class SiteSupportService {
       .catch(async (error: unknown) => {
         // `checkUrlSupport` is documented never to throw. If an adapter still
         // does, that is OUR bug to report — and the user must not be blocked,
-        // so the url stays INDETERMINATE.
+        // so the url stays INDETERMINATE. T5: unless the caller cancelled — a
+        // cancelled check is CANCELLED, not "the site could not be classified".
+        if (signalAborted()) return cancelledVerdict(url);
         await this.options.logger?.error('sites.precheck', 'pre-check threw', {
           message: error instanceof Error ? error.message : String(error),
         });
@@ -289,7 +324,7 @@ export class SiteSupportService {
         };
       })
       .finally(() => { this.verdictInflight.delete(key); });
-    this.verdictInflight.set(key, task);
+    if (signal === undefined) this.verdictInflight.set(key, task);
     return task;
   }
 

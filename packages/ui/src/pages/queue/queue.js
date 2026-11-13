@@ -249,6 +249,11 @@
     // the running engine; neither can start a download.
     SUPPORTED_SITES: 'ytvdlt:sites:list',
     URL_SUPPORT_CHECK: 'ytvdlt:sites:check',
+    // T5 (append-only): user-level pre-check cancellation + batch progress.
+    // CANCEL takes no payload (it stops the CURRENT in-flight pre-check);
+    // STATUS is a read-only poll consumed by the two batch dialogs.
+    URL_SUPPORT_CHECK_CANCEL: 'ytvdlt:sites:checkCancel',
+    URL_SUPPORT_CHECK_STATUS: 'ytvdlt:sites:checkStatus',
     // D-148 (append-only): the "Star on GitHub" nudge. CHECK takes no payload
     // and ACTION only the button enum; the repo URL never crosses IPC.
     STAR_PROMPT_CHECK: 'ytvdlt:starPrompt:check',
@@ -938,6 +943,8 @@
     var code = (result && result.code) ? String(result.code) : '';
     if (code === 'SITE_UNSUPPORTED') return t('queue.precheck.blocked.site');
     if (code === 'ITEM_UNSUPPORTED') return t('queue.precheck.blocked.item');
+    // T5: a cancellation is "the user said stop" — nothing was queued.
+    if (code === 'PRECHECK_CANCELLED') return t('queue.precheck.cancelled');
     return t('queue.notify.enqueueFailed', {
       reason: (result && (result.reason || result.message)) || t('queue.notify.ipc')
     });
@@ -976,13 +983,72 @@
    */
   var precheckConfirm = null;
 
+  /**
+   * T5: the single-URL pre-check is cancellable. The bar is built on the fly
+   * (D-139 pattern, never declared in `index.html`) and ONLY in the live
+   * pre-check path, so the frozen static baselines never see it. The cancel
+   * click fires `URL_SUPPORT_CHECK_CANCEL` (zero payload — "stop the current
+   * pre-check"); the main process aborts the engine child, and the outcome
+   * comes back through the normal verdict / enqueue reply as
+   * `PRECHECK_CANCELLED`, which this page renders as「已取消，未入队」.
+   */
+  var precheckCancelBar = null;
+  var singlePrecheckCancelled = false;
+
+  function removePrecheckCancelBar() {
+    if (precheckCancelBar !== null) {
+      // Same guard as the Star prompt (D-139): a test sandbox's nodes expose
+      // `parent`, not `parentNode`, so `!== null` alone still dereferences
+      // `undefined` and turns every enqueue reply into an unhandled rejection.
+      var parent = precheckCancelBar.parentNode;
+      if (parent !== null && parent !== undefined && typeof parent.removeChild === 'function') {
+        parent.removeChild(precheckCancelBar);
+      }
+    }
+    precheckCancelBar = null;
+  }
+
+  function showPrecheckCancelBar() {
+    if (precheckCancelBar !== null) return;
+    // A page without a real <body> (static preview / test sandbox) cannot
+    // host the bar; the cancel capability simply stays invisible there.
+    if (!doc.body || typeof doc.body.appendChild !== 'function') return;
+    var bar = doc.createElement('div');
+    bar.setAttribute('id', 'queue-precheck-bar');
+    bar.setAttribute('role', 'status');
+    bar.setAttribute('style', 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);'
+      + 'display:flex;align-items:center;gap:12px;padding:10px 16px;border-radius:8px;'
+      + 'background:var(--ytvdlt-surface, #fff);color:inherit;'
+      + 'box-shadow:0 4px 16px rgba(0,0,0,0.18);z-index:60;');
+    var text = doc.createElement('span');
+    text.setAttribute('id', 'queue-precheck-bar-text');
+    text.textContent = t('queue.precheck.checking');
+    var stop = doc.createElement('button');
+    stop.setAttribute('type', 'button');
+    stop.setAttribute('id', 'queue-precheck-cancel');
+    stop.textContent = t('queue.precheck.cancel');
+    stop.addEventListener('click', function () {
+      singlePrecheckCancelled = true;
+      stop.setAttribute('disabled', 'disabled');
+      text.textContent = t('queue.precheck.cancelling');
+      call('URL_SUPPORT_CHECK_CANCEL', {});
+    });
+    bar.appendChild(text);
+    bar.appendChild(stop);
+    doc.body.appendChild(bar);
+    precheckCancelBar = bar;
+  }
+
   function needsPrecheckConfirm(verdict) {
     if (!verdict || verdict.blocks === true) return false;
     // A build without the capability must behave exactly like the old path.
     if (verdict.code === 'PREVIEW_UNAVAILABLE') return false;
     var state = String(verdict.state || '');
-    return state === 'NO_MEDIA' || state === 'INDETERMINATE'
-      || state === 'TIMEOUT' || state === 'CANCELLED';
+    // T5: a cancelled check is the user saying "stop", not a site verdict to
+    // reason about. It must NEVER offer "add it anyway" — that would enqueue
+    // behind the user's back when the cancel came from another live view.
+    if (verdict.code === 'PRECHECK_CANCELLED' || state === 'CANCELLED') return false;
+    return state === 'NO_MEDIA' || state === 'INDETERMINATE' || state === 'TIMEOUT';
   }
 
   function precheckConfirmReason(verdict) {
@@ -1050,6 +1116,9 @@
   function startDownload(payload) {
     call('DOWNLOAD_START', payload).then(function (result) {
       enqueueing = false;
+      // T5: the enqueue reply ends the cancellable pre-check window; if a
+      // cancel landed here it answers PRECHECK_CANCELLED below.
+      removePrecheckCancelBar();
       // A one-shot ticket is spent on success; a dead ticket must be forgotten
       // so the next download does not silently repeat a stale subtitle choice.
       var subtitleMessage = subtitlePicker === null ? null : subtitlePicker.onEnqueueResult(result);
@@ -1089,19 +1158,46 @@
     }
 
     notify(t('queue.precheck.checking'));
+    // T5: the check window shows the runtime cancel bar (live only).
+    singlePrecheckCancelled = false;
+    showPrecheckCancelBar();
     call('URL_SUPPORT_CHECK', { url: url }).then(function (verdict) {
+      if (singlePrecheckCancelled) {
+        // The user pressed stop: the verdict (a CANCELLED state) is not a gate
+        // judgement — nothing may be enqueued behind their back.
+        enqueueing = false;
+        removePrecheckCancelBar();
+        notify(t('queue.precheck.cancelled'));
+        return;
+      }
+      // T5: the CANCEL channel aborts EVERY in-flight pre-check (it has no batch
+      // id by design), so another live view can be the one that stopped this
+      // check. A CANCELLED verdict must terminate here just as a local click
+      // does: no confirm modal, no DOWNLOAD_START, no task.
+      if (verdict && (verdict.code === 'PRECHECK_CANCELLED' || verdict.state === 'CANCELLED')) {
+        enqueueing = false;
+        removePrecheckCancelBar();
+        notify(t('queue.precheck.cancelled'));
+        return;
+      }
       if (verdict && verdict.blocks === true) {
         enqueueing = false;
+        removePrecheckCancelBar();
         notify(enqueueFailureText(verdict));
         return;
       }
       if (needsPrecheckConfirm(verdict)) {
+        // The modal takes over; the bar must not sit behind it.
+        removePrecheckCancelBar();
         showPrecheckConfirm(verdict, function () { startDownload(payload); });
         return;
       }
+      // The bar stays up through DOWNLOAD_START, whose own gate re-check is
+      // cancellable too; startDownload() removes it when the reply arrives.
       startDownload(payload);
     }).catch(function () {
       // A pre-check that cannot answer must never block a download (fail-open).
+      removePrecheckCancelBar();
       startDownload(payload);
     });
   }

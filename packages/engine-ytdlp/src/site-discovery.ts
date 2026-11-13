@@ -14,7 +14,7 @@
  * (`shell:false`, argv[]), and neither can start a download.
  */
 import type {
-  ExtractorCatalogResult, UrlSupportResult,
+  ExtractorCatalogResult, SpawnAbortSignal, UrlSupportResult,
 } from '@ytvdlt/shared';
 
 /** Options for the URL pre-check (§3.3). Mirrors `ProbeOptions` minus the playlist flags. */
@@ -26,6 +26,13 @@ export interface UrlSupportCheckOptions {
   readonly proxy?: string;
   readonly cookiesFile?: string;
   readonly userAgent?: string;
+  /**
+   * T5 (append-only): user-level cancellation. When the signal fires, the
+   * adapter kills the pre-check child through `SpawnOptions.signal` and this
+   * method answers the CANCELLED state — it still NEVER THROWS. Absent means
+   * "uncancellable", which is what every existing caller keeps.
+   */
+  readonly signal?: SpawnAbortSignal;
 }
 
 export interface SiteDiscovery {

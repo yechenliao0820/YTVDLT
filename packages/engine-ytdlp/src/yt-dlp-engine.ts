@@ -22,6 +22,7 @@ import {
   EXTRACTOR_LIST_MAX_STDOUT_BYTES, EXTRACTOR_LIST_MAX_STDERR_BYTES,
   URL_PRECHECK_TIMEOUT_MS,
   STREAM_TAIL_MAX_BYTES, STREAM_TAIL_TRUNCATED_MARKER,
+  PROGRESS_PENDING_MAX_BYTES,
 } from '@ytvdlt/shared';
 import type { ILogger, IErrorMapper } from '@ytvdlt/core';
 import { classifyArtifact } from '@ytvdlt/core';
@@ -337,7 +338,18 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
     // exactly what the tail preserves. The bounded metadata path (D-133,
     // `spawn` + maxStdoutBytes + OUTPUT_LIMIT_MARKER) is untouched.
     const stderrAll: Utf8Tail = { parts: [], headIndex: 0, bytes: 0, truncated: false };
+    // D-153: `pending` used to be an unbounded `+=` — `parseProgressChunk`
+    // keeps the last unterminated line in `rest`, so stdout that never emits
+    // a newline grew this string without limit for as long as the child ran
+    // (the stdout sibling of the D-144 stderrAll fix above). Byte accounting
+    // is INCREMENTAL (手册坑 23): `+=` the chunk's own UTF-8 byte length on
+    // arrival — exact because the adapter's `setEncoding('utf8')` never splits
+    // a multi-byte sequence across chunks, the same guarantee `appendUtf8Tail`
+    // relies on — and recomputed only from the small remainder after a line
+    // completes, never by walking the whole buffer on every chunk.
     let pending = '';
+    let pendingBytes = 0;
+    const pendingDrops = { times: 0, bytes: 0 };
     // D-115: yt-dlp announces merge / post-process on stderr, one message per
     // line. A chunk can split a line, so the splitter keeps the tail; each
     // marker is emitted at most once per task and only forwards.
@@ -360,29 +372,60 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
           return;
         }
         pending += chunk.text;
-        const { events, rest } = parseProgressChunk(pending, taskId);
-        pending = rest;
-        for (const event of events) {
-          // D-112: an HLS/DASH manifest is a "download" too, so yt-dlp reports it
-          // as a completed 712-byte transfer before the real media starts. That
-          // painted 100% for one frame and then dropped back to 3% (measured on a
-          // 1496 s video). Anything that finishes below 64 KiB is metadata, not
-          // media: skip it so the bar only ever shows the real stream.
-          if (event.percent === 100 && event.downloadedBytes !== null
-            && event.downloadedBytes < 64 * 1024) {
-            continue;
+        pendingBytes += utf8ByteLength(chunk.text);
+        // D-153 fast path: `parseProgressChunk` splits on /\r?\n/, so a buffer
+        // without any newline parses to `{ events: [], rest: buffer }` — an
+        // O(pending) no-op. `pending` never retains a '\n' (the parser's `rest`
+        // is the text after the LAST separator, and the skip below only fires
+        // when the chunk itself carries none), so a newline-free chunk cannot
+        // complete a line and skipping the call is observably identical — while
+        // a no-newline flood (the case the ceiling exists for) stays O(chunk)
+        // per chunk instead of re-splitting a ~1 MiB buffer every time. Chunks
+        // WITHOUT a newline still accumulate below; nothing is ever dropped by
+        // this branch.
+        if (chunk.text.includes('\n')) {
+          const { events, rest } = parseProgressChunk(pending, taskId);
+          pending = rest;
+          // The parsed prefix (complete lines + separators) is gone; only the
+          // tail remains, which on real yt-dlp output is one partial line.
+          pendingBytes = utf8ByteLength(pending);
+          for (const event of events) {
+            // D-112: an HLS/DASH manifest is a "download" too, so yt-dlp reports it
+            // as a completed 712-byte transfer before the real media starts. That
+            // painted 100% for one frame and then dropped back to 3% (measured on a
+            // 1496 s video). Anything that finishes below 64 KiB is metadata, not
+            // media: skip it so the bar only ever shows the real stream.
+            if (event.percent === 100 && event.downloadedBytes !== null
+              && event.downloadedBytes < 64 * 1024) {
+              continue;
+            }
+            // Project ProgressEvent onto the frozen EngineEvent 'progress' shape.
+            onEvent({
+              type: 'progress',
+              taskId,
+              percent: event.percent,
+              downloadedBytes: event.downloadedBytes,
+              totalBytes: event.totalBytes,
+              speedBps: event.speedBps,
+              etaSec: event.etaSec,
+              rawLine: event.rawLine,
+            });
           }
-          // Project ProgressEvent onto the frozen EngineEvent 'progress' shape.
-          onEvent({
-            type: 'progress',
-            taskId,
-            percent: event.percent,
-            downloadedBytes: event.downloadedBytes,
-            totalBytes: event.totalBytes,
-            speedBps: event.speedBps,
-            etaSec: event.etaSec,
-            rawLine: event.rawLine,
-          });
+        }
+        // D-153: bound the retained remainder — drop the OLDEST prefix so at
+        // most PROGRESS_PENDING_MAX_BYTES of the latest bytes survive (same
+        // keep-the-tail policy as the D-144 diagnostic tail, but on a WORKING
+        // parse buffer: real progress lines are ~100 bytes and always end in a
+        // newline, so only a pathological no-newline flood can ever be clipped,
+        // never a legitimate line). Counted and logged once after the run — the
+        // chunk callback itself stays allocation-free (D-144 performance
+        // contract) and silent.
+        if (pendingBytes > PROGRESS_PENDING_MAX_BYTES) {
+          const cut = dropUtf8Prefix(pending, pendingBytes - PROGRESS_PENDING_MAX_BYTES);
+          pending = cut.rest;
+          pendingBytes -= cut.droppedBytes;
+          pendingDrops.times += 1;
+          pendingDrops.bytes += cut.droppedBytes;
         }
       },
     );
@@ -391,6 +434,20 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
     const result = await handle.done;
     // A final marker without a trailing newline must still reach the queue.
     for (const line of stderrLines.flush()) emitStage(line);
+
+    // D-153: report the pending-buffer trims once per task, after the run and
+    // for every outcome (including cancellation). Normal yt-dlp output never
+    // triggers this — every progress line ends in a newline — so the absence
+    // of this line is the healthy case, and its presence means stdout arrived
+    // without line breaks for longer than the 1 MiB ceiling allows.
+    if (pendingDrops.times > 0) {
+      await this.deps.logger.warn('engine.download', 'progress.pendingTruncated', {
+        drops: pendingDrops.times,
+        droppedBytes: pendingDrops.bytes,
+        limitBytes: PROGRESS_PENDING_MAX_BYTES,
+        retainedBytes: pendingBytes,
+      });
+    }
 
     if (isCanceled()) {
       // yt-dlp keeps the `.part` file; we never touch it here.
@@ -700,6 +757,18 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
     url: string,
     opts: UrlSupportCheckOptions,
   ): Promise<UrlSupportResult> {
+    // T5: read through a lambda — the flag can flip while we await the child,
+    // and a fresh call per check never inherits the stale narrowing TS would
+    // otherwise carry across the await.
+    const signalAborted = (): boolean => opts.signal?.aborted === true;
+    // T5: a caller that already cancelled gets the CANCELLED state without
+    // spawning anything. Still a VALUE, never an exception (fail-open contract).
+    if (signalAborted()) {
+      return {
+        url, state: 'CANCELLED', extractor: '', cached: false,
+        reason: 'pre-check cancelled by the user',
+      };
+    }
     const timeoutMs = opts.timeoutMs ?? URL_PRECHECK_TIMEOUT_MS;
     let argv: string[];
     try {
@@ -732,10 +801,24 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
       timeoutMs,
       maxStdoutBytes: METADATA_MAX_STDOUT_BYTES,
       maxStderrBytes: METADATA_MAX_STDERR_BYTES,
+      // T5: forward the caller's signal so the ADAPTER kills the tree on abort
+      // (one kill implementation, the same one the timeout uses). The result of
+      // an aborted run is decided below from the signal itself.
+      ...(opts.signal === undefined ? {} : { signal: opts.signal }),
     };
     assertSafeSpawnOptions(spawnOptions);
 
     const result = await this.deps.ports.process.spawn(this.deps.enginePath, argv, spawnOptions);
+
+    // T5: the caller cancelled while the pre-check was in flight. Checked FIRST
+    // so an aborted run can never be reported as TIMEOUT (or anything else) —
+    // abort wins. The adapter has already killed the child via the signal.
+    if (signalAborted()) {
+      return {
+        url, state: 'CANCELLED', extractor: '', cached: false,
+        reason: 'pre-check cancelled by the user',
+      };
+    }
 
     if (result.timedOut) {
       return { url, state: 'TIMEOUT', extractor: '', cached: false, reason: 'pre-check timed out' };
@@ -917,6 +1000,55 @@ export function utf8ByteLength(text: string): number {
     }
   }
   return bytes;
+}
+
+/**
+ * D-153: drop the OLDEST prefix of `text` that covers at least `drop` UTF-8
+ * bytes, cutting on a code-point boundary — the working-buffer sibling of
+ * `appendUtf8Tail` (D-144 keeps a tail of stderr diagnostics; this trims the
+ * head of the stdout line-assembly buffer). When the requested cut lands
+ * inside a multi-byte glyph the cut moves FORWARD to the next boundary, so
+ * the retained tail can be a few bytes SHORTER than the caller's ceiling but
+ * is never malformed: the byte walk books exactly what `utf8ByteLength` books
+ * (1/2/3 bytes per code point, a surrogate pair as one 4-byte unit, a lone
+ * surrogate as 3), which keeps the caller's incremental accounting exact:
+ * `droppedBytes + utf8ByteLength(rest) === utf8ByteLength(text)`.
+ *
+ * O(drop) — the walk stops once the overflow is covered and never rescans the
+ * retained tail, so the per-chunk cost of the flood guard stays proportional
+ * to the arriving chunk, not to the buffer (same performance contract as
+ * appendUtf8Tail, 手册坑 23).
+ *
+ * Exported for the D-153 unit tests (pure byte-accounting, no child process).
+ */
+export function dropUtf8Prefix(
+  text: string,
+  drop: number,
+): { rest: string; droppedBytes: number } {
+  if (drop <= 0 || text.length === 0) return { rest: text, droppedBytes: 0 };
+  const total = utf8ByteLength(text);
+  if (drop >= total) return { rest: '', droppedBytes: total };
+  // Identical classification to utf8ByteLength / appendUtf8Tail: advance by
+  // WHOLE code points until the requested byte count is covered.
+  let index = 0;
+  let walked = 0;
+  while (walked < drop && index < text.length) {
+    const code = text.charCodeAt(index);
+    let unitBytes: number;
+    let units = 1;
+    if (code < 0x80) unitBytes = 1;
+    else if (code < 0x800) unitBytes = 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = index + 1 < text.length ? text.charCodeAt(index + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) { unitBytes = 4; units = 2; }
+      else unitBytes = 3;
+    } else {
+      unitBytes = 3;
+    }
+    walked += unitBytes;
+    index += units;
+  }
+  return { rest: text.slice(index), droppedBytes: walked };
 }
 
 /**

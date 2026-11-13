@@ -27,6 +27,12 @@
     var overlay = null;
     var preview = null;
     var busy = false;
+    // T5: true while the enqueue round-trip (and its in-flight pre-check) runs.
+    var enqueueInFlight = false;
+    // T5: the in-precheck wait row + its STATUS poll. `pollMs` is injectable so
+    // tests do not need real 500 ms waits.
+    var pollMs = typeof options.pollMs === 'number' && options.pollMs > 0 ? options.pollMs : 500;
+    var wait = null;
 
     function el(tag, className, text) {
       var node = doc.createElement(tag);
@@ -39,6 +45,63 @@
       var node = el('span', className || '', t(key, params));
       node.setAttribute('data-i18n', key);
       return node;
+    }
+
+    /** T5: tear down the wait row and its poll timer. Idempotent. */
+    function removeWait() {
+      if (wait === null) return;
+      if (wait.timer !== null) clearInterval(wait.timer);
+      if (wait.row.parentNode !== null) wait.row.parentNode.removeChild(wait.row);
+      wait = null;
+    }
+
+    /**
+     * T5: the "pre-check in progress" row with a cancel button and a
+     * checked/total readout. The readout POLLS `URL_SUPPORT_CHECK_STATUS`
+     * instead of listening to a push channel on purpose: this IPC surface is
+     * invoke/response and the project's progress pattern is polled reads
+     * (APP_UPDATE_STATUS, §5 rule 6). Termination is explicit on every path —
+     * `active !== true` stops the interval, and the enqueue reply (which always
+     * resolves) calls `removeWait()`.
+     */
+    function showWait() {
+      removeWait();
+      if (overlay === null) return;
+      var foot = overlay.querySelector('#txt-import-foot');
+      if (foot === null) return;
+      var row = el('div', 'txt-import-wait');
+      row.setAttribute('id', 'txt-import-wait');
+      var progress = el('span', 'txt-import-wait-progress', t('queue.precheck.checking'));
+      progress.setAttribute('id', 'txt-import-wait-progress');
+      var stop = el('button', 'txt-import-btn', t('queue.precheck.cancel'));
+      stop.setAttribute('type', 'button');
+      stop.setAttribute('id', 'txt-import-cancel-precheck');
+      stop.addEventListener('click', function () {
+        stop.setAttribute('disabled', 'disabled');
+        progress.textContent = t('queue.precheck.cancelling');
+        call('URL_SUPPORT_CHECK_CANCEL', {});
+      });
+      row.appendChild(progress);
+      row.appendChild(stop);
+      foot.appendChild(row);
+      var timer = setInterval(function () {
+        call('URL_SUPPORT_CHECK_STATUS', {}).then(function (status) {
+          if (wait === null) return;
+          if (!status || status.active !== true) {
+            // Batch finished (or the probe is unavailable): stop polling; the
+            // enqueue reply will replace this row with the real result.
+            clearInterval(timer);
+            wait.timer = null;
+            return;
+          }
+          var checked = typeof status.checked === 'number' ? status.checked : 0;
+          var total = typeof status.total === 'number' ? status.total : 0;
+          if (total > 0) {
+            progress.textContent = t('queue.precheck.progress', { checked: checked, total: total });
+          }
+        });
+      }, pollMs);
+      wait = { row: row, progress: progress, timer: timer };
     }
 
     function mount(anchor, cssHref) {
@@ -62,10 +125,15 @@
     }
 
     function close() {
+      // T5: closing while the batch pre-check is in flight means "stop" — ask
+      // the main process to cancel it (a no-op when nothing is running). The
+      // enqueue reply then arrives as the `cancelled` result.
+      if (enqueueInFlight) call('URL_SUPPORT_CHECK_CANCEL', {});
       if (overlay !== null && overlay.parentNode !== null) overlay.parentNode.removeChild(overlay);
       overlay = null;
       preview = null;
       busy = false;
+      removeWait();
     }
 
     function shell() {
@@ -213,12 +281,19 @@
       body.textContent = '';
       foot.textContent = '';
       var ok = result && result.ok === true;
-      body.appendChild(message(t('queue.import.result', {
-        requested: result && typeof result.requested === 'number' ? result.requested : 0,
-        enqueued: result && typeof result.enqueued === 'number' ? result.enqueued : 0,
-        failed: result && typeof result.failed === 'number' ? result.failed : 0
-      }), ok ? 'ok' : 'warn'));
-      if (!ok) body.appendChild(message(errorText(result), 'warn'));
+      // T5: a cancelled batch is not a failure row — the user said stop and
+      // nothing was queued. The tally and any real refusals stay below.
+      var cancelled = result !== null && result !== undefined && result.cancelled === true;
+      if (cancelled) {
+        body.appendChild(message(t('queue.precheck.cancelledBatch'), 'warn'));
+      } else {
+        body.appendChild(message(t('queue.import.result', {
+          requested: result && typeof result.requested === 'number' ? result.requested : 0,
+          enqueued: result && typeof result.enqueued === 'number' ? result.enqueued : 0,
+          failed: result && typeof result.failed === 'number' ? result.failed : 0
+        }), ok ? 'ok' : 'warn'));
+      }
+      if (!ok && !cancelled) body.appendChild(message(errorText(result), 'warn'));
       // R1-03: the three-way tally FIRST, so the numbers the user is
       // reconciling ("I imported 40") arrive before the per-URL detail. Only the
       // buckets that are NOT already listed as failures appear below: an
@@ -244,11 +319,13 @@
       failures.forEach(function (item) {
         body.appendChild(message(String(item.url) + ' — ' + String(item.reason), 'warn'));
       });
-      notify(t('queue.import.result', {
-        requested: result && typeof result.requested === 'number' ? result.requested : 0,
-        enqueued: result && typeof result.enqueued === 'number' ? result.enqueued : 0,
-        failed: result && typeof result.failed === 'number' ? result.failed : 0
-      }));
+      notify(cancelled
+        ? t('queue.precheck.cancelledBatch')
+        : t('queue.import.result', {
+          requested: result && typeof result.requested === 'number' ? result.requested : 0,
+          enqueued: result && typeof result.enqueued === 'number' ? result.enqueued : 0,
+          failed: result && typeof result.failed === 'number' ? result.failed : 0
+        }));
       var done = el('button', 'txt-import-btn primary', t('common.close'));
       done.setAttribute('type', 'button');
       done.addEventListener('click', function () { close(); });
@@ -268,8 +345,14 @@
       }
       var button = overlay === null ? null : overlay.querySelector('#txt-import-confirm');
       if (button !== null) button.setAttribute('disabled', 'disabled');
+      // T5: the pre-check inside this round-trip is cancellable — show the
+      // wait row (progress + cancel) until the reply arrives.
+      enqueueInFlight = true;
+      showWait();
       call('TXT_IMPORT_ENQUEUE', payload).then(function (result) {
         busy = false;
+        enqueueInFlight = false;
+        removeWait();
         preview = null;
         renderResult(result);
       });

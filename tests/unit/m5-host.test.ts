@@ -97,8 +97,9 @@ describe('m5 host · gateway composition', () => {
     // + the two TXT import channels (D-129, append-only)
     // + the three playlist batch channels (D-130, append-only)
     // + the two supported-sites / URL pre-check channels (D-134, append-only)
-    // + the two Star-prompt channels (D-148, append-only).
-    expect(built.channels).toHaveLength(28);
+    // + the two Star-prompt channels (D-148, append-only)
+    // + the two pre-check cancel/status channels (T5, append-only).
+    expect(built.channels).toHaveLength(30);
     expect(new Set(channels).size).toBe(channels.length);
     built.dispose();
   });

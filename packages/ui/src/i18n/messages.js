@@ -165,6 +165,13 @@
       'queue.precheck.confirm.timeout': '预检超时。仍要加入队列吗？',
       'queue.precheck.confirm.continue': '仍要加入队列',
       'queue.precheck.confirm.cancel': '取消',
+      // T5: user-level pre-check cancellation (batch dialogs + single-link bar).
+      // Every key here MUST exist in both dictionaries.
+      'queue.precheck.cancel': '取消预检',
+      'queue.precheck.cancelling': '正在取消…',
+      'queue.precheck.progress': '已预检 {checked} / {total}',
+      'queue.precheck.cancelled': '已取消，未加入队列。',
+      'queue.precheck.cancelledBatch': '预检已取消，本次未入队。',
       'queue.paste.hint': 'Ctrl+V 粘贴解析',
       'queue.concurrency': '并发 {active}/{limit}',
       'queue.empty.title': '还没有任务',
@@ -755,6 +762,13 @@
       'queue.precheck.confirm.timeout': 'The pre-check timed out. Add it to the queue anyway?',
       'queue.precheck.confirm.continue': 'Add anyway',
       'queue.precheck.confirm.cancel': 'Cancel',
+      // T5: user-level pre-check cancellation (batch dialogs + single-link bar).
+      // Every key here MUST exist in both dictionaries.
+      'queue.precheck.cancel': 'Cancel pre-check',
+      'queue.precheck.cancelling': 'Cancelling…',
+      'queue.precheck.progress': 'Pre-checked {checked} / {total}',
+      'queue.precheck.cancelled': 'Cancelled — nothing was queued.',
+      'queue.precheck.cancelledBatch': 'The pre-check was cancelled — this batch was not queued.',
       'queue.paste.hint': 'Ctrl+V to paste and parse',
       'queue.concurrency': 'Running {active}/{limit}',
       'queue.empty.title': 'No tasks yet',

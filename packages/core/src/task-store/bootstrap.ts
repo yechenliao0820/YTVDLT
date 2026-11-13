@@ -12,9 +12,19 @@ import type { TaskQueue } from '../task-queue/task-queue.js';
 /** States that cannot survive a process restart. */
 export const INTERRUPTED_STATES: readonly string[] = ['Running', 'FetchingInfo'];
 
-/** Pure count of tasks that were mid-flight when the snapshot was written. */
+/**
+ * Pure count of tasks that were mid-flight when the snapshot was written.
+ * Defence in depth: an entry that is not a traversable record (or has no known
+ * string state) can never have been interrupted, so it is skipped instead of
+ * throwing — `load()` normally guarantees valid records, but this function is
+ * exported and may receive hand-built snapshots.
+ */
 export function countInterrupted(snapshot: TaskSnapshot): number {
-  return snapshot.tasks.filter((task) => INTERRUPTED_STATES.includes(task.state)).length;
+  let count = 0;
+  for (const task of snapshot.tasks) {
+    if (typeof task?.state === 'string' && INTERRUPTED_STATES.includes(task.state)) count += 1;
+  }
+  return count;
 }
 
 export interface RestoreTasksResult {

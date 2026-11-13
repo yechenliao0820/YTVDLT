@@ -21,7 +21,7 @@ import type {
   PlaylistPreviewDto, PlaylistPreviewCancelDto, PlaylistBatchEnqueueDto,
   PlaylistPrecheckReport,
   ExtractorCatalogResult, UrlSupportResult, ExtractorCatalogFailure,
-  SupportedSitesDto, UrlSupportCheckDto,
+  SupportedSitesDto, UrlSupportCheckDto, SpawnAbortSignal,
 } from '@ytvdlt/shared';
 import {
   ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES, STAR_PROMPT_ACTIONS,
@@ -156,7 +156,8 @@ export function normalizeTrashOutcomes(
 export interface SiteSupportPortLike {
   readonly available: boolean;
   catalog(force?: boolean): Promise<ExtractorCatalogResult>;
-  check(url: string, force?: boolean): Promise<UrlSupportResult>;
+  /** T5: the optional signal is the caller's cancellation (see SiteSupportService). */
+  check(url: string, force?: boolean, signal?: SpawnAbortSignal): Promise<UrlSupportResult>;
 }
 
 /** Windows path equality: case-insensitive, slash-insensitive. */
@@ -463,6 +464,13 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   // selection, an extractor name — none of them are the renderer's to choose.
   [IPC_CHANNELS.SUPPORTED_SITES]: ['refresh'],
   [IPC_CHANNELS.URL_SUPPORT_CHECK]: ['url', 'refresh'],
+  // T5: both take NOTHING. CANCEL means "stop the current in-flight pre-check"
+  // (no batch id, no URL list — the renderer never names what it cancels);
+  // STATUS is a read-only progress probe for the batch dialogs. Deliberately
+  // absent: any identifier that would let a page cancel or observe a SPECIFIC
+  // other submission.
+  [IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL]: [],
+  [IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS]: [],
   // D-148: CHECK takes NOTHING (same zero-input rule as APP_INFO) so the page
   // cannot forge a frequency decision; ACTION takes ONLY the action enum —
   // never a URL (the repo page is resolved inside the main process).
@@ -769,6 +777,46 @@ function assertTemplateInput(record: Record<string, unknown>): CommandTemplateIn
 export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unknown) => Promise<unknown>> {
   const handlers = new Map<string, (payload: unknown) => Promise<unknown>>();
 
+  // ---- T5: user-level pre-check cancellation -------------------------------
+  // Every abortable pre-check registers its AbortController here: the single
+  // URL_SUPPORT_CHECK, the DOWNLOAD_START gate check, the TXT batch and the
+  // playlist batch. URL_SUPPORT_CHECK_CANCEL aborts ALL of them — the semantics
+  // are "stop the current pre-check", deliberately narrow so the renderer needs
+  // no batch id and no URL list (same zero-input rule as APP_INFO). A
+  // registered controller is always unregistered in a `finally`, so the set can
+  // never leak a finished check.
+  const cancellablePrechecks = new Set<AbortController>();
+  /**
+   * T5: line-wise progress of the BATCH pre-checks only (a single-URL check has
+   * nothing to count). An entry is created lazily on the first progress report
+   * — i.e. only while a `precheckBatch` is actually running — so `active` never
+   * covers ticket validation or the enqueue itself. Concurrent batches are
+   * summed; the normal case is one dialog pre-checking at a time.
+   */
+  const batchProgress = new Map<AbortController, { checked: number; total: number }>();
+  const registerPrecheck = (): AbortController => {
+    const controller = new AbortController();
+    cancellablePrechecks.add(controller);
+    return controller;
+  };
+  const finishPrecheck = (controller: AbortController): void => {
+    cancellablePrechecks.delete(controller);
+    batchProgress.delete(controller);
+  };
+  const trackBatchProgress = (
+    controller: AbortController,
+  ): (checked: number, total: number) => void => {
+    let entry: { checked: number; total: number } | null = null;
+    return (checked: number, total: number) => {
+      if (entry === null) {
+        entry = { checked: 0, total: 0 };
+        batchProgress.set(controller, entry);
+      }
+      entry.checked = checked;
+      entry.total = total;
+    };
+  };
+
   handlers.set(IPC_CHANNELS.TASK_LIST, async (payload) => {
     const record = validateM5Payload(IPC_CHANNELS.TASK_LIST, payload);
     const tab = record['tab'];
@@ -1047,27 +1095,58 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     // be explained to the user. `blocks` is still computed HERE from the frozen
     // predicate — the renderer never decides what counts as unsupported.
     let supportVerdict: { readonly state: string; readonly extractor: string } | null = null;
+    // T5: the gate check is cancellable. A cancellation is the user saying
+    // "stop", NOT the gate misjudging the link, so the run answers
+    // `PRECHECK_CANCELLED` BEFORE any ticket is spent and BEFORE any task is
+    // created — enqueue must not happen behind the user's back.
     if (deps.siteSupport !== undefined && deps.siteSupport.available) {
-      const verdict = await deps.siteSupport.check(url).catch(() => null);
-      if (verdict !== null) {
-        supportVerdict = { state: verdict.state, extractor: verdict.extractor };
-        if (blocksEnqueue(verdict.state)) {
-          return {
-            accepted: false,
-            enqueued: false,
-            taskIds: [],
-            code: verdict.extractor === '' ? 'SITE_UNSUPPORTED' : 'ITEM_UNSUPPORTED',
-            // No stderr, no argv, no cookie. English is only a FALLBACK for an
-            // older UI: the current renderer resolves `code` in the active
-            // locale, so an English page no longer shows a Chinese sentence.
-            reason: 'This link or site is not supported by the download engine',
-            support: {
-              state: verdict.state,
-              extractor: verdict.extractor,
-              blocks: true,
-            },
-          };
+      // T5: register ONLY when a check actually runs. Registering outside this
+      // branch left a controller in the cancel set for every DOWNLOAD_START on
+      // a build without the capability — the set grew without bound and a
+      // later CANCEL falsely claimed it had stopped something.
+      const precheckController = registerPrecheck();
+      try {
+        const verdict = await deps.siteSupport.check(url, false, precheckController.signal)
+          .catch(() => null);
+        if (verdict !== null) {
+          supportVerdict = { state: verdict.state, extractor: verdict.extractor };
+          if (precheckController.signal.aborted) {
+            return {
+              accepted: false,
+              enqueued: false,
+              taskIds: [],
+              code: 'PRECHECK_CANCELLED',
+              cancelled: true,
+              // No sentence from the main process: the renderer resolves
+              // `code` in the active locale (same rule as the blocks below).
+              reason: 'The pre-check was cancelled',
+              support: {
+                state: verdict.state,
+                extractor: verdict.extractor,
+                blocks: false,
+              },
+            };
+          }
+          if (blocksEnqueue(verdict.state)) {
+            return {
+              accepted: false,
+              enqueued: false,
+              taskIds: [],
+              code: verdict.extractor === '' ? 'SITE_UNSUPPORTED' : 'ITEM_UNSUPPORTED',
+              // No stderr, no argv, no cookie. English is only a FALLBACK for an
+              // older UI: the current renderer resolves `code` in the active
+              // locale, so an English page no longer shows a Chinese sentence.
+              reason: 'This link or site is not supported by the download engine',
+              support: {
+                state: verdict.state,
+                extractor: verdict.extractor,
+                blocks: true,
+              },
+            };
+          }
         }
+      } finally {
+        finishPrecheck(precheckController);
       }
     }
 
@@ -1177,18 +1256,53 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       throw new Error('[m5-ipc] invalid audioFormat');
     }
     if (deps.txtImport === undefined) return txtUnavailableEnqueue();
-    return deps.txtImport.enqueue({
-      importId,
-      kind: rawKind === 'audio' ? 'audio' : 'video',
-      ...(rawQuality === undefined ? {} : { quality: rawQuality as VideoQualityChoice }),
-      ...(rawAudioQuality === undefined ? {} : { audioQuality: rawAudioQuality as AudioQualityChoice }),
-      ...(rawAudioFormat === undefined ? {} : { audioFormat: rawAudioFormat as AudioFormatChoice }),
-    });
+    // T5: the batch pre-check runs inside the service (the renderer never sees
+    // these URLs, D-129), so the cancellation and the progress plumbing are
+    // handed THROUGH the service into `precheckBatch`.
+    const controller = registerPrecheck();
+    try {
+      return await deps.txtImport.enqueue({
+        importId,
+        kind: rawKind === 'audio' ? 'audio' : 'video',
+        ...(rawQuality === undefined ? {} : { quality: rawQuality as VideoQualityChoice }),
+        ...(rawAudioQuality === undefined ? {} : { audioQuality: rawAudioQuality as AudioQualityChoice }),
+        ...(rawAudioFormat === undefined ? {} : { audioFormat: rawAudioFormat as AudioFormatChoice }),
+        precheckSignal: controller.signal,
+        onPrecheckProgress: trackBatchProgress(controller),
+      });
+    } finally {
+      finishPrecheck(controller);
+    }
   });
 
   // ---- Playlist batch import (live probe + single-use ticket) -------------
   const playlistEnqueueUnavailable = (code: PlaylistPreviewCode): PlaylistBatchEnqueueDto => ({
     ok: false, code, requested: 0, enqueued: 0, failed: 0, taskIds: [], failures: [],
+  });
+
+  /**
+   * T5: the reply for a batch the user cancelled mid-pre-check. `code` +
+   * `cancelled` let the dialog say "cancelled, nothing was queued" instead of
+   * counting the run as a gate refusal (a CANCELLED verdict never blocks — the
+   * user simply said stop). `failed` counts only REAL pre-check refusals that
+   * happened before the cancel; the rest were never examined.
+   */
+  const cancelledPlaylistEnqueue = (
+    requested: number,
+    extra: {
+      readonly failures?: readonly { readonly id: string; readonly reason: string }[];
+      readonly precheck?: PlaylistPrecheckReport;
+    } = {},
+  ): PlaylistBatchEnqueueDto => ({
+    ok: false,
+    code: 'PRECHECK_CANCELLED',
+    cancelled: true,
+    requested,
+    enqueued: 0,
+    failed: extra.failures?.length ?? 0,
+    taskIds: [],
+    failures: extra.failures === undefined ? [] : [...extra.failures],
+    ...(extra.precheck === undefined ? {} : { precheck: extra.precheck }),
   });
 
   handlers.set(IPC_CHANNELS.PLAYLIST_PREVIEW, async (payload): Promise<PlaylistPreviewDto> => {
@@ -1253,9 +1367,23 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     if (deps.playlistPreview === undefined || deps.playlistBatch === undefined) {
       return playlistEnqueueUnavailable('PREVIEW_UNAVAILABLE');
     }
+    // T5: the batch pre-check below is cancellable; every exit from here on
+    // unregisters the controller. Read through a lambda: the flag flips while
+    // the pre-check awaits, and a fresh call per check avoids stale narrowing.
+    const precheckController = registerPrecheck();
+    const precheckCancelled = (): boolean => precheckController.signal.aborted;
+    try {
     // An explicit empty selection is refused BEFORE spending the ticket.
     if (Array.isArray(rawIds) && rawIds.length === 0) {
       return playlistEnqueueUnavailable('EMPTY_SELECTION');
+    }
+    // T5: a cancel that arrived before the ticket was spent means "stop" — the
+    // ticket is NOT consumed, so the user can confirm the same preview again.
+    // `requested` counts only what the request named explicitly (the "download
+    // all" default is resolved from the ticket below, which this path never
+    // touched) — the `cancelled` flag is what the dialog actually reports.
+    if (precheckCancelled()) {
+      return cancelledPlaylistEnqueue(Array.isArray(rawIds) ? rawIds.length : 0);
     }
     const consumed = deps.playlistPreview.consume(previewId, url);
     if (!consumed.ok || consumed.playlist === undefined) {
@@ -1290,7 +1418,21 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       const outcome = await precheckBatch(
         withUrl.map((id) => entryUrlOf.get(id) as string),
         deps.siteSupport,
+        // T5: the batch is cancellable and reports line-wise progress to the
+        // STATUS probe the dialogs poll.
+        { signal: precheckController.signal, onProgress: trackBatchProgress(precheckController) },
       );
+      // T5: the user cancelled the pre-check — nothing may be enqueued. The
+      // preview ticket has already been consumed above (the pre-check needs the
+      // entry URLs only the cached PlaylistInfo holds), so a retry needs a
+      // fresh preview; the `cancelled` flag makes the dialog say so instead of
+      // counting this as a gate refusal.
+      if (precheckCancelled()) {
+        return cancelledPlaylistEnqueue(selected.length, {
+          failures: precheckFailures,
+          ...(playlistPrecheck === undefined ? {} : { precheck: playlistPrecheck }),
+        });
+      }
       const stillAllowed = new Set(outcome.allowed);
       // D-137: ONE url can appear on SEVERAL entries. The old `find()` reported
       // a single id while the filter below removes EVERY id with that url, so
@@ -1363,6 +1505,11 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       failures,
       ...(playlistPrecheck === undefined ? {} : { precheck: playlistPrecheck }),
     };
+    } finally {
+      // T5: the controller is unregistered on EVERY exit, including the cancel
+      // returns above, so the cancel set never holds a finished check.
+      finishPrecheck(precheckController);
+    }
   });
 
   // Subtitle preview (stage 2): the real, on-demand probe behind the picker.
@@ -1575,23 +1722,63 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     };
     const port = deps.siteSupport;
     if (port === undefined) return unavailable;
-    const result = await port.check(url, refresh === true);
-    return {
-      url: result.url,
-      state: result.state,
-      extractor: result.extractor,
-      reason: result.reason,
-      cached: result.cached,
-      blocks: blocksEnqueue(result.state),
-      // Stable code so the renderer resolves the sentence in the active
-      // locale; `reason` is the English fallback an old UI can print.
-      code: result.state === 'UNSUPPORTED' && result.extractor === ''
-        ? 'SITE_UNSUPPORTED'
-        : result.state === 'UNSUPPORTED' ? 'ITEM_UNSUPPORTED'
-          : result.state === 'NO_MEDIA' ? 'NO_MEDIA'
-            : result.state === 'TIMEOUT' ? 'PRECHECK_TIMEOUT'
-              : result.state === 'INDETERMINATE' ? 'INDETERMINATE' : '',
-    };
+    // T5: this single check is cancellable — a CANCEL from the page aborts the
+    // signal, which kills the engine child and answers the CANCELLED state.
+    const controller = registerPrecheck();
+    try {
+      const result = await port.check(url, refresh === true, controller.signal);
+      return {
+        url: result.url,
+        state: result.state,
+        extractor: result.extractor,
+        reason: result.reason,
+        cached: result.cached,
+        blocks: blocksEnqueue(result.state),
+        // Stable code so the renderer resolves the sentence in the active
+        // locale; `reason` is the English fallback an old UI can print.
+        code: result.state === 'CANCELLED' ? 'PRECHECK_CANCELLED'
+          : result.state === 'UNSUPPORTED' && result.extractor === ''
+            ? 'SITE_UNSUPPORTED'
+            : result.state === 'UNSUPPORTED' ? 'ITEM_UNSUPPORTED'
+              : result.state === 'NO_MEDIA' ? 'NO_MEDIA'
+                : result.state === 'TIMEOUT' ? 'PRECHECK_TIMEOUT'
+                  : result.state === 'INDETERMINATE' ? 'INDETERMINATE' : '',
+      };
+    } finally {
+      finishPrecheck(controller);
+    }
+  });
+
+  // T5 (append-only): the user-level "stop" for whatever pre-check is in
+  // flight. Zero payload on purpose — the renderer cancels the CURRENT
+  // pre-check and never names a batch, a URL or a ticket. Aborting an
+  // already-finished controller is a no-op, so a stale CANCEL is harmless.
+  handlers.set(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL, async (payload) => {
+    validateM5Payload(IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL, payload);
+    let cancelled = false;
+    for (const controller of [...cancellablePrechecks]) {
+      controller.abort();
+      cancelled = true;
+    }
+    // `cancelled` says whether anything was actually in flight — the caller may
+    // render "nothing to cancel" instead of a fake success.
+    return { ok: true, cancelled };
+  });
+
+  // T5 (append-only): read-only progress probe for the batch dialogs. Polling,
+  // not pushing, on purpose: this IPC surface is invoke/response, and the
+  // project's established progress pattern is a polled read (APP_UPDATE_STATUS,
+  // §5 rule 6). `active` turns false the moment the last batch pre-check
+  // settles, which is the poll's termination condition.
+  handlers.set(IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS, async (payload) => {
+    validateM5Payload(IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS, payload);
+    let checked = 0;
+    let total = 0;
+    for (const entry of batchProgress.values()) {
+      checked += entry.checked;
+      total += entry.total;
+    }
+    return { active: batchProgress.size > 0, checked, total };
   });
 
   // D-148 (A): "may the Star prompt show now?" — a zero-payload read (same
@@ -1708,6 +1895,9 @@ export const M5_CHANNELS: readonly string[] = [
   // D-134 (append-only): supported-site discovery + per-url pre-check.
   IPC_CHANNELS.SUPPORTED_SITES,
   IPC_CHANNELS.URL_SUPPORT_CHECK,
+  // T5 (append-only): user-level pre-check cancellation + batch progress.
+  IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL,
+  IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS,
   // D-148 (append-only): the "Star on GitHub" nudge.
   IPC_CHANNELS.STAR_PROMPT_CHECK,
   IPC_CHANNELS.STAR_PROMPT_ACTION,

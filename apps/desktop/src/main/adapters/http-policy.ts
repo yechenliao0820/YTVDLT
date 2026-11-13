@@ -2,6 +2,9 @@
  * D-137 — one place for the outbound-URL policy of EVERY main-process fetch.
  * D-143 — closes the DNS rebinding gap D-137 had to admit: the connection is
  * now PINNED to policy-verified addresses at the socket layer.
+ * D-152 — IPv6 "public" is an ALLOWLIST: 2000::/3 minus the IANA IPv6
+ * Special-Purpose Address Registry ranges, instead of "everything the private
+ * list did not happen to cover".
  *
  * WHY THIS EXISTS: `fetch(url, { redirect: 'follow' })` makes the network stack
  * decide where the request ends up. An initial URL that passed a host check can
@@ -93,6 +96,12 @@ export const allowAnyHttpUrl: RedirectPolicy = {
 
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 
+/** Trim/lower-case, strip URL brackets and a trailing root dot — the shared
+ * host normalisation for the literal classifiers below (D-152). */
+function normalizeHost(host: string): string {
+  return host.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+}
+
 /**
  * Is this hostname a loopback / link-local / private / non-routable literal?
  *
@@ -108,9 +117,14 @@ const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
  *      fired, so the literal private-address guard was bypassed.
  * The fix classifies the input FIRST (IPv4 literal / IPv6 literal / domain) and
  * only then applies address-range rules.
+ *
+ * D-152: for IPv6 literals the answer is now the exact complement of the
+ * `isPublicIpv6` allowlist below, so EVERY IANA special-purpose range
+ * (multicast, discard-only, documentation, Teredo, 6to4, ORCHID) is rejected —
+ * not just the blocks that used to be hand-listed.
  */
 export function isPrivateHost(host: string): boolean {
-  const raw = host.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  const raw = normalizeHost(host);
   if (raw === '') return true;
 
   const ipv4 = parseIpv4(raw);
@@ -192,23 +206,56 @@ function parseIpv6Groups(text: string): number[] | null {
   return groups;
 }
 
-function isPrivateIpv6(groups: readonly number[]): boolean {
-  if (groups.length !== 8) return true;
-  const first = groups[0] as number;
-  if (groups.every((group) => group === 0)) return true;                       // ::
-  if (groups.slice(0, 7).every((g) => g === 0) && groups[7] === 1) return true; // ::1
-  if ((first & 0xfe00) === 0xfc00) return true;   // fc00::/7 unique-local
-  if ((first & 0xffc0) === 0xfe80) return true;   // fe80::/10 link-local
-  // ::ffff:0:0/96 — IPv4-mapped. `new URL()` normalises [::ffff:127.0.0.1] to
-  // [::ffff:7f00:1], so THIS branch is the one that actually runs.
+/**
+ * D-152 — the IPv6 PUBLIC classifier, written as an allowlist. The previous
+ * negation style ("private list → else public") silently treated every range
+ * it did not know as routable internet, so IANA special-purpose blocks inside
+ * the global-unicast space kept slipping through (documentation, Teredo,
+ * 6to4, ORCHID). The allowlist closes that whole class of hole: an IPv6
+ * address is public ONLY when
+ *   1. it is IPv4-mapped (::ffff:0:0/96) — then the embedded IPv4 address
+ *      decides (a mapped PUBLIC address stays public, D-138); or
+ *   2. it lives in the global-unicast block 2000::/3 (RFC 4291) AND is not
+ *      one of the IANA IPv6 Special-Purpose Address Registry ranges carved
+ *      out of that block (checked below).
+ * Everything else — ::, ::1, fc00::/7 (ULA), fe80::/10 (link-local),
+ * ff00::/8 (multicast), 100::/64 (discard-only), 64:ff9b::/96 (NAT64),
+ * fec0::/10 (deprecated site-local) and all unallocated space — fails closed
+ * by construction. Pure, so it is unit-testable.
+ */
+function isPublicIpv6(groups: readonly number[]): boolean {
+  if (groups.length !== 8) return false;
+  // ::ffff:0:0/96 — IPv4-mapped (IANA special-purpose, RFC 4291). The socket
+  // is really IPv4 to the low 32 bits, so unwrap and reuse the unchanged IPv4
+  // rules. `new URL()` normalises [::ffff:127.0.0.1] to [::ffff:7f00:1], so
+  // the HEX form is the one that actually arrives here.
   if (groups[5] === 0xffff && groups.slice(0, 5).every((g) => g === 0)) {
     const high = groups[6] as number;
     const low = groups[7] as number;
-    return isPrivateIpv4([
+    return !isPrivateIpv4([
       (high >> 8) & 0xff, high & 0xff, (low >> 8) & 0xff, low & 0xff,
     ]);
   }
-  return false;
+  const first = groups[0] as number;
+  const second = groups[1] as number;
+  // Global unicast 2000::/3 (RFC 4291): the first three bits must be 001.
+  // Everything else lands here fail-closed, including the IANA special-purpose
+  // entries outside the block (::, ::1, fc00::/7, fe80::/10, ff00::/8,
+  // 100::/64, 64:ff9b::/96, …).
+  if ((first & 0xe000) !== 0x2000) return false;
+  // IANA IPv6 Special-Purpose Address Registry entries INSIDE 2000::/3:
+  if (first === 0x2001 && second === 0x0000) return false;            // 2001::/32 Teredo (RFC 4380)
+  if (first === 0x2001 && second === 0x0db8) return false;            // 2001:db8::/32 documentation (RFC 3849)
+  if (first === 0x2001 && (second & 0xfff0) === 0x0010) return false; // 2001:10::/28 ORCHID (RFC 4843)
+  if (first === 0x2001 && (second & 0xfff0) === 0x0020) return false; // 2001:20::/28 ORCHIDv2 (RFC 7343)
+  if (first === 0x2002) return false;                                 // 2002::/16 6to4 (RFC 7526, relays withdrawn)
+  if (first === 0x3fff && (second & 0xf000) === 0x0000) return false; // 3fff::/20 documentation (RFC 9637)
+  return true;
+}
+
+/** D-152: the private-side IPv6 answer is the exact allowlist complement. */
+function isPrivateIpv6(groups: readonly number[]): boolean {
+  return !isPublicIpv6(groups);
 }
 
 /**
@@ -228,14 +275,25 @@ export function isPublicHttpsUrl(raw: string): boolean {
 }
 
 /**
- * D-143: address-side twin of a URL host policy. `isPrivateHost` already
- * classifies address LITERALS correctly (RFC 1918 / loopback / link-local /
- * CGNAT / TEST-NET / unique-local / IPv4-mapped IPv6, hex spellings included),
- * so it is reused verbatim on the RESOLVED addresses — anything private or
- * reserved that a hostname resolves to must be rejected.
+ * D-143: address-side twin of a URL host policy. D-152 turns the IPv6 answer
+ * into an allowlist: a RESOLVED address is public only when it is an IPv6
+ * literal inside 2000::/3 that misses every IANA special-purpose carve-out
+ * (`isPublicIpv6`), or an IPv4 literal that the unchanged IPv4 rules call
+ * public. Empty or unparseable input fails closed. A stray hostname (never
+ * produced by the D-143 resolver, but defensive) keeps the old `!isPrivateHost`
+ * answer so normal fc/fd-prefixed domains are not misjudged here — pitfall 28.
  */
 export function isPublicResolvedAddress(address: string): boolean {
-  return !isPrivateHost(address);
+  const raw = normalizeHost(address);
+  if (raw === '') return false;
+  if (raw.includes(':')) {
+    const groups = parseIpv6(raw);
+    // An IPv6 literal we cannot parse is not public: fail closed.
+    if (groups === null) return false;
+    return isPublicIpv6(groups);
+  }
+  // IPv4 literals (and stray names): the negation rules are unchanged.
+  return !isPrivateHost(raw);
 }
 
 export const publicHttpsOnly: RedirectPolicy = {

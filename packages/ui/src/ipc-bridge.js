@@ -34,6 +34,10 @@
     // page today, but registering the names here keeps a future dialog or
     // renderer caller from being rejected with `command-not-allowed`.
     'SUPPORTED_SITES', 'URL_SUPPORT_CHECK',
+    // T5 (append-only): user-level pre-check cancellation + batch progress.
+    // CANCEL takes no payload (it stops the CURRENT in-flight pre-check);
+    // STATUS is a read-only poll. §5 requires all THREE cable tables to agree.
+    'URL_SUPPORT_CHECK_CANCEL', 'URL_SUPPORT_CHECK_STATUS',
     // D-139 (append-only): command templates. The settings page calls the wire
     // strings directly today; §5 requires all three cable tables to agree so a
     // future caller is never rejected with `command-not-allowed`.
@@ -87,6 +91,9 @@
     // D-134: exact wire strings from shared/src/ipc.ts (append-only).
     SUPPORTED_SITES: 'ytvdlt:sites:list',
     URL_SUPPORT_CHECK: 'ytvdlt:sites:check',
+    // T5: exact wire strings from shared/src/ipc.ts (append-only).
+    URL_SUPPORT_CHECK_CANCEL: 'ytvdlt:sites:checkCancel',
+    URL_SUPPORT_CHECK_STATUS: 'ytvdlt:sites:checkStatus',
     // D-139: exact wire strings from shared/src/ipc.ts (append-only).
     TEMPLATE_LIST: 'ytvdlt:template:list',
     TEMPLATE_SAVE: 'ytvdlt:template:save',

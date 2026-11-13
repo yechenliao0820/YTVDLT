@@ -24,12 +24,19 @@
  * never blocks on a URL it did not actually examine, and reports the count it
  * skipped so the caller can be honest about it.
  */
-import type { UrlSupportResult } from '@ytvdlt/shared';
+import type { SpawnAbortSignal, UrlSupportResult } from '@ytvdlt/shared';
 import { blocksEnqueue } from '@ytvdlt/shared';
 
-/** The narrow slice the gate needs; `SiteSupportService` satisfies it. */
+/**
+ * The narrow slice the gate needs; `SiteSupportService` satisfies it.
+ *
+ * T5 (append-only widening, backwards compatible): the 2nd/3rd parameters are
+ * the production port's `force` flag (the gate NEVER forces a refresh — it
+ * always passes `false`) and the batch's cancellation signal. Extra optional
+ * parameters keep every existing fake implementation valid.
+ */
 export interface PrecheckPortLike {
-  check(url: string): Promise<UrlSupportResult>;
+  check(url: string, force?: boolean, signal?: SpawnAbortSignal): Promise<UrlSupportResult>;
 }
 
 /**
@@ -117,6 +124,19 @@ export function emptyPrecheckSummary(totalUrls: number): PrecheckSummary {
  *
  * `check` is allowed to throw; a throw is counted as "not examined" and PASSES,
  * because our own failure must never be reported as the site's fault.
+ *
+ * T5 — CANCELLATION: `options.signal` is the user's "stop". The semantics are
+ * deliberately narrow:
+ *   - after abort, NO NEW check is started (workers stop taking work and
+ *     `decide` refuses to spawn);
+ *   - checks already in flight receive the SAME signal, so the engine kills
+ *     its child and answers CANCELLED — the gate does not fabricate verdicts;
+ *   - the outcome stays fail-open: a CANCELLED verdict never blocks (§3.4) and
+ *     lands in the `indeterminate` bucket, which already absorbs it;
+ *   - URLs the cursor never reached are reported as `skipped` — they were
+ *     genuinely never examined, the same honesty as budget-skipped ones.
+ * Whether the batch was cancelled is decided by the CALLER from its own signal
+ * (`signal.aborted`); the gate only stops and reports honestly.
  */
 export async function precheckBatch(
   urls: readonly string[],
@@ -126,6 +146,14 @@ export async function precheckBatch(
     readonly concurrency?: number;
     /** Called for each verdict so a caller may cache / log without re-asking. */
     readonly onResult?: (result: UrlSupportResult) => void;
+    /** T5: abort stops new checks; in-flight ones settle as CANCELLED. */
+    readonly signal?: SpawnAbortSignal;
+    /**
+     * T5: line-wise settle progress for the renderer's "checked / total".
+     * Fires once before the first check (0, total) and once per settled line —
+     * line-wise, so it always sums to `total` exactly like the summary does.
+     */
+    readonly onProgress?: (checked: number, total: number) => void;
   } = {},
 ): Promise<PrecheckOutcome> {
   // No port = no opinion. Every URL passes, nothing is claimed to be checked.
@@ -149,11 +177,18 @@ export async function precheckBatch(
   // exactly one spawn, which is the whole point of the cursor.
   const inFlight = new Map<string, Promise<UrlSupportResult | null>>();
   let cursor = 0;
+  // T5: read through a lambda — the flag flips asynchronously and a fresh call
+  // per check never inherits a stale narrowing from a previous loop iteration.
+  const cancelled = (): boolean => options.signal?.aborted === true;
   const workers = Math.min(
     Math.max(1, options.concurrency ?? PRECHECK_CONCURRENCY),
     Math.max(1, examined.length),
   );
   const decide = (url: string): Promise<UrlSupportResult | null> => {
+    // T5: no new engine after the user cancelled — the check is left UNDECIDED
+    // so it passes (fail-open); the caller sees `signal.aborted` and does not
+    // enqueue anything anyway.
+    if (cancelled()) return Promise.resolve(null);
     const settled = verdicts.get(url);
     if (settled !== undefined) return Promise.resolve(settled);
     const pending = inFlight.get(url);
@@ -162,7 +197,7 @@ export async function precheckBatch(
     // the URL UNDECIDED so it passes below, never surfaced as the site's fault.
     const job = (async (): Promise<UrlSupportResult | null> => {
       try {
-        const result = await port.check(url);
+        const result = await port.check(url, false, options.signal);
         verdicts.set(url, result);
         options.onResult?.(result);
         return result;
@@ -173,19 +208,36 @@ export async function precheckBatch(
     inFlight.set(url, job);
     return job;
   };
+  let settledLines = 0;
+  options.onProgress?.(0, examined.length);
   await Promise.all(Array.from({ length: workers }, async () => {
     for (;;) {
+      // T5: the user said stop — take no further work. Indexes past the cursor
+      // were never attempted and are reported below as `skipped`.
+      if (cancelled()) return;
       const index = cursor;
       cursor += 1;
       if (index >= examined.length) return;
       await decide(examined[index] as string);
+      // Progress is LINE-wise (a repeated line settles too), so checked can
+      // always reach total — unlike a unique-check counter under deduplication.
+      settledLines += 1;
+      options.onProgress?.(settledLines, examined.length);
     }
   }));
+
+  // Consumed indexes are prefix-ordered: [0, min(cursor, examined.length)) were
+  // handed to `decide`; the rest were never attempted (only possible after an
+  // abort) and count as skipped, next to the budget-skipped tail.
+  const attemptedCount = Math.min(cursor, examined.length);
+  const attempted = examined.slice(0, attemptedCount);
+  const neverAttemptedUrls = examined.slice(attemptedCount);
+  const neverAttempted = neverAttemptedUrls.length;
 
   const allowed: string[] = [];
   const blocked: PrecheckBlock[] = [];
   const notes: PrecheckBlock[] = [];
-  for (const url of examined) {
+  for (const url of attempted) {
     const result = verdicts.get(url);
     if (result === undefined) { allowed.push(url); continue; }
     if (blocksEnqueue(result.state)) {
@@ -202,15 +254,17 @@ export async function precheckBatch(
     }
     allowed.push(url);
   }
-  // Skipped-for-budget URLs PASS, and they are counted separately from the
-  // examined ones so the report can never imply full coverage.
+  // Skipped-for-budget AND never-attempted URLs PASS, and they are counted
+  // separately from the examined ones so the report can never imply full
+  // coverage.
+  allowed.push(...neverAttemptedUrls);
   allowed.push(...untouched);
   return {
     allowed,
     blocked,
-    skipped: untouched.length,
+    skipped: untouched.length + neverAttempted,
     notes,
-    summary: summarizeExamination(examined, verdicts, untouched.length),
+    summary: summarizeExamination(attempted, verdicts, untouched.length + neverAttempted),
   };
 }
 

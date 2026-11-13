@@ -614,6 +614,13 @@ const M3_TEST_FILE_MAP = {
   'star-prompt-policy.test.ts': ['A-D148'],
   'star-prompt-ipc.test.ts': ['A-D148'],
   'star-prompt-ui.test.ts': ['A-D148'],
+  // D-150…D-156 · 外部审计修复轮（同 D-142…D-148 的既定做法）：本轮 4 个
+  // 新增测试文件各挂到自己的真断言，绝不硬挂到不相关的旧断言上。判定逻辑
+  // 与门禁口径未改；文件在 vitest 里真挂了，对应断言就会红。
+  'http-ipv6-whitelist.test.ts': ['A-D152'],
+  'progress-pending-limit.test.ts': ['A-D153'],
+  'precheck-cancel.test.ts': ['A-D156'],
+  'precheck-cancel-ui.test.ts': ['A-D156'],
 };
 
 /** Honest, separately-listed deviations (never reported as PASS assertions). */
@@ -1342,6 +1349,15 @@ const M5_ASSERTIONS = [
   { id: 'A-D145', layer: 'L1', subject: '配置原子写入真替换：直接 rename 覆盖目标（Windows MoveFileEx REPLACE_EXISTING）、EPERM/EBUSY/EACCES 有界重试、rename 失败原文件完好、tmp 清理', tests: ['node-ports-atomic-write', 'config-store'], needs: ['vitest'], evidence: ['reports/vitest-results.json::node-ports-atomic-write.test.ts,config-store.test.ts', 'apps/desktop/src/main/adapters/node-ports.ts', 'docs/DECISIONS.md::D-145'] },
   { id: 'A-D147', layer: 'L1', subject: '首次启动跟随系统语言并立即持久化：空串哨兵 → resolveStartupLanguage 检测一次（zh* → zh-CN，否则 en）→ SETTINGS_SET 写回，之后永不重检测、手动切换永远优先', tests: ['bootstrap', 'config-store'], needs: ['vitest'], evidence: ['reports/vitest-results.json::bootstrap.test.ts,config-store.test.ts', 'apps/desktop/src/main/bootstrap.ts', 'packages/core/src/config-store/defaults.ts', 'docs/DECISIONS.md::D-147'] },
   { id: 'A-D148', layer: 'L1', subject: '「去 Star」引导：同版本第 3 次启动才问、每版本 ≤2 次、later 后 7 天间隔、star/never 永久安静、升级重置；CHECK 零 payload、ACTION 只收枚举、URL 只在主进程；live-only 动态弹窗不进基线', tests: ['star-prompt-policy', 'star-prompt-ipc', 'star-prompt-ui'], needs: ['vitest'], evidence: ['reports/vitest-results.json::star-prompt-policy.test.ts,star-prompt-ipc.test.ts,star-prompt-ui.test.ts', 'packages/core/src/star-prompt/policy.ts', 'apps/desktop/src/main/star-prompt-service.ts', 'docs/DECISIONS.md::D-148'] },
+  // D-150…D-156 · 外部审计修复轮：每个新决策一条真断言，状态由
+  // findTestCount() 对真实 vitest 结果计数，不写死 PASS。
+  { id: 'A-D150', layer: 'L1', subject: 'GitHub Actions CI 工作流与仓库脚本一致：push main + 全 PR → frozen-lockfile 安装 → typecheck → npm test（覆盖率门限）→ check-layering → frozen-gate；有意排除 e2e / 在线 / 离线集成 / 自动打包；vitest 守卫在干净环境绿跑判 CLEAN', tests: ['vitest-run-guard'], needs: ['vitest'], evidence: ['reports/vitest-results.json::vitest-run-guard.test.ts', '.github/workflows/ci.yml', '.github/workflows/desktop-pack.yml', 'docs/DECISIONS.md::D-150'] },
+  { id: 'A-D151', layer: 'L1', subject: '任务快照逐记录结构校验：非 null 非数组对象、id 非空串、url 字符串、state ∈ 七态、artifacts 若存在必须数组；坏记录隔离跳过并计数，合法快照行为零变化', tests: ['task-store'], needs: ['vitest'], evidence: ['reports/vitest-results.json::task-store.test.ts', 'packages/core/src/task-store/task-store.ts', 'packages/core/src/task-store/bootstrap.ts', 'docs/DECISIONS.md::D-151'] },
+  { id: 'A-D152', layer: 'L1', subject: 'IPv6 公网判定白名单化：仅 2000::/3 且排除六段特殊用途前缀，URL 字面量与解析地址两条路径共用分类；v4-mapped 解包复用 IPv4 判断；范围外一律 fail-closed', tests: ['http-ipv6-whitelist', 'http-network-boundary'], needs: ['vitest'], evidence: ['reports/vitest-results.json::http-ipv6-whitelist.test.ts,http-network-boundary.test.ts', 'apps/desktop/src/main/adapters/http-policy.ts', 'docs/DECISIONS.md::D-152'] },
+  { id: 'A-D153', layer: 'L1', subject: 'spawnStreaming 行拼装缓冲按字节封顶 1 MiB：增量记账、码点边界丢最旧前缀、任务结束统一记一条 WARNING；无换行 chunk 跳过解析保持 O(chunk)；不杀进程、不影响实时进度', tests: ['progress-pending-limit', 'stream-tail-buffer'], needs: ['vitest'], evidence: ['reports/vitest-results.json::progress-pending-limit.test.ts,stream-tail-buffer.test.ts', 'packages/engine-ytdlp/src/yt-dlp-engine.ts', 'packages/shared/src/engine-limits.ts', 'docs/DECISIONS.md::D-153'] },
+  { id: 'A-D154', layer: 'L1', subject: '组件更新器三入口接入完整网络安全策略：GitHub 系复用 isTrustedReleaseHost 严格白名单 + 逐跳校验 + DNS 地址钉扎；显式配置镜像允许任意 http(s) 跳但传输层守卫无条件保留；shared 契约未改', tests: ['component-updater', 'http-update-source'], needs: ['vitest'], evidence: ['reports/vitest-results.json::component-updater.test.ts,http-update-source.test.ts', 'apps/desktop/src/main/component-updater.ts', 'packages/engine-ytdlp/src/http-update-source.ts', 'docs/DECISIONS.md::D-154'] },
+  { id: 'A-D155', layer: 'L1', subject: '任务快照并发写三层防御：TaskStore promise 链串行化 + lastSaveError、原子写唯一 tmp 名、persistSnapshot 失败经 logSink 每失败周期一条 WARNING 且不抛回下载主路径；对外契约与快照格式不变', tests: ['node-ports-atomic-write', 'task-queue', 'task-store'], needs: ['vitest'], evidence: ['reports/vitest-results.json::node-ports-atomic-write.test.ts,task-queue.test.ts,task-store.test.ts', 'packages/core/src/task-store/task-store.ts', 'apps/desktop/src/main/adapters/node-ports.ts', 'docs/DECISIONS.md::D-155'] },
+  { id: 'A-D156', layer: 'L1', subject: 'URL 预检用户级取消：AbortSignal 贯穿 shared → node-ports → 引擎 → 门禁三入口，IPC 两通道零 payload，取消即不入队并回带 cancelled，批量进度轮询；CANCELLED 永不拦截、终止确认弹窗；live-only 动态 DOM 不改冻结基线', tests: ['precheck-cancel', 'm5-channels', 'm5-host'], needs: ['vitest'], evidence: ['reports/vitest-results.json::precheck-cancel.test.ts,precheck-cancel-ui.test.ts,m5-channels.test.ts,m5-host.test.ts', 'apps/desktop/src/main/site-precheck-gate.ts', 'apps/desktop/src/main/m5-channels.ts', 'docs/DECISIONS.md::D-156'] },
 ];
 
 /** M5 e2e cases that must exist and pass for the visual assertions. */

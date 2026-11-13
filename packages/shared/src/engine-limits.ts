@@ -99,3 +99,21 @@ export const STREAM_TAIL_MAX_BYTES = 1 * 1024 * 1024;
  */
 export const STREAM_TAIL_TRUNCATED_MARKER =
   '[ytvdlt] stream tail truncated: earlier output discarded';
+
+/**
+ * D-153 (T6): ceiling on the streaming (download) stdout LINE-ASSEMBLY buffer,
+ * in BYTES. `parseProgressChunk` hands back the last unterminated line as
+ * `rest`, and the engine used to accumulate it with an unbounded `+=` — stdout
+ * that never emits a newline grew that string without limit for as long as the
+ * child ran. This is the stdout sibling of D-144's stderr tail ceiling.
+ *
+ * Unlike D-133 (kill on overflow) and unlike the D-144 diagnostic tail (whose
+ * content feeds the error mapper), this buffer is a WORKING parse buffer: when
+ * the ceiling is hit the OLDEST prefix is dropped so the most recent bytes
+ * survive, the drop is counted, and one WARNING is logged after the run ends.
+ * Nothing is thrown and the child is never terminated. Real yt-dlp progress
+ * lines are ~100 bytes and always end in a newline, so a normal download never
+ * comes near the ceiling — 1 MiB is the same backstop magnitude as
+ * STREAM_TAIL_MAX_BYTES, chosen to bound memory, not as a tuned threshold.
+ */
+export const PROGRESS_PENDING_MAX_BYTES = 1 * 1024 * 1024;

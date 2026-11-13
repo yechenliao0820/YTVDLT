@@ -1641,3 +1641,73 @@ QA 复验判 M2 FAIL，问题**全部在验收脚本/测试侧**（产品实现�
 | 决策 | ① `handoff-check.mjs::staleness()`：先把报告时刻 `new Date()` 换算成与提交日期同一时区（本地）的日历日再比「天」，解析失败回退旧的字面切片；「同日不报警」的原意保留。② `acceptance.mjs`：按既定模式补 6 条真断言 `A-D142` / `A-D143` / `A-D144` / `A-D145` / `A-D147` / `A-D148`（subject/evidence 对应各 DECISIONS 条目与产物文件），7 个测试文件登记进 `M3_TEST_FILE_MAP`（`bootstrap.test.ts` / `config-store.test.ts` **合并进既有键**而非重复键——对象字面量后键会静默覆盖 `A-4.4-01…03` / `A-M5-00` / `A-4.1-02` 旧映射）。判定逻辑一行未改。 |
 | 验证 | 重跑 `acceptance.mjs --milestone M5`：file-coverage 门转 PASS、新断言全 PASS（findTestCount 对真实 vitest 结果计数）、allGreen 恢复 true；重跑 e2e 31/31 + 反例 5/5；`handoff-check.mjs` 全部 fresh、决策编号推进正常。 |
 | 未覆盖 | ① `staleness` 的换算假定单机固定时区；跨时区迁移机器的场景未测（按天比较的粒度下无实际影响）；② 断言数量从 28 → 34 属既有机制的正常生长，`handoff-check` 对数字是动态读取、无硬编码。 |
+
+## D-150 · 2026-11-13 · GitHub Actions CI：把本地五道门禁搬上干净 runner（外部审计修复轮）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 仓库此前没有 CI，六项审计修复与全量验证全靠接手者本地手跑；门禁散落在维护手册里，推送后没有任何机制证明它们在干净环境下同样成立。 |
+| 根因 | 无 workflow 定义；本地门禁易漏跑；且未核实 `vitest-run-guard` 在干净 CI（无历史缓解标记）下是否会被误判为需要绕过。 |
+| 决策 | 新增 `.github/workflows/ci.yml`（push `main` + 全 PR，`windows-latest`；`pnpm install --frozen-lockfile` → `pnpm typecheck` → `npm test`（含四维 ≥70 覆盖率门限）→ `check-layering` → `frozen-gate`）与 `.github/workflows/desktop-pack.yml`（仅 `workflow_dispatch` 的手动打包骨架）。**有意排除**：e2e 截图基线、在线测试（D-132）、离线集成（需 `fetch-runtime`）、自动打包。核实 pnpm 9.15.9 来自 `packageManager` 字段、与 lockfileVersion `'9.0'` 互证；D-29/D-32 的 vitest 守卫在干净环境绿跑判 CLEAN、红跑判 REJECTED，无需绕过或环境变量。事实纠正：该守卫属 D-29/D-32，不是 D-146。 |
+| 验证 | js-yaml 解析通过；workflow 引用的脚本与 npm script 逐一与仓库核对一致；`git status` 仅新增 `.github/`；本地全量门禁全绿（139 文件 / 2000 项 0 failed、覆盖率四维 ≥70、layering 0 违规、frozen-gate PASS、e2e 31/31 + 反例 5/5）；按 D-149 做法补 `A-D150` 真断言后 M5 验收 10/10 gates PASS、allGreen=true。 |
+| 未覆盖 | ① CI 需推送后才首次真实运行；② `desktop-pack.yml` 的 artifact 路径依据 `BUILD.md` 推断、未实跑；③ 首次推送三步确认：Actions 页出现 "CI" 新 run 且手动打包无自动记录、四关全绿、红了看日志定位（首跑最可能是 electron 下载或用例超时），**不许为变绿改测试结论**。 |
+
+## D-151 · 2026-11-13 · 任务快照逐记录结构校验（外部审计项 T3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `tasks.json` 由磁盘读回后直接进消费方：坏记录（`null`、数组、缺 `id`、非法 `state`、`artifacts` 非数组）会让队列恢复、状态机或 UI 崩在启动路径上。此前只有整体形状检查。 |
+| 根因 | `load()` 假定每条记录可信；`shared` 是纯类型包、没有运行时状态常量，`core` 又不能引入运行时依赖，校验只能本地手写。 |
+| 决策 | `load()` 逐记录零依赖校验：非 null 非数组对象、`id` 非空字符串、`url` 字符串、`state` ∈ 七态枚举（core 本地 `TASK_STATES` 镜像 `shared/src/task.ts`）、`artifacts` 若存在必须是数组；坏记录隔离跳过 + `lastLoadSkippedCount` 只读 getter；`recover()` 与 `countInterrupted()` 加防御性兜底双保险；合法快照行为零变化（原对象引用通过、缺 `artifacts` 仍合法、`load` 失败仍回落空快照）。`mediaInfo` / `request` / `error` 有意不深校验——消费方均判空，坏形状降级显示不崩启动。 |
+| 验证 | 定向 5 文件 53 例全过；core/shared typecheck 干净；check-layering 0 违规、frozen-gate PASS；fixture `tests/fixtures/tasks-snapshot.json` 加载结果与跳过数 0 不变；最终全量 2000 项 0 failed。 |
+| 未覆盖 | ① `lastLoadSkippedCount` 暂无日志 / UI 消费方（任务书明确不为此扩 IPC）；② 无真实损坏样本数据，坏记录形状由测试构造。 |
+
+## D-152 · 2026-11-13 · IPv6 公网地址判断白名单化（外部审计项 T4）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `isPublicIpv6` 用黑名单排除若干私网段，`2000::/3` 内大量 IANA 特殊用途前缀仍被判公网；URL 字面量路径与解析地址路径各自判断、分类可能漂移；`::8.8.8.8`（已废弃 v4-compatible）旧判公网是个暗洞。 |
+| 根因 | 黑名单是「想起一个加一个」，无法穷举登记表；两条路径没有共用同一个分类器。 |
+| 决策 | 改白名单：必须命中 `2000::/3`（全球单播）且不在六段特殊用途——`2001::/32`（Teredo）、`2001:db8::/32`（文档）、`3fff::/20`（文档）、`2002::/16`（6to4）、`2001:10::/28`（ORCHID）、`2001:20::/28`（ORCHIDv2），每段注释带 RFC 依据。`isPrivateIpv6` 取白名单补集，**URL 字面量路径（`isPublicHttpsUrl`）同步收紧**，两路径共用分类不漂移。`::ffff:0:0/96` 解包末 32 位复用 IPv4 判断（与 D-138 一致）。`::` / `::1` / `fc00::/7` / `fe80::/10` / `ff00::/8` / `100::/64` / `64:ff9b::/96` / `fec0::/10` 落在 `2000::/3` 外，被网关自动排除（fail closed）。IPv4 / 域名逻辑零变化，D-137 / D-143 机制零变化。 |
+| 验证 | 3 文件 32 例全过（23 既有回归 + 9 新增：27 拒绝 × 2 路径、14 接受、fail-closed、`fc`/`fd` 域名不误拒、传输层钩子拒解析到特殊段的跳）；desktop typecheck exit 0；全量 2000 项 0 failed、frozen-gate PASS。 |
+| 未覆盖 | ① 登记表内其它段未排除（如 `2001:2::/48` Benchmarking）——审计名单定为六段，未擅自扩大；② 静态前缀判断无动态登记表查询；③ `64:ff9b` NAT64 宁严勿松；④ 无真实外网联机证据。 |
+
+## D-153 · 2026-11-13 · stdout 行拼装缓冲按字节封顶（外部审计项 T6）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `spawnStreaming` 的 `pending` 是无上限的 `+=`：`parseProgressChunk` 把最后一条未终止的行留在 `rest`，stdout 长时间不换行（病态站点 / 洪泛）时，缓冲随子进程运行时长无限增长。这是 D-144 修完 stderr 诊断尾缓冲后 stdout 侧的同构缺口。 |
+| 根因 | 工作缓冲没有存活上限，且按字符计数会低估 CJK 最多 3 倍（手册坑 23）。 |
+| 决策 | `pending` 按字节增量记账（禁 `string.length`），超 `PROGRESS_PENDING_MAX_BYTES = 1 MiB` 丢最旧前缀（码点边界、代理对整体移动）、计数，任务结束统一记一条 `progress.pendingTruncated` WARNING。fast-path：无换行 chunk 跳过解析调用，把洪泛从「每 chunk 重切 1 MiB」降为 O(chunk)。不杀进程、不抛异常、不影响实时进度；D-133 / D-144 两缓冲机制原样。**注意**：开工时工作树已有上次取消留下的编译不过半成品（`dropUtf8Prefix` 无定义），审查其前提后补齐——本工作树存在「无报告遗留物」是有先例的。 |
+| 验证 | 11 新用例 + 42 解析契约组 + 33 D-133 组全过；shared / engine-ytdlp typecheck exit 0；check-layering 0；全量 2000 项 0 failed、frozen-gate PASS。 |
+| 未覆盖 | ① 与洪泛尾熔接同一行的那条进度行不可解析（解析器固有语义，修复前同样）；② 上限是 backstop，未做真实引擎在线实测；③ 保留尾部可比上限少 0–3 字节（码点边界对齐）。 |
+
+## D-154 · 2026-11-13 · 组件更新器接入完整网络安全策略（外部审计项 T1，本轮 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 组件更新器三入口（版本查询 `getText` / 清单校验 / 二进制下载 `getBytes`）没有接入应用更新器已有的逐跳、DNS 钉扎与私网拦截策略；GitHub 源与操作者显式配置的镜像源信任边界不清。 |
+| 根因 | `component-updater` 直接用默认 options，没有 `urlPolicy` 接线；而 `node-ports` 对任何 `urlPolicy` 都**无条件叠加** `isPublicResolvedAddress` 公网校验——若对镜像套「同源 + 白名单」会一刀切打死内网镜像。 |
+| 决策 | 三入口全部接入。`componentSourceUrlPolicy(url)` 按源分流：GitHub 系（`github.com` / `*.github.com` / `*.githubusercontent.com`，与官方 yt-dlp feed 吻合）→ 复用应用更新器 `isTrustedReleaseHost` 严格白名单 + 逐跳校验 + DNS 地址校验 / 钉扎（经既有 `HttpFetchOptions.urlPolicy` 接线，**shared 未改**）；其余 URL = 操作者显式配置镜像 → 显式信任，允许任何 http(s) 跳，传输层守卫（逐跳、5 跳上限、环检测、socket 钉扎）无条件保留。测试把镜像模式断言成**精确空 options**，防「忘传策略」伪装成镜像模式（坑 29 精神）。 |
+| 验证 | 7 文件 73 例全过；desktop / engine-ytdlp typecheck 过；check-layering 0；frozen-gate PASS；T2 落盘后复验 node-ports 端口语义未变；全量 2000 项 0 failed。 |
+| 未覆盖 | ① 组件二进制已有 SHA-256 三重校验（清单哈希 → 写前 → 写后），但清单与二进制同 feed，哈希防损坏不认证首次来源，信任根 = 源主机 TLS（与 D-137 同边界，非新引入）；② 镜像路径继承 D-143 残余局限；③ 未做真实外网 / 安装包实测。 |
+
+## D-155 · 2026-11-13 · 任务快照并发写入竞争（外部审计项 T2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 两个任务同时完成时，固定 `${path}.tmp` 被同时打开 / 截断 / 写入并竞速 rename，可能写失败或让旧快照覆盖新快照；`persistSnapshot` 失败被静默吞掉，用户无从得知历史没落盘。 |
+| 根因 | 固定 tmp 名无隔离；`TaskStore.save` 无串行化；队列周期持久化异常不上报。 |
+| 决策 | 三层防御：① `TaskStore` promise 链串行写入（沿用 `config-store` 的 enqueue 模式，**stringify 固定在调用时刻**，落盘即调用方递交的内容；链永不 reject 防毒化），对外 promise 契约与快照 JSON 格式逐字节不变。② 原子写 tmp 名 `${path}.${pid}-${seq}.tmp`（进程内单调 + 跨进程隔离），rename 仍是唯一原子提交（D-145 未动），rename 前失败清理自有 tmp。③ `persistSnapshot` 失败经既有 `CorePorts.logSink` 记 `WARNING/task-queue/snapshot.persist.failed`（落 `app-*.jsonl`），**每次失败周期一条**（防 `persistIntervalMs=0` 刷屏），异常不抛回下载主路径。选 logSink 而非新增 TaskEvent：后者要动 append-only 的 shared 契约。 |
+| 验证 | 3 文件 56/56 + 11 个关联文件 89/89 全过；core / desktop typecheck 过；check-layering 0；frozen-gate PASS；全量 2000 项 0 failed。 |
+| 未覆盖 | ① 真机双任务同时完成时序未实测；② `shared/src/ports.ts:14` JSDoc 仍写 "same-dir `<path>.tmp`"（append-only 未改，**待批准后更新注释**）；③ `data-dir.ts` / `app-update-service.ts` sidecar / `thumbnail-cache` 各自的裸 fs `.tmp` 不在 `CorePorts`，本次未动（探针串行、thumbnail 有 writeChain、sidecar 顺序写），如需统一收口另行立项。 |
+
+## D-156 · 2026-11-13 · 批量网站预检的用户级取消（外部审计项 T5）+ 半成品甄别与收尾
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 外部审计指出 URL 预检的 `CANCELLED` 只是前瞻占位（D-135 已记），`AbortSignal` 未贯穿 `ProcessPort.spawn`，用户无法中止批量预检。本任务被限额杀死的 Agent 留下「两份新测试 30/30 实测全过、但无完成报告、覆盖面未审计」的半成品落盘；接手后全量基线实测 **7 项既有测试失败**、M5 验收 `file-coverage` 门为红。 |
+| 根因 | ① 原链路根本没有取消通道；② 半成品未经全量验证与覆盖面审计，残留 4 处缺陷：动态取消条 `removePrecheckCancelBar` 在测试沙箱 DOM（节点暴露 `parent` 而非 `parentNode`）上抛出未处理 rejection，连带击穿 `subtitle-picker.test.ts` 7 例；`DOWNLOAD_START` 在无 `siteSupport` 的构建里注册 controller 却不在 `finally` 注销，取消集合无界增长；`URL_SUPPORT_CHECK` 的 `CANCELLED` 未映射稳定 code，且 UI 把它归入「仍要加入队列」确认态，跨视图取消可能违背「取消 = 不入队」；TXT 取消把未检查的 URL 全数计为 `failed`。③ T4 / T6 的代码注释各自残留 `D-150` 占位编号，互相冲突。④ 4 个新测试文件未按 D-149 既定做法登记进 `M3_TEST_FILE_MAP`。 |
+| 决策 | ① **先甄别再续写**：`git diff` 逐文件对照任务书 → 全包 typecheck 排除编译不过的遗留物 → 定向测试，已实现且测过的部分一律保留，只补缺口。② 保留 Agent 已落盘的全链路：shared `SpawnOptions.signal`（结构化 `SpawnAbortSignal`，因 shared 无 DOM lib）→ `node-ports` abort 走 `killTree` + 有界等待退出证据（坑 21 / 27）→ `checkUrlSupport` 返回 `CANCELLED` 仍永不抛 → `SiteSupportService` 透传并禁用 in-flight 共享 → `precheckBatch` 取消后不发新检查、在途自然终止、`summary` 如实计数（未尝试的行计入 `skipped`，`CANCELLED` 落进现成 `indeterminate` 桶）。③ IPC 两通道 append-only（`URL_SUPPORT_CHECK_CANCEL` 零 payload / `URL_SUPPORT_CHECK_STATUS` 只读进度），三张表同改（坑 29）、`PAYLOAD_KEYS` 登记、`M5_CHANNELS` 30 个；D-134 契约不破坏。④ 取消语义三入口：单 URL 在**花掉字幕票据之前**拦截，TXT / PLAYLIST 回带 `cancelled` + `PRECHECK_CANCELLED` 且绝不入队，UI 明确提示「已取消，未入队」；门禁对 `CANCELLED` 依旧 fail-open。⑤ **补齐 4 处缺口**：DOM 移除改用 D-139 的三连守卫（并给 `showPrecheckCancelBar` 加 `<body>` 守卫）；controller 只在真正跑预检时注册；`CANCELLED` 映射 `PRECHECK_CANCELLED` 且 UI 把它当终止态（不弹确认框、不发 `DOWNLOAD_START`）；TXT 取消的 `failed` 只计真实拒绝。⑥ UI 全部 live-only 动态 `createElement`（坑 30），静态 HTML 与冻结基线零改动；i18n 双语 5 键一致；进度用轮询（同 `APP_UPDATE_STATUS` 模式），不引入推送通道与无 teardown 的监听器。⑦ 统一编号注释：T4 的 `D-150` → `D-152`、T6 的 `D-150` → `D-153`（纯注释，不改行为）。⑧ 按 D-149 做法补 `A-D150`…`A-D156` 七条真断言与 4 个新测试文件映射，恢复 M5 file-coverage 门。 |
+| 验证 | 新增 / 扩充测试共 32 项（含 real child + killTree + `exitCode null`、三入口取消、跨视图 `CANCELLED` 终止、controller 不泄漏、双语文案）；修复后 `subtitle-picker.test.ts` 51/51 全绿。**全量**：`pnpm typecheck` 5/5；`npm test` 139 文件 / **2000 项 0 failed**，覆盖率 statements 89.44% / branches 86.37% / functions 92.22% / lines 89.44%（门槛 70）；`check-layering` 0 违规、`frozen-gate` PASS；`run-e2e.mjs` **31/31 用例 + 5/5 反例，每个 case 像素 0 差异，未重建任何基线**；M5 验收 10/10 gates PASS、38/41 断言 PASS + 3 SKIPPED、allGreen=true；`handoff-check.mjs` 对账通过。 |
+| 未覆盖 | ① 真实外网与打包后真机窗口未点过（铁律 9，打包等业主点名）；② `STATUS` 是 500 ms 轮询而非推送（设计取舍，无监听器泄漏）；③ `CANCEL` 通道刻意无 batch id，abort **所有**在途预检——多窗口同时预检会一起被取消；④ 播放列表取消时预览票据已被消费，重试需重新预览（测试已钉住）；⑤ 取消后与洪泛尾熔接的进度行、静态前缀白名单等边界分别见 D-153 / D-152；⑥ 本轮 7 项决策**均未发版**，版本号待业主裁定。 |

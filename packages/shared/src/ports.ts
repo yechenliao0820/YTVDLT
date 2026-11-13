@@ -40,6 +40,25 @@ export interface HashPort {
   sha256Bytes(data: Uint8Array): Promise<string>;
 }
 
+/**
+ * T5 (append-only): the minimal abort surface `SpawnOptions.signal` needs.
+ *
+ * STRUCTURAL ON PURPOSE: this package compiles with `types: []` (no DOM lib,
+ * no `@types/node`), so the DOM `AbortSignal` type does not exist here. Every
+ * real producer — `new AbortController().signal` in the Electron main process
+ * — satisfies this shape, so callers pass their signal without a cast and
+ * without `shared` growing an `electron` / `node:*` dependency (§2 layering).
+ *
+ * `addEventListener` keeps the listener untyped (`() => void`) and `type` a
+ * plain `string` so the DOM/Node overloads remain assignable in both
+ * directions; the adapter only ever listens for `'abort'`.
+ */
+export interface SpawnAbortSignal {
+  readonly aborted: boolean;
+  addEventListener(type: string, listener: () => void, options?: { once?: boolean }): void;
+  removeEventListener(type: string, listener: () => void): void;
+}
+
 export interface SpawnOptions {
   /** Locked at the type level: NEVER `true`. */
   shell: false;
@@ -62,6 +81,18 @@ export interface SpawnOptions {
   maxStdoutBytes?: number;
   /** D-133: independent ceiling for collected stderr, in bytes. */
   maxStderrBytes?: number;
+  /**
+   * T5 (append-only): cooperative cancellation for BOUNDED jobs (the URL
+   * pre-check). When the signal fires, the adapter aborts the wait, kills the
+   * whole process TREE through the same `killTree()` path as the timeout
+   * (a bare `child.kill()` cannot stop a yt-dlp onefile bootloader) and
+   * settles the promise only on real exit evidence — `close` / `error`, or
+   * the bounded tree-kill answer — never on "kill was issued".
+   *
+   * Absent means "uncancellable", which is what every pre-existing caller
+   * keeps: normal downloads and metadata probes never pass one.
+   */
+  signal?: SpawnAbortSignal;
 }
 
 export interface SpawnResult {
