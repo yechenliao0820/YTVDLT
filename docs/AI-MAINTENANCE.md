@@ -36,7 +36,7 @@
 9. **默认只打安装版**（`--win nsis`）。便携版与更新清单属点名项，业主说「打包」才跑；不要主动打包（一次约 5 分钟）。
 10. **改了本手册或 `BUILD-HISTORY.md` 要同步外层阅读副本**：业主在 `C:/Users/leolee/Desktop/YTVDLT/docs/` 放了副本，两边不一致会让人拿着旧规则干活。
 11. **版本号按 §7 的十进制进位规则取**，任一段都不写两位数；发版前查 `CHANGELOG.md` 确认下一版号。
-12. **维护完成后不要主动推送仓库或发布 Release**。等业主明确说「上传仓库」/「发布 release」再执行；执行后把仓库地址、分支、提交号与上传方法一起交给业主或下一位接手者（见 §11）。推送和发布是对外动作，不是收尾的自动步骤。**`main` 已受分支保护（§7.1）：任何推送只能推分支再开 PR，直推 `main` 会被 GH013 拒绝；不要试图找 API 绕过或临时关规则。**
+12. **维护完成后不要主动推送仓库或发布 Release**。等业主明确说「上传仓库」/「发布 release」再执行；执行后把仓库地址、分支、提交号与上传方法一起交给业主或下一位接手者（见 §11）。推送和发布是对外动作，不是收尾的自动步骤。**`main` 已受分支保护（§7.1）：任何推送只能推分支再开 PR，直推 `main` 会被 GH013 拒绝；不要试图找 API 绕过或临时关规则。所有推送统一走长期分支 `dev`（§7.1），不要为每一轮改动新建带编号的分支；PR 一律由业主自己创建，AI 不代开、不代合并。**
 13. **`README.md` 与 `README.zh-CN.md` 必须同时改**（D-100）：英文是默认门面，中文是镜像，两份章节一一对应、顶部各有语言切换行。只改一份等于制造两种真相；`docs/assets/` 里的截图随之更新时也要确认两份引用一致。
 14. **GitHub Release 说明一律用英文**：Release 页面是仓库门面，面向国际读者；中文只写进 `CHANGELOG.md` / `DECISIONS.md` 这类内部文档。发版时把英文说明贴进 Release，不要把中文正文直接发出去（`DECISIONS.md` 里的 D-xx 编号可以保留，作为可追溯的括注）。
 
@@ -321,12 +321,25 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 **这是业主定下的长期策略**（项目已进入对外维护阶段），不是待办事项，
 不要提议关闭它，也不要因为「只是改文档」就想直推。
 
-**日常流程（唯一正确姿势）**
+**日常流程（唯一正确姿势）· 固定长期分支 `dev`**
 
-1. 在本地提交（可以直接提交在 `main` 上，也可以先建分支）；
-2. 推**分支**：`git push -u origin main:refs/heads/<branch>`（或 `git push -u origin <branch>`）；
-3. 用 GitHub 回显的 `https://github.com/<owner>/YTVDLT/pull/new/<branch>` 建 PR；
-4. 等 `ci` job 绿 → Merge（这一步由业主点击，AI 不代点）。
+> **2026-11-14 业主定规**：不再为每一轮修复新建 `fix/d-xxx-yyy` 之类带编号的分支
+> （「每次提交都创建新分支，这样很乱的」）。**后续所有本地提交与上传一律走同一个分支
+> `dev`**，本轮更新了什么写在 commit message / `DECISIONS.md` 里，不靠分支名表达。
+> 该约定属流程 / 结构知识，权威出处就是本节，**不另立 D-编号**（`DECISIONS.md` 只记代码行为决策）。
+
+1. **开工先同步**：`git fetch --prune`，在干净工作树上把 `dev` 追到最新
+   `origin/main`（`git merge --ff-only origin/main`）。PR 合并后 `main` 会前进、
+   `dev` 会落后，不同步就提交会产生分叉。
+2. 切到 `dev`（`git checkout dev`），把改动**提交在 `dev` 上**；
+3. 业主说「推送」时 → `git push -u origin dev`（一条命令，不新建分支）；
+4. 把 GitHub 回显的 `https://github.com/<owner>/YTVDLT/pull/new/dev` **只报告给业主**；
+   **PR 由业主自己创建**，AI 不代开、不代合并、不改远端设置；
+5. 等 `ci` job 绿 → Merge（这一步由业主点击，AI 不代点）。
+
+`dev` 于 2026-11-14 基于 `4a77e22` 创建并推送，与 `main` 同点；它是长期分支，
+**不要在 PR 合并后删除**。历史分支（`audit/d-162-171`、`fix/d-173-188`、
+`fix/d-190-194`、`fix/d-195-196`）按业主决定全部保留，作为各轮改动的远端溯源点。
 
 **为什么不能直推**：`.github/workflows/ci.yml` 在 `push main` 与所有 PR 上跑
 （`windows-latest`；`pnpm typecheck` → `npm test`（四维 ≥70）→ `check-layering` →
@@ -349,8 +362,10 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 修好后门禁自动解除。CI 红了按日志定位，不得为变绿改测试结论（铁律 6 / 8）。
 
 > 本环境只维护本地工作树：**未经业主明确指令不 commit、不 push、不改远端设置**。
-> 业主说「推送」时，按上面的分支 + PR 流程执行，并在交付里给出分支名、提交号与 PR 入口。
-> 不要在 PR 合并后删掉分支——它是这次改动的远端溯源点（需要清理时由业主决定）。
+> 业主说「推送」时，按上面的 **`dev` 固定分支**流程执行，并在交付里给出分支名、
+> 提交号与 PR 入口（只报告链接，不代开 PR）。
+> **不要删除任何分支**：历史分支是各轮改动的远端溯源点，`dev` 是长期工作分支；
+> 需要清理时一律由业主决定（2026-11-14 业主已决定全部保留）。
 
 ---
 
@@ -496,21 +511,28 @@ node scripts/check-layering.mjs                     # 有没有偷偷 import nod
 
 ### 代码仓库与上传
 
-- 公开仓库：`https://github.com/yechenliao0820/YTVDLT.git`；默认分支 `main`；remote 名 `origin`。
+- 公开仓库：`https://github.com/yechenliao0820/YTVDLT.git`；默认分支 `main`；remote 名 `origin`；
+  **长期工作分支 `dev`**（§7.1，2026-11-14 业主定规）。
 - **不要主动推送**（铁律 12）。维护做完先本地交付并等指令；业主说「上传仓库」后再执行。
-- 上传方法：
+- 上传方法（固定 `dev`，不再为每一轮改动新建分支）：
 
   ```bash
   git remote -v                                  # 先确认 origin 指向上面的地址
+  git fetch --prune                              # 开工先同步：PR 合并后 main 会前进
+  git checkout dev
+  git merge --ff-only origin/main                # 干净工作树上把 dev 追到最新 main
   git status --short                             # 看清楚本次要提交什么
-  git add -A && git commit -m "<改动摘要>"
-  git push origin main                           # 首次需 GitHub 授权，之后凭据由 Git Credential Manager 缓存
+  git add -A && git commit -m "<改动摘要>"        # 更新内容写进 commit message，不靠分支名表达
+  git push -u origin dev                         # 只推 dev；直推 main 会被 GH013 拒
   ```
 
+  首次需 GitHub 授权，之后凭据由 Git Credential Manager 缓存。
 - 推送前体检：确认没有大文件（单文件 > 50 MB 会被拒）、密钥 / token 误入、以及
   `.gitignore` 是否仍覆盖 `node_modules/`、`dist-*`、`_to-delete/`、随包 exe、`reports/`。
-- 上传后把**仓库地址、分支、本次提交号**写进回复交给业主／下一位；
-  发布二进制 Release 同样等业主明确指令，产物在 `dist-<version>/`。
+- 上传后把**仓库地址、分支 `dev`、本次提交号**，以及 GitHub 回显的 PR 入口
+  `https://github.com/<owner>/YTVDLT/pull/new/dev` 写进回复交给业主／下一位；
+  **PR 由业主自己创建，AI 不代开、不代合并**；发布二进制 Release 同样等业主明确指令，
+  产物在 `dist-<version>/`。
 
 ### 发布 Release（0.2.5 起实测路径）
 
