@@ -238,3 +238,67 @@ describe('M4-3 · mid-download snapshot (kill while transferring)', () => {
     expect(second.queue.get('live')?.state).toBe('Completed');
   });
 });
+
+// ---------------------------------------------------------------------------
+// D-209 · queued-but-never-started tasks survive a restart without going stale.
+//
+// `restore()` deliberately does NOT re-fill the FIFO (booting must never start
+// downloads by itself), so a snapshot that carried `Idle` / `ReadyWithInfo`
+// records brought them back parked in NO queue at all: `cancel()` answered
+// false, `remove()` was the only exit, and the old UI offered retry for
+// Error/Canceled only — "quit while 17 tasks were waiting" left them
+// permanently stalled. The record must therefore be RESTARTABLE (D-199 made
+// `restart()` accept both states) and must report "not pending" so the UI can
+// tell it apart from a live FIFO entry.
+// ---------------------------------------------------------------------------
+describe('D-209 · restored parked tasks ({Idle, ReadyWithInfo}) stay restartable', () => {
+  it('restore keeps the states, starts nothing, and reports them as NOT pending', async () => {
+    const files = new Map<string, string>([[
+      SNAPSHOT_PATH,
+      JSON.stringify(snapshot([
+        record('queued', 'Idle'),
+        record('ready', 'ReadyWithInfo', null, mediaInfo()),
+      ])),
+    ]]);
+    const { queue, engineState, store } = session(files);
+    await restoreTasks(queue, store);
+
+    expect(queue.get('queued')?.state).toBe('Idle');
+    expect(queue.get('ready')?.state).toBe('ReadyWithInfo');
+    // Booting never starts a download behind the user's back.
+    expect(engineState.downloadCalls).toBe(0);
+    // Neither record sits in the FIFO — that is exactly what the UI keys on.
+    expect(queue.isPending('queued')).toBe(false);
+    expect(queue.isPending('ready')).toBe(false);
+  });
+
+  it('restart() starts a restored Idle record (probe + transfer)', async () => {
+    const files = new Map<string, string>([[
+      SNAPSHOT_PATH,
+      JSON.stringify(snapshot([record('queued', 'Idle')])),
+    ]]);
+    const { queue, engineState, store } = session(files);
+    await restoreTasks(queue, store);
+
+    await queue.restart('queued');
+    await tick();
+    expect(engineState.probeCalls).toBe(1);
+    expect(engineState.downloadCalls).toBe(1);
+    expect(queue.get('queued')?.state).toBe('Completed');
+  });
+
+  it('restart() starts a restored ReadyWithInfo record without re-probing', async () => {
+    const files = new Map<string, string>([[
+      SNAPSHOT_PATH,
+      JSON.stringify(snapshot([record('ready', 'ReadyWithInfo', null, mediaInfo())])),
+    ]]);
+    const { queue, engineState, store } = session(files);
+    await restoreTasks(queue, store);
+
+    await queue.restart('ready');
+    await tick();
+    expect(engineState.probeCalls).toBe(0); // mediaInfo was cached by the snapshot
+    expect(engineState.downloadCalls).toBe(1);
+    expect(queue.get('ready')?.state).toBe('Completed');
+  });
+});

@@ -383,3 +383,122 @@ describe('D-200 · cancel() lands in the handle-less probe → engine window', (
     expect(queue.get('t1')?.error ?? null).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// D-209 · a cancel that lands while VERIFICATION is running wins.
+//
+// The engine handle stays registered until `run()`'s `finally`, and
+// `killTree()` answers `true` for an already-exited child. So a cancel during
+// the verifying stage reached `Running -> Canceled` — but the completion path
+// went on: `history.add()` wrote a row and the terminal transition then threw
+// (`Canceled -> Completed` / `Canceled -> Error` are not legal edges), which
+// `runSafely` turned into a bogus `UNKNOWN` error pinned on the canceled
+// record. Observed symptom: the file is on disk, the card says canceled *and*
+// failed, and the history already contains it.
+// ---------------------------------------------------------------------------
+describe('D-209 · cancel during verification wins (no contradictory state)', () => {
+  const ARTIFACT = 'C:/out/verify.mp4';
+
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => { resolve = r; });
+    return { promise, resolve };
+  }
+
+  function verifyingQueue(options: { verifyOk: boolean }) {
+    const mem = createInMemoryPorts();
+    mem.state.files.set(ARTIFACT, 'video-bytes');
+    const history = new HistoryStore({ ports: mem.ports });
+    const gate = deferred();
+    const engine: DownloadEngine = {
+      async version() { return 'fake'; },
+      async probe() { return mediaInfo(); },
+      async probePlaylist() {
+        throw { code: 'UNKNOWN', message: 'x', detail: '', retryable: false, report: 'x' };
+      },
+      download(req: DownloadRequest, onEvent: (e: EngineEvent) => void) {
+        queueMicrotask(() => onEvent({
+          type: 'completed',
+          taskId: req.taskId,
+          artifacts: [{ taskId: req.taskId, path: ARTIFACT, kind: 'video', sizeBytes: 11 }],
+        }));
+        // The real engine answers `true` for a child that already exited
+        // (`killTree` short-circuits on `!isAlive(pid)`).
+        return { pid: 4242, cancel: async () => true };
+      },
+      async selfUpdate() {
+        return { fromVersion: '', toVersion: '', channel: 'stable', changed: false };
+      },
+    };
+    const verifier = {
+      async verify(input: { taskId: string; artifacts: string[] }) {
+        await gate.promise;
+        return {
+          taskId: input.taskId, artifacts: input.artifacts, postprocessed: false,
+          criteria: [{ id: 'C1' as const, status: 'PASS' as const, detail: 'ok' }],
+          ok: options.verifyOk,
+          failureCode: options.verifyOk ? null : ('ARTIFACT_INCOMPLETE' as const),
+          durationMs: 1,
+        };
+      },
+    };
+    const queue = new TaskQueue({
+      ports: mem.ports, engine, verifier, history,
+      jsRuntimePath: 'C:/runtime/node.exe',
+    });
+    return { queue, history, gate };
+  }
+
+  it('successful verification after a cancel: stays Canceled, no error, no history row', async () => {
+    const { queue, history, gate } = verifyingQueue({ verifyOk: true });
+    await queue.enqueue(record('t1'));
+    await tick();
+    // The transfer is over and the queue is inside `verifier.verify()`.
+    expect(queue.get('t1')?.state).toBe('Running');
+    expect(queue.get('t1')?.lastStage).toBe('verifying');
+
+    expect(await queue.cancel('t1')).toBe(true);
+    expect(queue.get('t1')?.state).toBe('Canceled');
+
+    gate.resolve();
+    await tick();
+
+    const task = queue.get('t1');
+    expect(task?.state).toBe('Canceled');
+    // The junk UNKNOWN error is the exact symptom this decision removes.
+    expect(task?.error ?? null).toBeNull();
+    expect(task?.lastStage).toBe('verifying'); // no invented Completed stage
+    expect(queue.activeTaskIds).not.toContain('t1'); // slot released
+    expect(await history.query({})).toEqual([]); // nothing was recorded
+  });
+
+  it('failed verification after a cancel: still Canceled (never Error), no history row', async () => {
+    const { queue, history, gate } = verifyingQueue({ verifyOk: false });
+    await queue.enqueue(record('t1'));
+    await tick();
+    expect(queue.get('t1')?.lastStage).toBe('verifying');
+
+    expect(await queue.cancel('t1')).toBe(true);
+    gate.resolve();
+    await tick();
+
+    const task = queue.get('t1');
+    expect(task?.state).toBe('Canceled');
+    expect(task?.error ?? null).toBeNull();
+    expect(queue.activeTaskIds).not.toContain('t1');
+    expect(await history.query({})).toEqual([]);
+  });
+
+  it('the cancel is only final while it really happened: an uncanceled run still completes', async () => {
+    const { queue, history, gate } = verifyingQueue({ verifyOk: true });
+    await queue.enqueue(record('t1'));
+    await tick();
+    expect(queue.get('t1')?.lastStage).toBe('verifying');
+
+    gate.resolve();
+    await tick();
+
+    expect(queue.get('t1')?.state).toBe('Completed');
+    expect((await history.query({})).length).toBe(1);
+  });
+});

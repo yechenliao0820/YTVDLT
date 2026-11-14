@@ -198,16 +198,19 @@ describe('D-146 · live cancel availability matches what TaskQueue can do', () =
   });
 
   // D-162 REVISES the D-146 rule: the probe now carries an AbortSignal, so
-  // `FetchingInfo` is cancellable and the button must be armed. `ReadyWithInfo`
-  // is still inert — it is a zero-length phase with no process to kill.
-  it('live: FetchingInfo arms cancel (D-162 probe handle); ReadyWithInfo stays inert', async () => {
+  // `FetchingInfo` is cancellable and the button must be armed.
+  // D-209 REVISES it again: D-200 gave `ReadyWithInfo` a real cancellable path
+  // (no handle → the queue records the request and transitions to `Canceled`
+  // itself; the run consumes it before spawning), so the button is armed there
+  // too — leaving it inert was UI/backend contract drift, not a capability gap.
+  it('live: FetchingInfo and ReadyWithInfo both arm cancel (D-162 probe / D-200 window)', async () => {
     const fetching = boot({ live: true, taskId: 't9', detail: detailFor('FetchingInfo') });
     await fetching.flush();
     expect(fetching.actions.get('cancel')?.getAttribute('aria-disabled')).toBe('false');
 
     const ready = boot({ live: true, taskId: 't9', detail: detailFor('ReadyWithInfo') });
     await ready.flush();
-    expect(ready.actions.get('cancel')?.getAttribute('aria-disabled')).toBe('true');
+    expect(ready.actions.get('cancel')?.getAttribute('aria-disabled')).toBe('false');
   });
 
   // D-164 REVISES the D-76 rule: the queue's parked-task marker is `pending`,
@@ -222,24 +225,33 @@ describe('D-146 · live cancel availability matches what TaskQueue can do', () =
     }
   });
 
-  it('live: clicking cancel on a probe-stage task dispatches no TASK_ACTION', async () => {
+  it('live: clicking cancel on a ReadyWithInfo task dispatches the real TASK_ACTION', async () => {
     const { actions, calls, flush } = boot({ live: true, taskId: 't9', detail: detailFor('ReadyWithInfo') });
     await flush();
     (actions.get('cancel')?.listeners['click'] ?? [])[0]?.();
     await flush();
-    expect(calls.filter((entry) => entry.channel === 'ytvdlt:task:action')).toHaveLength(0);
+    const dispatched = calls.filter((entry) => entry.channel === 'ytvdlt:task:action');
+    expect(dispatched).toHaveLength(1);
+    expect((dispatched[0]?.payload as { action?: string }).action).toBe('cancel');
   });
 
-  it('availability contract: live branch = Running | FetchingInfo | pending', () => {
+  it('availability contract: live branch = Running | FetchingInfo | ReadyWithInfo | pending', () => {
     const { sandbox } = boot({ live: true, taskId: 't9', detail: detailFor('Running') });
     const { availability } = pageOf(sandbox);
     expect(availability({ state: 'Running' }, true).cancel).toBe(true);
     expect(availability({ state: 'FetchingInfo' }, true).cancel).toBe(true);
     expect(availability({ state: 'Idle', pending: true }, true).cancel).toBe(true);
+    expect(availability({ state: 'ReadyWithInfo' }, true).cancel).toBe(true);
     // A restored-but-never-run task is also `Idle`; without the marker it must
-    // NOT offer a cancel the queue would refuse.
+    // NOT offer a cancel the queue would refuse (`Idle -> Canceled` is not an
+    // edge). It gets a RETRY entry instead (D-209): `restart()` accepts both
+    // Idle and ReadyWithInfo since D-199, and without it such a card could only
+    // be deleted.
     expect(availability({ state: 'Idle' }, true).cancel).toBe(false);
-    expect(availability({ state: 'ReadyWithInfo' }, true).cancel).toBe(false);
+    expect(availability({ state: 'Idle' }, true).retry).toBe(true);
+    expect(availability({ state: 'ReadyWithInfo' }, true).retry).toBe(true);
+    // A task still sitting in the FIFO must not get a second enqueue entry.
+    expect(availability({ state: 'Idle', pending: true }, true).retry).toBe(false);
   });
 
   it('static fixture branch keeps the legacy rule (screenshot baseline behaviour)', () => {

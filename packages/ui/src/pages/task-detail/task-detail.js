@@ -48,17 +48,24 @@
     var running = model.state === 'Running' || model.state === 'FetchingInfo';
     var retryable = model.state === 'Error' || model.state === 'Canceled';
     if (liveMode === true) {
-      // D-76 / D-146 / D-162 / D-164: same branch shape and cancel rule as
-      // queue.js — Running (transfer handle), FetchingInfo (probe handle since
-      // D-162) and a FIFO-parked task (`pending`) are all cancellable.
+      // D-76 / D-146 / D-162 / D-164 / D-209: same branch shape and cancel rule
+      // as queue.js — Running (transfer handle), FetchingInfo (probe handle
+      // since D-162), ReadyWithInfo (D-200 records a handle-less cancel and the
+      // run consumes it before spawning) and a FIFO-parked task (`pending`).
+      // D-209: a snapshot-restored `Idle` / `ReadyWithInfo` record is parked in
+      // no queue at all; `restart()` accepts both states (D-199), so this page
+      // offers retry for "not pending, not started" exactly like the queue card.
+      var restored = model.pending !== true
+        && (model.state === 'Idle' || model.state === 'ReadyWithInfo');
       return {
         'open-file': Array.isArray(model.artifacts) && model.artifacts.length > 0,
         'open-folder': Array.isArray(model.artifacts) && model.artifacts.length > 0,
         'copy-url': true,
         'copy-error-report': typeof model.errorCode === 'string' && model.errorCode.length > 0,
-        cancel: model.state === 'Running' || model.state === 'FetchingInfo' || model.pending === true,
+        cancel: model.state === 'Running' || model.state === 'FetchingInfo'
+          || model.state === 'ReadyWithInfo' || model.pending === true,
         remove: !running,
-        retry: retryable
+        retry: retryable || restored
       };
     }
     return {

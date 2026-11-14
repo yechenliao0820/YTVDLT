@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   normalizedForContainment, artifactRootsOf, isPathInsideRoots, splitArtifactsByRoots,
-  isSpecificRoot, trustedArtifactRoots,
+  isSpecificRoot, trustedArtifactRoots, canonicalContainmentRoots,
 } from '@ytvdlt/core';
 
 const ROOTS = ['C:/Videos', 'C:/Music'];
@@ -229,5 +229,70 @@ describe('D-204 · realpath result forms are judged by the pure gate', () => {
   it('大小写 / 分隔符差异不改变判定（realpath 形态与 manifest 拼写可不同）', () => {
     expect(isPathInsideRoots('\\\\?\\C:\\VIDEOS\\Sub\\A.MP4', ['c:/videos'])).toBe(true);
     expect(isPathInsideRoots('\\\\?\\C:\\VideosEvil\\a.mp4', ['c:/videos'])).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-209 · canonical 别名的「扩权」边界
+// D-208 给 realpath 判定补了根的 canonical 别名（8.3 短名 → 长名）。但别名
+// 本身也可能把信任范围放大：配置根自己是一个指向盘符根的 junction 时，
+// realpath(root) 就是 `C:\`，无条件收进判定列表等于「整盘都算任务输出目录」。
+// 这里钉住：别名只有在仍是「具体根」（isSpecificRoot）时才被接受。
+// ---------------------------------------------------------------------------
+describe('D-209 · canonicalContainmentRoots 不收过宽的别名', () => {
+  const specific = (map: Record<string, string>) => async (path: string): Promise<string> => {
+    const key = path.replace(/\\/g, '/').toLowerCase();
+    const hit = map[key];
+    if (hit === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' });
+    return hit;
+  };
+
+  it('根可解析为同一目录的另一形态 → 别名照常加入（D-208 行为不变）', async () => {
+    const realpath = specific({
+      'c:/users/runner~1/videos': 'C:\\Users\\runneradmin\\Videos',
+    });
+    const roots = await canonicalContainmentRoots(['C:/Users/RUNNER~1/Videos'], realpath);
+    expect(roots).toHaveLength(2);
+    // 8.3 短名根的合法产物仍被判为「根内」——D-208 的收口不能被这次收紧打回。
+    expect(isPathInsideRoots('C:/Users/runneradmin/Videos/clip [id].mp4', roots)).toBe(true);
+    expect(isPathInsideRoots('C:/Users/runneradmin/Elsewhere/clip.mp4', roots)).toBe(false);
+  });
+
+  it('配置根是指向盘符根的 junction → `C:\\` 绝不作为别名进入判定', async () => {
+    const realpath = specific({
+      'c:/users/leo/videos/ytvdlt': 'C:\\',
+      'c:/users/leo/videos/ytvdlt/clip.mp4': 'C:\\Windows\\System32\\evil.mp4',
+    });
+    const roots = await canonicalContainmentRoots(['C:/Users/leo/Videos/YTVDLT'], realpath);
+    expect(roots).toEqual(['C:/Users/leo/Videos/YTVDLT']);
+    // 关键断言：真实路径落到 C:\Windows\... 时仍然是「根外」。
+    expect(isPathInsideRoots('C:\\Windows\\System32\\evil.mp4', roots)).toBe(false);
+  });
+
+  it('根解析为 POSIX 根 / 裸 UNC 共享根 → 同样不收', async () => {
+    const posix = await canonicalContainmentRoots(['/home/leo/videos'], specific({
+      '/home/leo/videos': '/',
+    }));
+    expect(posix).toEqual(['/home/leo/videos']);
+
+    const unc = await canonicalContainmentRoots(['//srv/share/Videos'], specific({
+      '//srv/share/videos': '\\\\srv\\share',
+    }));
+    expect(unc).toEqual(['//srv/share/Videos']);
+    expect(isPathInsideRoots('//srv/share/Elsewhere/a.mp4', unc)).toBe(false);
+  });
+
+  it('根不可解析 / 解析结果不可归一 → 只保留字符串形态，不抛异常', async () => {
+    const roots = await canonicalContainmentRoots(['C:/Videos', 'C:/Music'], async () => {
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    });
+    expect(roots).toEqual(['C:/Videos', 'C:/Music']);
+  });
+
+  it('重复别名按归一化形态去重（大小写 / 分隔符差异不算新根）', async () => {
+    const roots = await canonicalContainmentRoots(['C:/Videos', 'C:/Music'], async (path) => (
+      path === 'C:/Videos' ? 'c:\\videos\\' : 'C:\\MUSIC'
+    ));
+    expect(roots).toEqual(['C:/Videos', 'C:/Music']);
   });
 });

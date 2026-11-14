@@ -336,3 +336,127 @@ describe('D-131 · keepSubtitleFile=false discards embedded-download sidecars', 
     expect(queue.get('verify-fail')?.artifacts).toEqual([MEDIA, EN, ZH]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// D-209 · the subtitle recycler must run the SAME realpath pre-flight the
+// `withFiles` deletion chain runs (D-207). Every rule D-131 applies is a
+// NAME-level rule, and on Windows a junction in a MIDDLE path component makes
+// `<videoDir>/link/clip.en.srt` resolve outside the output roots while all of
+// them pass. A refused pre-flight must leave the recycle bin untouched.
+// ---------------------------------------------------------------------------
+describe('D-209 · embedded-subtitle cleanup goes through the D-207 pre-flight', () => {
+  interface Wiring {
+    trashed: string[][];
+    preflightCalls: { paths: readonly string[]; roots: readonly string[] }[];
+  }
+
+  async function hostWith(verdictFor: (paths: readonly string[], roots: readonly string[]) =>
+  { kind: 'ok'; missingPaths: readonly string[] } | { kind: 'refused'; reason: string; refusedCount: number }) {
+    const wiring: Wiring = { trashed: [], preflightCalls: [] };
+    const mem = createInMemoryPorts();
+    for (const path of [MEDIA, EN, ZH]) mem.state.files.set(path, 'bytes');
+    const runs: Runs = { script: [[MEDIA, EN, ZH]], calls: [] };
+    const host = await createM5Host({
+      ports: mem.ports,
+      engine: engineWith(runs),
+      verifier: verifier(true, EMBEDDED_OK),
+      enginePath: 'C:/runtime/yt-dlp.exe',
+      siteSupportNetwork: () => ({}),
+      jsRuntimePath: 'C:/runtime/node.exe',
+      videoFixturePath: 'C:/fixtures/info-video.json',
+      playlistFixturePath: 'C:/fixtures/info-flat-playlist.json',
+      appVersion: '0.3.0',
+      engineVersion: '2026.10.26',
+      systemAppearance: {
+        prefersDark: () => false, prefersReducedMotion: () => false, accent: () => null,
+      },
+      trashFiles: {
+        async trash(paths) {
+          wiring.trashed.push([...paths]);
+          return paths.map((path) => ({ path, status: 'trashed' as const }));
+        },
+        async preflight(paths, roots) {
+          wiring.preflightCalls.push({ paths: [...paths], roots: [...roots] });
+          return verdictFor(paths, roots);
+        },
+      },
+    });
+    return { host, wiring };
+  }
+
+  it('refused pre-flight → recycle bin never called, files and links stay, task still completes', async () => {
+    const { host, wiring } = await hostWith(() => ({
+      kind: 'refused', reason: '产物真实路径指向任务输出目录之外（符号链接/联接），已拒绝回收', refusedCount: 2,
+    }));
+    await host.m4.task.queue.enqueue(record('refused', embeddedNoKeep()));
+    await tick();
+
+    const task = host.m4.task.queue.get('refused');
+    expect(task?.state).toBe('Completed');
+    expect(task?.error ?? null).toBeNull();
+    expect(wiring.trashed).toEqual([]); // 回收站零调用
+    expect(task?.artifacts).toEqual([MEDIA, EN, ZH]); // 记录一条不少
+    expect(task?.subtitleFiles).toHaveLength(2);
+    host.dispose();
+  });
+
+  it('the pre-flight receives the task\'s own trusted roots (scope, not paths)', async () => {
+    const { host, wiring } = await hostWith((paths) => ({ kind: 'ok', missingPaths: [] }));
+    await host.m4.task.queue.enqueue(record('scope', embeddedNoKeep()));
+    await tick();
+
+    expect(wiring.preflightCalls).toHaveLength(1);
+    expect(wiring.preflightCalls[0]?.paths).toEqual([EN, ZH]);
+    // videoDir === audioDir === 'C:/out' (de-duplicated) + the per-task tempDir.
+    expect(wiring.preflightCalls[0]?.roots).toEqual(['c:/out', 'c:/temp']);
+    expect(wiring.trashed).toEqual([[EN, ZH]]);
+    host.dispose();
+  });
+
+  it('provably-gone entries are reported as removed without a trash call (D-120 idempotency)', async () => {
+    const { host, wiring } = await hostWith(() => ({ kind: 'ok', missingPaths: [ZH] }));
+    await host.m4.task.queue.enqueue(record('gone', embeddedNoKeep()));
+    await tick();
+
+    expect(wiring.trashed).toEqual([[EN]]); // 已消失的那条不再交给回收站
+    const task = host.m4.task.queue.get('gone');
+    expect(task?.state).toBe('Completed');
+    expect(task?.artifacts).toEqual([MEDIA]); // 两条都从记录里消失
+    expect(task?.subtitleFiles).toEqual([]);
+    host.dispose();
+  });
+
+  it('a port WITHOUT preflight keeps the pre-D-209 behaviour (legacy fakes)', async () => {
+    const seen: string[][] = [];
+    const mem = createInMemoryPorts();
+    for (const path of [MEDIA, EN, ZH]) mem.state.files.set(path, 'bytes');
+    const runs: Runs = { script: [[MEDIA, EN, ZH]], calls: [] };
+    const host = await createM5Host({
+      ports: mem.ports,
+      engine: engineWith(runs),
+      verifier: verifier(true, EMBEDDED_OK),
+      enginePath: 'C:/runtime/yt-dlp.exe',
+      siteSupportNetwork: () => ({}),
+      jsRuntimePath: 'C:/runtime/node.exe',
+      videoFixturePath: 'C:/fixtures/info-video.json',
+      playlistFixturePath: 'C:/fixtures/info-flat-playlist.json',
+      appVersion: '0.3.0',
+      engineVersion: '2026.10.26',
+      systemAppearance: {
+        prefersDark: () => false, prefersReducedMotion: () => false, accent: () => null,
+      },
+      trashFiles: {
+        async trash(paths) {
+          seen.push([...paths]);
+          return paths.map((path) => ({ path, status: 'trashed' as const }));
+        },
+      },
+    });
+    await host.m4.task.queue.enqueue(record('legacy', embeddedNoKeep()));
+    await tick();
+
+    expect(seen).toEqual([[EN, ZH]]);
+    expect(host.m4.task.queue.get('legacy')?.artifacts).toEqual([MEDIA]);
+    host.dispose();
+  });
+});

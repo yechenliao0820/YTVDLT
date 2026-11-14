@@ -216,6 +216,16 @@ export function trustedArtifactRoots(
  * under the name the kernel actually reports. A root that cannot be resolved
  * simply keeps its string form. Realpath verdicts must compare against THIS
  * list, never against the raw string roots alone.
+ *
+ * D-209 · the alias is accepted ONLY while it is still a SPECIFIC root
+ * (`isSpecificRoot`). A configured root can itself be a reparse point: a
+ * `…/Videos/YTVDLT` junction pointing at `C:\` resolves to the DRIVE ROOT, and
+ * blindly appending that resolution would turn "inside the download folder"
+ * into "anywhere on the drive" for every realpath verdict — the exact
+ * widening D-193 closed on the string side, reopened through the alias.
+ * The string roots are still compared as-is (they came from
+ * `trustedArtifactRoots()` / are `isSpecificRoot`-checked by the callers), so
+ * only the ALIAS is dropped and the trust scope never grows.
  */
 export async function canonicalContainmentRoots(
   roots: readonly string[],
@@ -231,6 +241,9 @@ export async function canonicalContainmentRoots(
     }
     const normalizedReal = normalizedForContainment(real);
     if (normalizedReal === null) continue;
+    // D-209: a resolution to a volume / POSIX / bare-share root would make
+    // "inside" mean "almost anywhere" — never admit it as an alias.
+    if (!isSpecificRoot(normalizedReal)) continue;
     if (!out.some((existing) => normalizedForContainment(existing) === normalizedReal)) {
       out.push(real);
     }

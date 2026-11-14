@@ -177,17 +177,42 @@ function detailPort(host: M4Host): TaskDetailPort {
  * file is no longer on disk; a real OS `error` keeps BOTH the file and its
  * artifact record. A thrown adapter degrades to "remove nothing" — cleanup is
  * cosmetic and must never fail a verified download.
+ *
+ * D-209: this hook now runs the SAME `TrashFilesPort.preflight` gate the
+ * `TASK_ACTION` withFiles branch runs (D-207) before anything reaches the
+ * recycle bin. The queue's own rules are name-level: the artifact intake gate
+ * only proves the STRING is inside the output roots, and the adapter's
+ * per-entry `lstat` only inspects the LAST component — on Windows a junction
+ * in a middle component makes `<videoDir>/link/clip.en.srt` resolve anywhere.
+ * A refused pre-flight answers "removed nothing", so the files stay and every
+ * artifact/link survives (cleanup is skipped, the download keeps Completed).
+ * Provably-gone entries (`missingPaths`) are reported as removed, preserving
+ * the D-120 idempotent contract. A port without `preflight` (legacy fakes)
+ * keeps its exact previous behaviour.
  */
 function makeSubtitleRecycler(
   port: TrashFilesPort,
-): (paths: readonly string[]) => Promise<readonly string[]> {
-  return async (paths) => {
+): (paths: readonly string[], roots: readonly string[]) => Promise<readonly string[]> {
+  return async (paths, roots) => {
     try {
-      const outcomes = await port.trash(paths);
-      return outcomes
+      let targets: readonly string[] = paths;
+      let provablyGone: readonly string[] = [];
+      if (port.preflight !== undefined) {
+        const verdict = await port.preflight(paths, roots);
+        // ONE unprovable path refuses the whole batch: nothing is trashed, so
+        // a legitimate sibling can never be recycled and then abandoned in the
+        // bin behind a refusal.
+        if (verdict.kind === 'refused') return [];
+        provablyGone = verdict.missingPaths;
+        const gone = new Set(provablyGone);
+        targets = paths.filter((path) => !gone.has(path));
+      }
+      const outcomes = targets.length === 0 ? [] : await port.trash(targets);
+      const trashed = outcomes
         .filter((entry) => typeof entry === 'string'
           || entry.status === 'trashed' || entry.status === 'missing')
         .map((entry) => (typeof entry === 'string' ? entry : entry.path));
+      return [...provablyGone, ...trashed];
     } catch {
       return [];
     }

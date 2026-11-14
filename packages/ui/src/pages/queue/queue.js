@@ -1361,16 +1361,27 @@
     var running = task.state === 'Running' || task.state === 'FetchingInfo';
     var retryable = task.state === 'Error' || task.state === 'Canceled';
     if (live.active) {
-      // D-76 / D-162 / D-164: match what the queue can actually do.
+      // D-76 / D-162 / D-164 / D-209: match what the queue can actually do.
       //  - `Running` — the transfer has a kill handle;
       //  - `FetchingInfo` — the probe now carries an AbortSignal, so cancelling
       //    during "解析中" really kills the child (before D-162 it refused);
+      //  - `ReadyWithInfo` — D-200 gave this state a real cancellable path: with
+      //    no handle the queue records the request and transitions to
+      //    `Canceled` itself, and the run consumes it before spawning. Leaving
+      //    the button out (D-146 rule, written before D-200) was a UI/backend
+      //    contract drift, not a capability gap (D-209);
       //  - `pending` — parked in the FIFO, `TaskQueue.cancel()` drops it.
-      // `ReadyWithInfo` still has no handle: it is a zero-length phase that
-      // ends in `Running` immediately, so it is not offered.
+      // D-209: a task restored from a snapshot keeps `Idle` / `ReadyWithInfo`
+      // but is parked in NO queue — `restore()` deliberately does not re-fill
+      // the FIFO (a boot must never start downloads by itself). Without a retry
+      // entry such a card could only be deleted; `restart()` handles both
+      // states since D-199, so offer it for exactly "not pending, not started".
+      var restored = task.pending !== true
+        && (task.state === 'Idle' || task.state === 'ReadyWithInfo');
       return {
-        cancel: task.state === 'Running' || task.state === 'FetchingInfo' || task.pending === true,
-        retry: retryable,
+        cancel: task.state === 'Running' || task.state === 'FetchingInfo'
+          || task.state === 'ReadyWithInfo' || task.pending === true,
+        retry: retryable || restored,
         // D-120: live builds expose "open file" on the card so the freshness
         // check is reachable where the user sees the finished task. Injected
         // ONLY in live mode -> file:// screenshot baselines keep their DOM.
