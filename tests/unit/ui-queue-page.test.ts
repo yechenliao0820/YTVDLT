@@ -456,6 +456,19 @@ describe('D-187 · live 列表投影与卡片渲染纪律', () => {
     expect(lineOf(card).textContent).toBe(T('queue.stage.finalizing'));
   });
 
+  it('D-190：working 阶段原位补丁同步卡片根 data-stage（不只改阶段文案）', async () => {
+    setList([wire({ id: 'w2', state: 'Running', percent: 100, stage: 'merging' })]);
+    await pollOnce();
+    const card = cardById('w2');
+    expect(card.getAttribute('data-stage')).toBe('merging');
+    // merging → verifying 不重建卡片：走 patchProgress 的 working 分支。
+    setList([wire({ id: 'w2', state: 'Running', percent: 100, stage: 'verifying' })]);
+    await pollOnce();
+    expect(cardById('w2')).toBe(card);
+    expect(card.getAttribute('data-stage')).toBe('verifying');
+    expect(lineOf(card).textContent).toBe(T('queue.stage.finalizing'));
+  });
+
   it('D-112：同形二次推送不重建卡片（封面不闪）、数值原位补丁、thumb 变化才重建', async () => {
     setList([wire({ id: 'p1', state: 'Running', percent: 42 })]);
     await pollOnce();
@@ -565,6 +578,24 @@ describe('D-187 · live 列表投影与卡片渲染纪律', () => {
     queue.model.sort = 'newest';
     expect(queue.render().visible.map((t: any) => t.id)).toEqual(oldestOrder);
     queue.model.sort = 'newest';
+  });
+
+  it('D-190：oldest 保持到达顺序、newest 反转，两者互为逆序（排序方向回归）', async () => {
+    setList([
+      wire({ id: 'x1', state: 'Running', title: 'Beta', percent: 1 }),
+      wire({ id: 'x2', state: 'Completed', title: 'Alpha', percent: 100 }),
+      wire({ id: 'x3', state: 'Canceled', title: 'Gamma' }),
+    ]);
+    await pollOnce();
+    // 列表按最旧在前到达：oldest 应保持原序，修复前它和 newest 同为 reverse。
+    queue.model.sort = 'oldest';
+    const oldest = queue.render().visible.map((t: any) => t.id);
+    expect(oldest).toEqual(['x1', 'x2', 'x3']);
+    queue.model.sort = 'newest';
+    const newest = queue.render().visible.map((t: any) => t.id);
+    expect(newest).toEqual(['x3', 'x2', 'x1']);
+    expect(newest).toEqual([...oldest].reverse());
+    queue.model.sort = 'newest'; // 复位，避免污染后续用例
   });
 
   it('搜索框输入过滤 + 无结果时的 filter 空态变体（D-87）', async () => {

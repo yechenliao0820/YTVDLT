@@ -209,6 +209,20 @@ describe('Playlist batch IPC · edge cases', () => {
       .rejects.toThrow(/invalid quality/);
   });
 
+  it('D-190：BATCH_ENQUEUE 拒绝越界 kind（票据不被消费），缺省仍默认 video', async () => {
+    const h = await harness();
+    const dto = await preview(h);
+    for (const bad of ['audioo', 'VIDEO', 'movie', '', 7, null]) {
+      await expect(enqueue(h, { previewId: dto.previewId, url: URL_A, kind: bad }))
+        .rejects.toThrow(/invalid kind/);
+    }
+    // 守卫在 consume 之前：票据仍未花掉，缺省 kind 落到 video 并成功入队。
+    const result = await enqueue(h, { previewId: dto.previewId, url: URL_A });
+    expect(result.ok).toBe(true);
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]).toMatchObject({ kind: 'video' });
+  });
+
   it('a ticket cannot be replayed or used across URLs', async () => {
     const h = await harness();
     const dto = await preview(h);

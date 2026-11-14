@@ -1202,7 +1202,13 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     if (!/^https?:\/\//i.test(url)) {
       throw new Error('[m5-ipc] DOWNLOAD_START requires an http(s) url');
     }
-    const kind: DownloadKind = record['kind'] === 'audio' ? 'audio' : 'video';
+    // D-190 / §5 rule 1: an out-of-range enum is a protocol failure, not a
+    // silent downgrade to `video`. Same guard TXT_IMPORT_ENQUEUE already had.
+    const rawKind = record['kind'];
+    if (rawKind !== undefined && rawKind !== 'video' && rawKind !== 'audio') {
+      throw new Error('[m5-ipc] invalid kind');
+    }
+    const kind: DownloadKind = rawKind === 'audio' ? 'audio' : 'video';
     const rawQuality = record['quality'];
     const rawAudioQuality = record['audioQuality'];
     const rawAudioFormat = record['audioFormat'];
@@ -1504,6 +1510,12 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
         }
       }
     }
+    // D-190 / §5 rule 1: same strict `kind` enum guard as DOWNLOAD_START and
+    // TXT_IMPORT_ENQUEUE; an invalid value must not silently become `video`.
+    const rawKind = record['kind'];
+    if (rawKind !== undefined && rawKind !== 'video' && rawKind !== 'audio') {
+      throw new Error('[m5-ipc] invalid kind');
+    }
     const rawQuality = record['quality'];
     const rawAudioQuality = record['audioQuality'];
     const rawAudioFormat = record['audioFormat'];
@@ -1640,7 +1652,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     const report = await deps.playlistBatch({
       selectedIds: enqueueIds,
       playlistUrl: url,
-      kind: record['kind'] === 'audio' ? 'audio' : 'video',
+      kind: rawKind === 'audio' ? 'audio' : 'video',
       playlist,
       ...(rawQuality === undefined ? {} : { quality: rawQuality as VideoQualityChoice }),
       ...(rawAudioQuality === undefined ? {} : { audioQuality: rawAudioQuality as AudioQualityChoice }),

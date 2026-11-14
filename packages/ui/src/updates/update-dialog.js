@@ -66,6 +66,13 @@
     return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
   }
 
+  /** D-190: `=== null` missed a missing (`undefined`) or malformed `latest`.
+   * `apply({})` then reached `latest.version` and threw inside a polled
+   * promise, leaving the dialog frozen with no visible error. */
+  function hasLatest(value) {
+    return value !== null && value !== undefined && typeof value === 'object';
+  }
+
   var LOGO = '<svg viewBox="0 0 40 40" width="38" height="38" aria-hidden="true" focusable="false">'
     + '<defs><linearGradient id="updGrad" x1="0" y1="0" x2="1" y2="1">'
     + '<stop offset="0" stop-color="#3b8cf0"/><stop offset="1" stop-color="#174ea6"/>'
@@ -216,7 +223,7 @@
   }
 
   function rememberSessionDismiss() {
-    if (state !== null && state.latest !== null) {
+    if (state !== null && hasLatest(state.latest)) {
       writeSession(DISMISS_KEY, String(state.latest.version));
     }
   }
@@ -318,7 +325,7 @@
   function paint() {
     if (nodes === null || state === null) return;
     var latest = state.latest;
-    if (latest === null) { hide(); return; }
+    if (!hasLatest(latest)) { hide(); return; }
 
     var blocks = noteBlocks(latest);
     var omitted = typeof state.omittedReleaseNotes === 'number' && state.omittedReleaseNotes > 0
@@ -380,7 +387,7 @@
     var previous = state;
     state = next;
     var latest = next.latest;
-    if (latest === null) { hide(); return; }
+    if (!hasLatest(latest)) { hide(); return; }
 
     var dismissed = readSession(DISMISS_KEY);
     var skipped = typeof next.skippedVersion === 'string' ? next.skippedVersion : '';

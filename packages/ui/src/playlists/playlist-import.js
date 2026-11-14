@@ -176,6 +176,10 @@
 
     /** Cancel must NOT create tasks; it releases the main-process ticket. */
     function cancel() {
+      // D-190: invalidate a preview that is still in flight. Without this a
+      // late reply from the cancelled open would be treated as the CURRENT one
+      // (and, when the page was closed, leave its ticket orphaned).
+      generation += 1;
       // T5: closing/cancelling while the batch pre-check is in flight means
       // "stop" — ask the main process to cancel it (no-op when nothing runs).
       if (enqueueInFlight) call('URL_SUPPORT_CHECK_CANCEL', { operationId: activeOperationId });
@@ -568,8 +572,18 @@
       var previous = currentPreviewId;
       currentPreviewId = '';
       call('PLAYLIST_PREVIEW', { url: target, previousPreviewId: previous }).then(function (result) {
-        // A newer URL replaced this one while the probe was in flight.
-        if (mine !== generation) return;
+        // A newer URL (or cancel()) replaced this one while the probe was in
+        // flight. D-190: the main process has ALREADY minted a ticket for that
+        // stale probe, and the renderer cleared `currentPreviewId` before the
+        // call — so cancel() could not release it. Now that the reply carries
+        // the id, release it explicitly instead of waiting for the 5 min TTL.
+        if (mine !== generation) {
+          if (result && result.ok === true && typeof result.previewId === 'string'
+            && result.previewId !== '') {
+            call('PLAYLIST_PREVIEW_CANCEL', { previewId: result.previewId });
+          }
+          return;
+        }
         busy = false;
         if (!result || result.ok !== true) { renderFailure(result); return; }
         currentPreviewId = result.previewId;

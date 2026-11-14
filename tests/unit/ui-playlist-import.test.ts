@@ -507,6 +507,29 @@ describe('D-187 · 预览失败、回退与陈旧代（generation）', () => {
     expect(b.component.state().busy).toBe(false);
   });
 
+  it('D-190：取消挂起中的预览 → 陈旧答复落地时主动释放主进程票据', async () => {
+    const b = boot({ holdPreview: true });
+    click(b, 'queue-import-playlist'); // open1 挂起，currentPreviewId 已清空
+    click(b, 'pl-close');              // cancel：手里没有 previewId，无法即时释放
+    expect(b.component.isOpen()).toBe(false);
+    // 主进程的票据随答复一起回来；渲染层现在据此补发 CANCEL，而非等 5 min TTL。
+    await b.settleAt('PLAYLIST_PREVIEW', 0, previewDto(3, { previewId: 'ticket-STALE' }));
+    expect(channelOf(b, 'PLAYLIST_PREVIEW_CANCEL')).toEqual([
+      { channel: 'PLAYLIST_PREVIEW_CANCEL', payload: { previewId: 'ticket-STALE' } },
+    ]);
+    expect(b.component.state().previewId).toBe(''); // 陈旧答复绝不置票
+    expect(b.component.state().busy).toBe(false);
+  });
+
+  it('D-190：陈旧失败答复不误发取消（无票据可释放）', async () => {
+    const b = boot({ holdPreview: true });
+    click(b, 'queue-import-playlist');
+    click(b, 'pl-close');
+    await b.settleAt('PLAYLIST_PREVIEW', 0, { ok: false, code: 'TIMEOUT', previewId: '', entries: [] });
+    expect(channelOf(b, 'PLAYLIST_PREVIEW_CANCEL')).toEqual([]);
+    expect(b.component.state().previewId).toBe('');
+  });
+
   it('预览成功后再次 open：previousPreviewId 外显上一张票（TTL 票据复用语义）', async () => {
     const b = boot();
     click(b, 'queue-import-playlist');

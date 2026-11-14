@@ -247,6 +247,21 @@
       }
     }
 
+    /** D-190: terminal failure state, shared by an `ok:false` reply and a
+     * rejected channel. A rejection used to leave `loading` stuck at true and
+     * the refresh button disabled until the page was reloaded. */
+    function fail(code) {
+      loading = false;
+      state = 'failed';
+      rows = [];
+      if (refreshButton !== null) refreshButton.disabled = false;
+      if (statusBox !== null) statusBox.textContent = failureText(String(code || ''));
+      // On failure the controls are disabled rather than left looking
+      // functional: a search box over an empty list implies "no sites".
+      if (searchBox !== null) searchBox.disabled = true;
+      if (sortSelect !== null) sortSelect.disabled = true;
+    }
+
     function load(force) {
       if (loading) return;
       loading = true;
@@ -258,26 +273,17 @@
       if (summaryBox !== null) summaryBox.textContent = '';
 
       call('SUPPORTED_SITES', force === true ? { refresh: true } : {}).then(function (payload) {
-        loading = false;
-        if (refreshButton !== null) refreshButton.disabled = false;
         var data = payload || {};
-        if (data.ok !== true) {
-          state = 'failed';
-          rows = [];
-          if (statusBox !== null) statusBox.textContent = failureText(String(data.code || ''));
-          // On failure the controls are disabled rather than left looking
-          // functional: a search box over an empty list implies "no sites".
-          if (searchBox !== null) searchBox.disabled = true;
-          if (sortSelect !== null) sortSelect.disabled = true;
-          return;
-        }
+        if (data.ok !== true) { fail(String(data.code || '')); return; }
+        loading = false;
         state = 'ready';
+        if (refreshButton !== null) refreshButton.disabled = false;
         if (searchBox !== null) searchBox.disabled = false;
         if (sortSelect !== null) sortSelect.disabled = false;
         rows = Array.isArray(data.rows) ? data.rows : [];
         renderSummary(data);
         apply();
-      });
+      }).catch(function () { fail(''); });
     }
 
     function mount(anchor, cssHref) {
