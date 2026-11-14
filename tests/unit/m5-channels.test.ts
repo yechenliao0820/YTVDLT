@@ -8,12 +8,13 @@
  *   - the payload whitelist rejects unknown keys and bad types;
  *   - settings writes go through ConfigStore, never straight to a file.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
 import type {
-  AppError, ErrorCode, TaskRecord, UrlSupportResult, UrlSupportState,
+  AppError, ErrorCode, ISystemStartupPort, TaskRecord, UrlSupportResult, UrlSupportState,
 } from '@ytvdlt/shared';
 import { CommandTemplateStore, ConfigStore, maskUrlSecrets } from '@ytvdlt/core';
+import type { ClipboardPort } from '@ytvdlt/core';
 import type { TaskDetailAction, TaskDetailResult } from '@ytvdlt/core';
 import {
   M5_CHANNELS, createM5Handlers, toTaskDetail, toTaskListItem, validateM5Payload,
@@ -98,9 +99,10 @@ describe('m5 ipc · channel inventory', () => {
   // + the three playlist batch channels (D-130, append-only)
   // + the two supported-sites / URL pre-check channels (D-134, append-only)
   // + the two Star-prompt channels (D-148, append-only)
-  // + the two pre-check cancel/status channels (T5, append-only).
-  it('exposes exactly the thirty M5 channels, all present in IPC_CHANNELS', () => {
-    expect(M5_CHANNELS).toHaveLength(30);
+  // + the two pre-check cancel/status channels (T5, append-only)
+  // + the clipboard-write channel (D-173, append-only).
+  it('exposes exactly the thirty-one M5 channels, all present in IPC_CHANNELS', () => {
+    expect(M5_CHANNELS).toHaveLength(31);
     const values = Object.values(IPC_CHANNELS);
     for (const channel of M5_CHANNELS) expect(values).toContain(channel);
     expect(new Set(M5_CHANNELS).size).toBe(M5_CHANNELS.length);
@@ -427,6 +429,78 @@ describe('D-137 · single-link pre-check outcome (F-06 / F-07)', () => {
   });
 });
 
+describe('m5 ipc · renderer-submitted URLs share one length cap (MAX_URL_CHARS)', () => {
+  // 4096 UTF-16 units (same counting style as the 1,000,000 clipboard cap):
+  // far above any real video/playlist URL, still bounded for argv/logs.
+  const URL_PREFIX = 'https://example.org/';
+  const atCap = URL_PREFIX + 'x'.repeat(4096 - URL_PREFIX.length);
+  const overCap = atCap + '!';
+  const supportPort = () => ({
+    available: true,
+    catalog: async () => ({ ok: false as const, reason: 'ENGINE_UNAVAILABLE' as const, detail: '' }),
+    check: async (url: string): Promise<UrlSupportResult> => ({
+      url, state: 'SUPPORTED' as UrlSupportState, extractor: '', reason: 'fixed vocabulary',
+      cached: false,
+    }),
+  });
+
+  it('DOWNLOAD_START rejects a url above the cap and never echoes it', async () => {
+    const seen: SingleDownloadInput[] = [];
+    const { handlers } = await harness(undefined, {
+      enqueueSingle: async (input) => { seen.push(input); return ['single-cap']; },
+    });
+    const error = await handlers.get(IPC_CHANNELS.DOWNLOAD_START)?.({ url: overCap, kind: 'video' })
+      .then(() => null, (e: Error) => e);
+    expect(error).not.toBeNull();
+    expect(error?.message).toMatch(/bounded string url/);
+    // Log-bloat guard: the refusal must not carry the dumped value back.
+    expect(error?.message).not.toContain(overCap);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('DOWNLOAD_START accepts a url exactly at the cap', async () => {
+    const seen: SingleDownloadInput[] = [];
+    const { handlers } = await harness(undefined, {
+      enqueueSingle: async (input) => { seen.push(input); return ['single-cap']; },
+    });
+    const result = await handlers.get(IPC_CHANNELS.DOWNLOAD_START)?.({ url: atCap, kind: 'video' });
+    expect(result).toMatchObject({ accepted: true, enqueued: true, taskIds: ['single-cap'] });
+    expect(seen[0]).toEqual({ url: atCap, kind: 'video' });
+  });
+
+  it('DOWNLOAD_START still rejects non-http(s) urls', async () => {
+    const { handlers } = await harness();
+    const channel = handlers.get(IPC_CHANNELS.DOWNLOAD_START);
+    await expect(channel?.({ url: 'ftp://example.org/v', kind: 'video' }))
+      .rejects.toThrow(/http\(s\) url/);
+    await expect(channel?.({ url: 'file:///C:/Windows/system32', kind: 'video' }))
+      .rejects.toThrow(/http\(s\) url/);
+  });
+
+  it('URL_SUPPORT_CHECK rejects a url above the same cap and never echoes it', async () => {
+    const { handlers } = await harness();
+    const error = await handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK)?.({ url: overCap })
+      .then(() => null, (e: Error) => e);
+    expect(error).not.toBeNull();
+    expect(error?.message).toMatch(/bounded string url/);
+    expect(error?.message).not.toContain(overCap);
+  });
+
+  it('URL_SUPPORT_CHECK accepts a url exactly at the cap and pre-checks it', async () => {
+    const { handlers } = await harness(undefined, { siteSupport: supportPort() });
+    const result = await handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK)?.({ url: atCap }) as {
+      url: string; state: string; blocks: boolean;
+    };
+    expect(result).toMatchObject({ url: atCap, state: 'SUPPORTED', blocks: false });
+  });
+
+  it('URL_SUPPORT_CHECK still rejects non-http(s) urls', async () => {
+    const { handlers } = await harness();
+    await expect(handlers.get(IPC_CHANNELS.URL_SUPPORT_CHECK)?.({ url: 'ftp://example.org/v' }))
+      .rejects.toThrow(/http\(s\) url/);
+  });
+});
+
 describe('m5 ipc · removing a task together with its local files (D-87)', () => {
   it('recycles exactly this task artifacts, then removes the record', async () => {
     const seen: string[][] = [];
@@ -704,5 +778,177 @@ describe('m5 ipc · TASK_LIST stage passthrough (D-115)', () => {
     const byId = new Map(result.items.map((item) => [item.id, item.stage]));
     expect(byId.get('t-stage')).toBe('merging');
     expect(byId.get('t-none')).toBeNull();
+  });
+});
+
+/**
+ * D-166 follow-up: the settings toggle must show the REAL HKCU Run state, not
+ * the `general.autostart` config mirror — a registry cleaner or a manual
+ * `reg delete` can remove the entry behind the app's back. Pinned here:
+ *   - the registry read wins and a confirmed mismatch reconciles the mirror;
+ *   - an absent port (non-Windows / test builds) or a failing `read()` falls
+ *     back to the config value and SETTINGS_GET still resolves;
+ *   - SETTINGS_SET keeps writing the registry first, then the mirror.
+ */
+describe('m5 ipc · autostart shows the registry truth (D-166 follow-up)', () => {
+  /** Minimal `ISystemStartupPort` double with a scripted `read()`. */
+  function startupPort(options: {
+    read: () => Promise<boolean>;
+    apply?: (enabled: boolean) => Promise<{ ok: boolean; reason?: string }>;
+  }): ISystemStartupPort {
+    return {
+      apply: options.apply ?? (async () => ({ ok: true })),
+      read: options.read,
+    };
+  }
+
+  it('shows the registry state and reconciles the stale config mirror', async () => {
+    const { handlers, deps } = await harness([], {
+      systemStartup: startupPort({ read: async () => true }),
+    });
+    const setDomain = vi.spyOn(deps.config, 'setDomain');
+    const settings = await handlers.get(IPC_CHANNELS.SETTINGS_GET)?.({}) as { autostart: boolean };
+    expect(settings.autostart).toBe(true);
+    // The mirror was stale (config default `false`) — reconciled to the truth.
+    expect(setDomain).toHaveBeenCalledWith('general', { autostart: true });
+    expect(deps.config.get('general', 'autostart')).toBe(true);
+  });
+
+  it('shows a removed registry entry as off and reconciles the mirror too', async () => {
+    const { handlers, deps } = await harness([], {
+      systemStartup: startupPort({ read: async () => false }),
+    });
+    await deps.config.set('general', 'autostart', true);
+    const settings = await handlers.get(IPC_CHANNELS.SETTINGS_GET)?.({}) as { autostart: boolean };
+    expect(settings.autostart).toBe(false);
+    expect(deps.config.get('general', 'autostart')).toBe(false);
+  });
+
+  it('still shows the registry value when the reconciliation write-back fails', async () => {
+    const { handlers, deps } = await harness([], {
+      systemStartup: startupPort({ read: async () => true }),
+    });
+    vi.spyOn(deps.config, 'setDomain').mockRejectedValue(new Error('read-only config'));
+    const settings = await handlers.get(IPC_CHANNELS.SETTINGS_GET)?.({}) as { autostart: boolean };
+    expect(settings.autostart).toBe(true);
+  });
+
+  it('falls back to the config value and still resolves when read() throws', async () => {
+    const { handlers, deps } = await harness([], {
+      systemStartup: startupPort({ read: async () => { throw new Error('reg exited 1'); } }),
+    });
+    await deps.config.set('general', 'autostart', true);
+    const setDomain = vi.spyOn(deps.config, 'setDomain');
+    const settings = await handlers.get(IPC_CHANNELS.SETTINGS_GET)?.({}) as { autostart: boolean };
+    expect(settings.autostart).toBe(true);
+    // Unknown state is never reconciled — a guess would make config lie twice.
+    expect(setDomain).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the config mirror when the port is absent (non-Windows builds)', async () => {
+    const { handlers, deps } = await harness([]);
+    await deps.config.set('general', 'autostart', true);
+    const settings = await handlers.get(IPC_CHANNELS.SETTINGS_GET)?.({}) as { autostart: boolean };
+    expect(settings.autostart).toBe(true);
+  });
+
+  it('SETTINGS_SET keeps the registry-first order and the mirror follows', async () => {
+    const applied: boolean[] = [];
+    const { handlers, deps } = await harness([], {
+      systemStartup: startupPort({
+        read: async () => applied[applied.length - 1] === true,
+        apply: async (enabled) => { applied.push(enabled); return { ok: true }; },
+      }),
+    });
+    const snapshot = await handlers.get(IPC_CHANNELS.SETTINGS_SET)?.({ autostart: true }) as { autostart: boolean };
+    expect(applied).toEqual([true]);
+    expect(snapshot.autostart).toBe(true);
+    expect(deps.config.get('general', 'autostart')).toBe(true);
+  });
+
+  it('refuses to flip the mirror when the registry write fails', async () => {
+    const { handlers, deps } = await harness([], {
+      systemStartup: startupPort({
+        read: async () => false,
+        apply: async () => ({ ok: false, reason: 'reg exited 1' }),
+      }),
+    });
+    await expect(handlers.get(IPC_CHANNELS.SETTINGS_SET)?.({ autostart: true }))
+      .rejects.toThrow(/autostart failed/);
+    expect(deps.config.get('general', 'autostart')).toBe(false);
+  });
+});
+
+/**
+ * D-173: the clipboard is written by the MAIN process. Since D-170 the session
+ * denies every renderer permission (including the `clipboard-sanitized-write`
+ * check behind `navigator.clipboard`), so the renderer hands over bounded TEXT
+ * and the injected `ClipboardPort` performs the real write. Success/failure is
+ * an explicit `{ok}` answer — never a silent void.
+ */
+describe('m5 ipc · CLIPBOARD_WRITE (D-173)', () => {
+  function clipboardPort(write?: (text: string) => Promise<void>): {
+    port: ClipboardPort;
+    written: string[];
+  } {
+    const written: string[] = [];
+    return {
+      written,
+      port: { writeText: write ?? (async (text: string) => { written.push(text); }) },
+    };
+  }
+
+  it('writes the text through the injected port and answers {ok:true}', async () => {
+    const fake = clipboardPort();
+    const { handlers } = await harness([], { clipboard: fake.port });
+    const result = await handlers.get(IPC_CHANNELS.CLIPBOARD_WRITE)?.({ text: 'line1\nline2' });
+    expect(result).toEqual({ ok: true });
+    expect(fake.written).toEqual(['line1\nline2']);
+  });
+
+  it('reports CLIPBOARD_UNAVAILABLE when no clipboard port is injected', async () => {
+    const { handlers } = await harness([]);
+    const result = await handlers.get(IPC_CHANNELS.CLIPBOARD_WRITE)?.({ text: 'x' });
+    expect(result).toEqual({ ok: false, code: 'CLIPBOARD_UNAVAILABLE' });
+    expect(handlers.get(IPC_CHANNELS.CLIPBOARD_WRITE)).toBeDefined();
+  });
+
+  it('reports CLIPBOARD_WRITE_FAILED when the port rejects', async () => {
+    const { handlers } = await harness([], {
+      clipboard: clipboardPort(async () => { throw new Error('clipboard busy'); }).port,
+    });
+    const result = await handlers.get(IPC_CHANNELS.CLIPBOARD_WRITE)?.({ text: 'x' });
+    expect(result).toEqual({ ok: false, code: 'CLIPBOARD_WRITE_FAILED' });
+  });
+
+  it('accepts exactly ONE payload key (text) and nothing else', async () => {
+    const fake = clipboardPort();
+    const { handlers } = await harness([], { clipboard: fake.port });
+    expect(() => validateM5Payload(IPC_CHANNELS.CLIPBOARD_WRITE, { evil: 1 }))
+      .toThrow(/key not allowed/);
+    expect(() => validateM5Payload(IPC_CHANNELS.CLIPBOARD_WRITE, { text: 'x', extra: 1 }))
+      .toThrow(/key not allowed/);
+    await expect(handlers.get(IPC_CHANNELS.CLIPBOARD_WRITE)?.({ text: 42 }))
+      .rejects.toThrow(/bounded text/);
+    await expect(handlers.get(IPC_CHANNELS.CLIPBOARD_WRITE)?.({}))
+      .rejects.toThrow(/bounded text/);
+    expect(fake.written).toEqual([]);
+  });
+
+  it('rejects a payload above the 1,000,000-char cap', async () => {
+    const fake = clipboardPort();
+    const { handlers } = await harness([], { clipboard: fake.port });
+    await expect(handlers.get(IPC_CHANNELS.CLIPBOARD_WRITE)?.({ text: 'x'.repeat(1_000_001) }))
+      .rejects.toThrow(/bounded text/);
+    expect(fake.written).toEqual([]);
+  });
+
+  it('accepts a payload exactly at the cap and an empty string', async () => {
+    const fake = clipboardPort();
+    const { handlers } = await harness([], { clipboard: fake.port });
+    const atCap = await handlers.get(IPC_CHANNELS.CLIPBOARD_WRITE)?.({ text: 'x'.repeat(1_000_000) });
+    expect(atCap).toEqual({ ok: true });
+    const empty = await handlers.get(IPC_CHANNELS.CLIPBOARD_WRITE)?.({ text: '' });
+    expect(empty).toEqual({ ok: true });
   });
 });

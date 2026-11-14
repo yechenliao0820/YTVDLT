@@ -42,7 +42,8 @@ export {
 } from './argv-builder-custom.js';
 // M5-5 additions (append-only): engine self-update orchestration (D-62).
 export {
-  SelfUpdater, parseChecksums, normalizeToolVersion, type SelfUpdaterDeps,
+  SelfUpdater, parseChecksums, normalizeToolVersion, QUEUE_IDLE_TIMEOUT_MS,
+  type SelfUpdaterDeps,
 } from './self-updater.js';
 export { HttpUpdateSource, type HttpUpdateSourceOptions } from './http-update-source.js';
 // TASK-03 additions (append-only, D-134): supported-site discovery + URL

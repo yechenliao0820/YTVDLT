@@ -4,7 +4,8 @@
  * 渲染 `window.__YTVDLT_TASK__` = {id, state, percent, lines[]}；每行一个
  * `<span class="ln" data-line="n">`，便于虚拟滚动与「复制日志」逐行取用。
  * 按钮只产出动作 JSON（copy / cancel / retry），不直接操作进程：
- * 真正的取消/重试由主进程经 IPC 执行。
+ * 真正的取消/重试由主进程经 IPC 执行。「复制日志」自 D-173 起也走 IPC：
+ * 剪贴板由主进程写入（`ytvdlt:clipboard:write`），失败时给出可见反馈。
  */
 (function (global) {
   'use strict';
@@ -50,6 +51,62 @@
     output.textContent = JSON.stringify({ action: action, taskId: payload.taskId, accepted: action !== 'copy' }, null, 2);
   }
 
+  function t(key) {
+    var i18n = global.YTVDLT && global.YTVDLT.i18n;
+    return i18n ? i18n.t(key) : key;
+  }
+
+  /** D-173: copy failure feedback — the same output pre `emit()` already uses. */
+  function copyFailed() {
+    var output = doc.getElementById('ytvdlt-output');
+    if (output === null) return;
+    output.textContent = t('log.copy.failed');
+  }
+
+  /**
+   * D-173: the clipboard is written by the MAIN process
+   * (`ytvdlt:clipboard:write`). Since D-170 the packaged app denies every
+   * renderer permission — including the `clipboard-sanitized-write` check
+   * behind `navigator.clipboard` — so the old renderer-side write silently
+   * failed. The wire string is called directly (the settings.js pattern: this
+   * page does not load ipc-bridge.js, but the channel is registered in all
+   * three §5 cable tables).
+   */
+  function copyLog(text, model) {
+    var bridge = global.ytvdltBridge;
+    if (bridge && typeof bridge.invoke === 'function') {
+      try {
+        var pending = bridge.invoke('ytvdlt:clipboard:write', { text: text });
+        if (pending && typeof pending.then === 'function') {
+          pending.then(function (result) {
+            if (result && result.ok === true) emit('copy', model);
+            else copyFailed();
+          }, function () { copyFailed(); });
+        } else {
+          copyFailed();
+        }
+      } catch (error) {
+        copyFailed();
+      }
+      return;
+    }
+    // Static preview (no preload bridge): a plain browser clipboard still works.
+    if (global.navigator && global.navigator.clipboard) {
+      try {
+        var written = global.navigator.clipboard.writeText(text);
+        if (written && typeof written.then === 'function') {
+          written.then(function () { emit('copy', model); }, function () { copyFailed(); });
+        } else {
+          emit('copy', model);
+        }
+      } catch (error) {
+        copyFailed();
+      }
+      return;
+    }
+    copyFailed();
+  }
+
   var model = task();
   var lines = model.lines;
   var filter = param('grep', '');
@@ -75,9 +132,7 @@
     button.addEventListener('click', function () {
       if (action === 'retry' && !retryable) return;
       if (action === 'copy') {
-        var text = lines.join('\n');
-        if (global.navigator && global.navigator.clipboard) global.navigator.clipboard.writeText(text);
-        emit('copy', model);
+        copyLog(lines.join('\n'), model);
         return;
       }
       emit(action, model);

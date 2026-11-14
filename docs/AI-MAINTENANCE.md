@@ -148,12 +148,16 @@ ui（零依赖） ← preload ← apps/desktop
 | **队列封面缩略图** | `main/thumbnail-cache.ts`、`main/m5-channels.ts::ThumbnailPort`、`queue.js::thumbNode` |
 | **封面缓存清理（占用 / 自动清理 / 立即清理）** | `core/src/thumbnail-cache-policy/`（纯策略）→ `main/thumbnail-cache.ts`（`index.json` / `status()` / `prune()`）→ `main/m5-channels.ts::THUMBNAIL_CACHE` → `ui/src/pages/settings/settings.js::installCacheControls()`；配置在 `advanced.autoCleanThumbnailCache` / `thumbnailCacheMaxBytes` / `MaxFiles` / `MaxAgeDays` |
 | **下载位置（视频 / 音频目录）** | `ui/src/pages/settings/*`（`#section-paths`）→ `main/m5-channels.ts::PATH_ACTION` → `core/config-store/defaults.ts::DEFAULT_PATH_TOKENS`；原生对话框在 `main/adapters/path-picker.ts` |
+| **开机自启开关（注册表真值 / 回落 / 对账）** | `main/adapters/win-startup.ts`（apply / read；read 只认「确认缺席=false」，真失败抛错）→ `main/m5-channels.ts::readAutostart`（注册表为准；端口缺席或读失败回落 config 且**不对账**；确认不一致 best-effort 回写镜像，失败只影响显示）→ `ui/src/pages/settings/settings.js`（快照回调重绘复选框，live-only）。D-177 / D-178 |
+| **日志页「复制日志」（主进程剪贴板通道）** | `shared/src/ipc.ts::CLIPBOARD_WRITE`（append-only）→ `main/m5-channels.ts`（PAYLOAD_KEYS 只放 `text`、上限 1,000,000 UTF-16、`ClipboardPort` 写入、回 `{ok}` + 稳定码）→ `ui/src/pages/task-log/task-log.js::copyLog`（bridge 失败写 i18n 句子到既有 `#ytvdlt-output`；无 bridge 静态预览回退 navigator.clipboard）。渲染层直调 `navigator.clipboard.writeText` 在打包版会被 D-170 全拒 permission handler 静默拦截。D-178 |
 | **设置页分区目录 + 滚动联动** | `ui/src/pages/settings/index.html`（`.settings-shell` / `.settings-nav` / `.settings-scroll`）、`settings.js::installSectionNav()` |
 | 截图基线用例 | `scripts/e2e-cases.mjs`、`tests/e2e/baselines/` |
 | **全局导航 / 返回下载队列 / 队列视图状态** | `packages/ui/src/shell/app-nav.js`（导航条注入、`saveView/restoreView`）、`pages/queue/queue.js::saveView/restoreView` |
 | **全屏唯一真相（菜单 / 按钮 / 所有页面）** | `apps/desktop/src/main/bootstrap.ts`（`WINDOW_FULLSCREEN` handler + 事件推送）、`main/app-menu.ts`（F11 click）、`ui/src/shell/app-nav.js`（按钮与 Esc） |
 | **主题 / 强调色 / 动效全局状态与持久化** | `packages/ui/src/theme/theme.js`（`set/sync/listen/state`）、`pages/settings/settings.js`、`main/m5-channels.ts::SETTINGS_GET/SET` |
 | **本地文件状态探测 / 删除任务时文件已不存在 / 打开文件与打开文件夹反馈** | `apps/desktop/src/main/local-file-status.ts`（errno 分类 + 短 TTL 缓存 + force 重查）、`apps/desktop/src/main/adapters/local-file-status-port.ts`（真实 `stat` + 幂等回收）、`main/m5-channels.ts::TASK_ACTION` / `TASK_LIST`、`core/src/task-detail/task-detail.ts::open`、`ui/src/pages/queue/queue.js::fileStateKey` / `openActionMessage` / `performRemoval`；卡片「打开文件」按钮**只在 live 模式注入**（静态预览不注入，保住冻结基线）；原理见 §9 坑 22 |
+| **产物路径封链（回收/打开防越界）** | `core/src/path-resolver/containment.ts`（纯函数：归一/大小写/拒 `..`/按段前缀）→ `core/src/task-queue/task-queue.ts::acceptContainedArtifacts`（入库主门：roots=该请求的 videoDir/audioDir/tempDir，全拒转 `ARTIFACT_OUTSIDE_ROOTS`）→ `main/m5-channels.ts::TASK_ACTION`（withFiles 整批拒绝）与 `core/src/task-detail/task-detail.ts::open`（REFUSED）两道副门；request===null 旧记录 fail-open（D-120 冻结语义）。D-184 |
+| **spawn 前取消（pre-spawn 窗口）** | `engine-ytdlp/src/yt-dlp-engine.ts`：runDownload 每个 pre-spawn await 后查 `isCanceled()`（最后一处紧贴 spawn，其后到 register 是同一同步块）→ `cancelBeforeSpawn()`（空 tempDir 非递归 rmdir + canceled 事件）；`cancel()` 在 killTree===null 时返回 **true**（false 仅保留 D-142「树没死仍在跑」语义）。D-182 |
 | **响应式布局（视口宽高驱动）** | `packages/ui/src/styles/layout.css`（`--ui-step` + 高特异性覆盖）；`ytvdlt.css` 仍是 M3 固定画幅，**不要改它** |
 | **TXT 清单批量导入（选文件 / 预览 / 确认入队）** | `packages/core/src/txt-import/parse.ts`（纯解析，URL 校验由外层注入）→ `apps/desktop/src/main/txt-import-service.ts`（一次性票据 + 真实计数）→ `apps/desktop/src/main/adapters/txt-file-picker.ts`（原生选择器 + 读）→ `main/txt-import-file.ts`（扩展名 / 大小 / 严格 UTF-8 纯解码）→ `m5-channels.ts::TXT_IMPORT_PICK/ENQUEUE` → `m4-host.ts::enqueueTxtBatch` → `TaskQueue.enqueueBatch()`；UI 在 `packages/ui/src/txt-import/txt-import.js`（**仅 live 模式注入**，静态基线不受影响） |
 | **播放列表批量下载（自动识别 / 预览 / 默认全选 / 一次确认）** | `core/src/playlist/preview-cache.ts`（票据）→ `apps/desktop/src/main/playlist-preview-service.ts`（真 `engine.probePlaylist()` + 脱敏 DTO）→ `m5-channels.ts::PLAYLIST_PREVIEW / PREVIEW_CANCEL / BATCH_ENQUEUE` → `m4-host.ts::runPlaylistBatch` → `buildPlaylistBatchRecordsByUrl()` → `TaskQueue.enqueueBatch()`；UI 在 `packages/ui/src/playlists/playlist-import.js`（**仅 live 模式注入**）。M3 fixture 对话框 `dialogs/playlist-selector.js` 与 `pages/queue/playlist-batch.html` 保持冻结不动 |
@@ -221,6 +225,10 @@ ui（零依赖） ← preload ← apps/desktop
 17. **`SUPPORTED_SITES` 只收 `refresh`、`URL_SUPPORT_CHECK` 只收 `url` / `refresh`**（D-134）：渲染层不得指定引擎路径、引擎版本、argv、cookies、质量或提取器——名单必须来自**当前实际运行的引擎**，这是整个功能存在的理由（写死或可被渲染层指定的名单与陈旧列表无法区分）。`SUPPORTED_SITES` 的 DTO **不含 `enginePath`**（含用户名绝对路径，无需求且属泄露），取不到就以稳定 code（`ENGINE_TIMEOUT` / `ENGINE_FAILED` / `ENGINE_EMPTY` / `OUTPUT_LIMIT_EXCEEDED` / `ENGINE_UNAVAILABLE`）报失败，**绝不编造列表**。`URL_SUPPORT_CHECK` 由**主进程算好 `blocks` 下发**，渲染层不得自行推导「什么状态算不支持」；`NO_MEDIA` 是提示不是拦截，**门禁 fail open**——误拦用户无法绕过，误放只是让下载按引擎自己的准确错误失败。
 18. **截图 fixture 永不进 live 模式**（D-141）：`queue.js::SAMPLE`、`task-detail.js::SAMPLE`、`task-log.js::SAMPLE` 与 `index.html` 里的 fixture 字面值只服务 `file://` 静态基线。live 模式在真实数据到达前必须表现成「还不知道」（`data-state="loading"` / 空白 / 动作全部禁用），**不得**用样例数据顶替，也不得谎报「还没有任务」。首个回复要**强制重绘**（否则空队列因 paint key 相同永远停在 loading）；首条回复卡死要有超时转错误态 + 重试。语言切换是整页重载，等于重走启动路径——这条规则不守住，切换语言就会把假任务带回真实窗口。
 19. **`STAR_PROMPT_CHECK` 零参数、`STAR_PROMPT_ACTION` 只收动作枚举**（D-148）：渲染层不得传 URL 或计数——仓库地址是主进程常量，`star` 走 `openExternal`；频率状态（`advanced.starPrompt*` 五键）只由主进程读写。弹窗是 live-only 动态 DOM（D-139 模式），不进静态基线；「以后再说」后 7 天内同版本不再问，`star`/`never` 永久安静，升级新版本计数重置。
+20. **剪贴板写入只走主进程通道**（D-178）：`CLIPBOARD_WRITE` 只收 `text` 单键、UTF-16 上限 1,000,000，主进程经既有 `ClipboardPort`（Electron `clipboard.writeText`）写入并回 `{ok}` + 稳定码（`CLIPBOARD_UNAVAILABLE` / `CLIPBOARD_WRITE_FAILED`）。打包版渲染层直调 `navigator.clipboard.writeText` 会被 D-170 的全拒 permission handler 静默拦截——新增复制能力一律走此通道，不再渲染层直调。
+21. **`CONFIG_GET` 有域白名单**（D-175）：主进程 `READABLE_CONFIG_DOMAINS` 只放行 `general` / `format` / `subtitle` 三个纯偏好域；`paths` / `network`（proxy / cookiesFile）/ `saved_links`（URL）/ `advanced` 一律**抛错**拒绝，不静默回空。放开新域前必须逐键证明非敏感 + 补单测 + 记决策（流程写在常量注释里）。`CONFIG_SET` 的 6 键白名单（D-168）不变。
+22. **入队/预检 URL 有长度上限**（D-186）：`DOWNLOAD_START` 与 `URL_SUPPORT_CHECK` 的 url 上限 `MAX_URL_CHARS = 4096`（UTF-16 单位），超限抛 `requires a bounded string url`、不回显 URL；预览通道（SUBTITLE_PREVIEW / PLAYLIST_PREVIEW）维持各自 2048，TXT 链路走 `TXT_IMPORT_LIMITS`——新增任何「渲染层提交 URL」的入口必须带长度上限。
+23. **artifact 路径封链双门**（D-184）：入库主门（TaskQueue 写 `record.artifacts` 前按该请求的 videoDir/audioDir/tempDir 过滤，全拒转 `ARTIFACT_INCOMPLETE` + `ARTIFACT_OUTSIDE_ROOTS` report）+ 动作副门（withFiles 回收整批拒绝、open 回 REFUSED）；纯函数在 `core/src/path-resolver/containment.ts`；request===null 的旧记录 fail-open（D-120 冻结语义，两侧有测试）。新增任何消费 artifacts 的破坏性动作必须先过同一封链。
 
 ---
 
@@ -235,6 +243,7 @@ ui（零依赖） ← preload ← apps/desktop
 | **应用内部工作目录** | `<dataDir>/work/<taskId>/`：yt-dlp 产物清单、子进程 `cwd`、以及 `-P temp:` 指向的中间文件（`.part` / `.part-FragN.part` / `.ytdl`）。**按任务隔离**；清单读取并交接后才删除，成功后若目录为空则非递归 `rmdir`。**这就是续传的凭据，不要当成垃圾清理**（D-118） |
 | **跨卷时的中间文件** | `<outputDir>/.ytvdlt-incomplete/<taskId>/`：当 `<dataDir>` 与输出目录不在同一卷（或卷无法判定）时使用。放在输出目录内部是为了保证收尾的 `shutil.move` 退化成 rename，而不是整份复制 |
 | 封面缓存 / 更新包 | `<dataDir>\thumbs\<sha1(url)>.<ext>`、同目录 `index.json`（D-103 持久索引：taskIds / bytes / lastUsedAt）、`<dataDir>\updates\YTVDLT-Setup-*.exe`（D-93 / D-96） |
+| **启动哈希缓存** | `<dataDir>\runtime-hash-cache.json`（D-176：按 (规范化路径, size, mtimeMs) 缓存随包运行时哈希，任一变化只重算该文件；缓存缺失/损坏/非法条目一律全量重算 fail-closed，校验永不跳过） |
 | **损坏快照备份** | 与 `tasks.json` 同目录的 `tasks.corrupt-<UTC 时间戳>[-N].json`（只读安装时随 `configDir` 一起回落到 `%APPDATA%\YTVDLT\config\`）：`TaskStore.load()` 在 JSON 损坏或坏记录隔离**之前**写入的字节级原文副本；备份失败 / 读取错误时 `save()` 一律拒绝，原 `tasks.json` 不被覆盖（D-159）。启动恢复报告里的 `load.status` 是判断依据 |
 
 `config/config.json` 按域组织：`general / format / subtitle / paths / network / advanced`；
@@ -322,6 +331,7 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 **为什么不能直推**：`.github/workflows/ci.yml` 在 `push main` 与所有 PR 上跑
 （`windows-latest`；`pnpm typecheck` → `npm test`（四维 ≥70）→ `check-layering` →
 `frozen-gate`），但 workflow 文件**不能强制自己必须过**——强制力完全来自仓库设置。
+所有 `uses:` 引用已钉 commit SHA（D-185，行尾 `# v<版本>` 注释供人工核对，含 desktop-pack.yml 的 upload-artifact）；升级 action 版本时按「GitHub API tag→commit 与 SHA→commit 双向回环」验证后改 SHA，绝不猜。
 `handoff-check.mjs` 不检查这一项，所以「本地全绿」不等于「可以合并」。
 
 **规则现状**（原是 D-161 交付的 6 步清单，现已在网页端落地；复核方式=Settings → Rules）：
@@ -414,10 +424,10 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 31. **「无报告的遗留物」先甄别再续写**（T5 / T6 两次实测）：被取消或限额杀死的 Agent 可能留下编译不过的骨架（`dropUtf8Prefix` 无定义），也可能留下「新测试全过、覆盖面未审计」的半成品（T5 的 30/30 掩盖了 7 项既有测试回归与 M5 `file-coverage` 红门）。接手顺序固定：`git diff` 逐文件对照任务书 → 全包 typecheck → 定向测试 → 全量测试 → 只补缺口，已实现且测过的绝不重写。
 32. **动态 DOM 的节点移除不能假设 `parentNode` 存在**（D-156 实测）：测试沙箱的节点暴露 `parent` 而非 `parentNode`，`!== null` 挡不住 `undefined`，一次 `removeChild` 的未处理 rejection 会连带击穿**无关**的测试文件。照 D-139 Star 弹窗的三连守卫写：`parent !== null && parent !== undefined && typeof parent.removeChild === 'function'`；创建前先确认 `<body>` 可挂。静态预览没有真实 body，动态能力在那里就该不可见。
 
-33. **「本机全绿」不等于「CI 全绿」**（D-157 实测）：干净 runner 缺三类本机才有的东西——被 `*.log` 误伤的测试 fixture（本机有、仓库没有）、按架构 §2.7 不入库的随包 `node.exe` / `yt-dlp.exe`、以及 Windows 检出的 CRLF（仓库 blob 是 LF，按 LF 分隔标记切分的许可测试会假失败）。修 CI 只补环境：把 fixture 入库、测试前用 `fetch-runtime --only=ytdlp/node` 取回二进制、在测试**输入边界**归一化行尾；**不许改断言、不许跳过用例、不许下调覆盖率门限**。补充（D-158）：Windows 把带 `#!/usr/bin/env node` 的 `.mjs` 检出成 CRLF 时，Vitest 收集期会报 `SyntaxError: Invalid or unexpected token` 且错误指向测试文件的 `import` 行；用 `.gitattributes` 的 `*.mjs text eol=lf` 钉住行尾即可，不要改测试。
+33. **「本机全绿」不等于「CI 全绿」**（D-157 实测）：干净 runner 缺三类本机才有的东西——被 `*.log` 误伤的测试 fixture（本机有、仓库没有）、按架构 §2.7 不入库的随包 `node.exe` / `yt-dlp.exe`、以及 Windows 检出的 CRLF（仓库 blob 是 LF，按 LF 分隔标记切分的许可测试会假失败）。修 CI 只补环境：把 fixture 入库、测试前用 `fetch-runtime --only=ytdlp/node` 取回二进制、在测试**输入边界**归一化行尾；**不许改断言、不许跳过用例、不许下调覆盖率门限**。补充（D-158）：Windows 把带 `#!/usr/bin/env node` 的 `.mjs` 检出成 CRLF 时，Vitest 收集期会报 `SyntaxError: Invalid or unexpected token` 且错误指向测试文件的 `import` 行；用 `.gitattributes` 的 `*.mjs text eol=lf` 钉住行尾即可，不要改测试。补充（D-181）：git for Windows 把 `.git/objects` 松散对象写成只读，本机 Node（Electron 运行时）的 `rmSync` 不清只读位——凡在 `finally` 里清理「git init 过的临时仓」的测试，必须先清只读再删且包 try/catch（`frozen-gate.test.ts::rmScratch`），否则断言全过也会整轮红；清理失败绝不外抛、绝不掩盖断言结论。
 
 34. **静态页的 CSP 必须放行 `connect-src file:`**（D-170 实测）：`packages/ui/src/fixtures/probe-fixture.js` 用**同步 XHR** 读同目录的 fixture JSON，这是 8 个页面唯一的数据来源。把 CSP 写成 `connect-src 'none'`（「页面不联网」的直觉写法）会让页面自己的数据源失效：`XMLHttpRequest` 抛异常 → 脚本停住 → DOM 停在初始态，视觉上不白屏，**只有 `--dump-dom` 快照能看出来**。正确写法是 `connect-src 'self' file: data:`：`file:` 给页面自己，`http(s)` 仍然被拦（这才是安全目标）。排查手法：截图基线像素没变但 DOM 快照整片退化成初始态 → 先怀疑 CSP 掐了脚本，别先去查渲染。
-35. **快照里绝不能出现媒体 URL，且写盘不能靠「每次都写」**（D-163 实测）：`MediaInfo.formats[].url` / `subtitles[].url` 是带 `sig`/`expire` 的签名 CDN 链接，任何业务代码都不读它们（格式化选择器只读 id/尺寸/码率，字幕规划只读 lang/ext，渲染层 DTO 已剥 url），所以落盘前必须过 `stripCredentialUrls()`。配套的指纹短路有个**必须记住的初值细节**：空队列的指纹是空串，`lastPersistedFingerprint` 必须以 `null` 起手，写成 `''` 会让 `restoreTasks()` 的第一次写回被当成「无变化」而跳过——D-159 的「损坏快照先备份再覆盖」当场失效，测试会红在 `task-store.test.ts` 的 D-159 用例上。
+35. **快照里绝不能出现媒体 URL，且写盘不能靠「每次都写」**（D-163 实测）：`MediaInfo.formats[].url` / `subtitles[].url` 是带 `sig`/`expire` 的签名 CDN 链接，任何业务代码都不读它们（格式化选择器只读 id/尺寸/码率，字幕规划只读 lang/ext，渲染层 DTO 已剥 url），所以落盘前必须过 `stripCredentialUrls()`。配套的指纹短路有个**必须记住的初值细节**：空队列的指纹是空串，`lastPersistedFingerprint` 必须以 `null` 起手，写成 `''` 会让 `restoreTasks()` 的第一次写回被当成「无变化」而跳过——D-159 的「损坏快照先备份再覆盖」当场失效，测试会红在 `task-store.test.ts` 的 D-159 用例上。例外注记（D-179）：`mediaInfo.thumbnail` **刻意保留**——它是启动时封面重取的唯一凭据（`ensureCover` → `ThumbnailCache.ensure`，缓存键 `sha1(url)`，taskId→封面的内存映射只在 ensure 时回填），剥离它会让重启后恢复任务的封面永久丢失；该 URL 只授予预览图、永不出主进程，签名残留风险记录在 `snapshot-media.ts` 头注释。
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 
@@ -445,6 +455,7 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 | **更新器首次下载没有独立可信签名基准**：信任根是 TLS + GitHub 域；发布端缺 `digest` 时本地 `.sha256` sidecar 只保证「后来没变」，不认证首次来源 | `main/app-update-service.ts`、`main/adapters/http-download.ts`；口径见 D-137「未覆盖」 |
 | **IPC / 导航边界未做真机窗口验证**：sender、主 frame、`will-navigate`、`setWindowOpenHandler` 目前只有假 Electron 单测；打包后真机点一遍待业主指令（铁律 9） | `main/bootstrap.ts`、`tests/unit/ipc-trust-boundary.test.ts` |
 | **本轮加固缺在线 / 安装包证据**：HTTP 逐跳、有界读取、IPC 边界全部是离线受控测试（127.0.0.1 + 假 Electron）；真实站点预检六态矩阵与 Windows 安装包验收需业主放行国际网并点名打包（铁律 9） | `tests/unit/http-network-boundary.test.ts`；口径见 D-137「未覆盖」 |
+| **日志页（task-log）在 live 模式没有注入器与导航入口**：`__YTVDLT_TASK__` 只有读取方、无注入方，「复制日志」暂无真实用户路径（D-178 已保证接线后即可用） | `ui/src/pages/task-log/`、`scripts/e2e-cases.mjs` |
 
 > 这张表会随开发推进变短。**完成一项就删一行**，不要留着写「已做」——那是本手册最容易腐烂的地方。
 >

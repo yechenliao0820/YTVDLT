@@ -897,6 +897,13 @@
         if (engineAuto !== null && typeof snapshot.autoCheckEngineUpdate === 'boolean') {
           engineAuto.checked = snapshot.autoCheckEngineUpdate;
         }
+        // D-166 follow-up: `autostart` on the snapshot is the HKCU Run truth
+        // (m5-channels reads the registry). The initial paint above falls back
+        // to `__YTVDLT_SETTINGS__`, which the packaged app never injects —
+        // without this repaint the checkbox showed a stale `false`.
+        if (autostart !== null && typeof snapshot.autostart === 'boolean') {
+          autostart.checked = snapshot.autostart;
+        }
       }).catch(function () { /* keep the defaults */ });
     }
 

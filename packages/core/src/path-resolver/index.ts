@@ -4,3 +4,5 @@ export * from './path-resolver.js';
 export * from './copy-suffix.js';
 // D-118: volume detection + where partial files may safely live.
 export * from './volume.js';
+// D-182: artifact containment — which paths may count as a task's artifacts.
+export * from './containment.js';

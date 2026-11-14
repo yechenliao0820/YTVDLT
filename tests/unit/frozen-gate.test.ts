@@ -13,7 +13,7 @@
  * within a week, so R3 is name-set based and the test pins both directions.
  */
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -269,6 +269,29 @@ describe('frozen gate · CLI resolution against a real repository (R1-09)', () =
     }).stdout ?? '',
   );
 
+  /**
+   * D-181: git for Windows writes loose objects under `.git/objects` with the
+   * read-only bit set, and Node's `rmSync({recursive, force})` does not clear
+   * it — on this machine's Node (the Electron runtime), scratch-repo cleanup
+   * in `finally` threw EPERM *after* every assertion had already passed,
+   * turning a green run red. Clear the read-only bits first, and treat any
+   * cleanup failure as best-effort: a leftover temp dir must never mask the
+   * verdicts the assertions above already produced.
+   */
+  const rmScratch = (dir: string): void => {
+    const clearReadOnly = (path: string): void => {
+      let entries;
+      try { entries = readdirSync(path, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        const child = join(path, entry.name);
+        if (entry.isDirectory()) clearReadOnly(child);
+        else { try { chmodSync(child, 0o666); } catch { /* best-effort */ } }
+      }
+    };
+    try { clearReadOnly(dir); } catch { /* best-effort */ }
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  };
+
   const scratchRepo = (): string | null => {
     const dir = mkdtempSync(join(tmpdir(), 'ytvdlt-frozen-'));
     git(dir, ['init', '-q']);
@@ -305,7 +328,7 @@ describe('frozen gate · CLI resolution against a real repository (R1-09)', () =
       const verdict = runFrozenGateCli(dir);
       expect(verdict.ok).toBe(true);
       expect(verdict.reasons).toEqual([]);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally { rmScratch(dir); }
   });
 
   it('fails as soon as the frozen file is edited in the working tree', () => {
@@ -316,7 +339,7 @@ describe('frozen gate · CLI resolution against a real repository (R1-09)', () =
       const verdict = runFrozenGateCli(dir);
       expect(verdict.ok).toBe(false);
       expect(verdict.reasons.join()).toContain('request.ts');
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally { rmScratch(dir); }
   });
 
   it('fails on a deleted dependency instead of passing quietly', () => {
@@ -328,6 +351,6 @@ describe('frozen gate · CLI resolution against a real repository (R1-09)', () =
       const verdict = runFrozenGateCli(dir);
       expect(verdict.ok).toBe(false);
       expect(verdict.reasons.join()).toContain('vitest');
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally { rmScratch(dir); }
   });
 });

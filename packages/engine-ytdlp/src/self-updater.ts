@@ -14,7 +14,8 @@
  * Rules that must not be relaxed:
  *   - checksum mismatch writes NOTHING (no `.new`, no `.bak`, target untouched);
  *   - the backup is written before the target is touched;
- *   - `resume()` runs in `finally` — an update can never wedge the queue;
+ *   - `resume()` runs in `finally` (the `queue-busy` early return resumes
+ *     explicitly, before its own return) — an update can never wedge the queue;
  *   - nothing here calls `TaskQueue.cancel()`; pausing is a flag, not a cancel.
  */
 import type {
@@ -205,6 +206,10 @@ export class SelfUpdater {
       ? true
       : await intakeGate.waitForIdle(QUEUE_IDLE_TIMEOUT_MS);
     if (!idle) {
+      // This return sits before the try/finally below, so it must release the
+      // gate itself — resume before anything that can throw, or a busy queue
+      // would stay parked until the next update or a restart (D-171 wedge).
+      intakeGate?.resume();
       await logger.error('self-update', 'queue still busy; update deferred', {
         timeoutMs: QUEUE_IDLE_TIMEOUT_MS,
       });
@@ -240,7 +245,9 @@ export class SelfUpdater {
       const rolledBack = await this.rollback();
       return this.result(fromVersion, fromVersion, false, 'swap-failed', rolledBack);
     } finally {
-      // Never leave the queue parked, even if the process is about to die.
+      // Every exit after `pause()` must resume: the swap paths get it here,
+      // the `queue-busy` return above resumes on its own. Never leave the
+      // queue parked, even if the process is about to die.
       intakeGate?.resume();
     }
   }

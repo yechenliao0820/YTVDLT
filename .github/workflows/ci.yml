@@ -47,14 +47,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # pnpm 版本不在这里硬编码：pnpm/action-setup@v4 未传 version 时自动读取
       # 根 package.json 的 "packageManager": "pnpm@9.15.9" 字段。
       # 已核对 pnpm-lock.yaml 顶部 lockfileVersion: '9.0'，与 pnpm 9.x 系列一致
       # （若将来仓库缺失 packageManager 字段，才需要改从 lockfileVersion 推断）。
       - name: Install pnpm (version from package.json packageManager)
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
 
       # Node 版本依据（仓库无 .nvmrc）：
       #   - 根 package.json "engines": { "node": ">=22" }
@@ -62,7 +62,7 @@ jobs:
       #   - devDependencies @types/node ^22.15 与 22 LTS 匹配
       # 故取 22 LTS（当前 22.x，满足 engines >=22）。
       - name: Setup Node 22 LTS
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm

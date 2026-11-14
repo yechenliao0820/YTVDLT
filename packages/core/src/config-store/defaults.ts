@@ -9,8 +9,17 @@ import type { ConfigDomainName } from '../ports.js';
  * non-ASCII character, so a Chinese title became a string of underscores
  * (`_ [_].mp4`). The key was never exposed in Settings, so the stored `true`
  * was never a user decision — v1 -> v2 retires it.
+ *
+ * v3: `network.maxRate` legacy placeholder `1000` retired. Builds before
+ * D-165 shipped `maxRate: 1000` as the default and `createDefaultConfig()`
+ * persists the full defaults, so every config.json written by those builds
+ * carries `1000`. D-165 then changed the default to `0` and wired the key to
+ * yt-dlp's `-r`, which turned the stored placeholder into a real 1 MB/s cap
+ * for every upgraded user. Settings has no `maxRate` input, so a stored
+ * `1000` was never a choice made in the app — v2 -> v3 resets exactly this
+ * one value to the current default; any other value is kept verbatim.
  */
-export const CONFIG_SCHEMA_VERSION = 2;
+export const CONFIG_SCHEMA_VERSION = 3;
 
 export const CONFIG_DOMAIN_NAMES: readonly ConfigDomainName[] = [
   'general', 'format', 'subtitle', 'paths', 'network', 'advanced', 'saved_links',
@@ -100,7 +109,8 @@ export const DEFAULT_DOMAINS: Readonly<Record<ConfigDomainName, Record<string, u
     // D-165: KB/s; 0 = unlimited. Read by `toRateLimit()` (config-store), which
     // turns it into yt-dlp's `-r` token. Was 1000 with no reader and no unit —
     // a placeholder that lied. 0 keeps the historical behaviour (no limit) so
-    // nobody is silently capped after the upgrade.
+    // nobody is silently capped after the upgrade. A config that still carries
+    // the pre-D-165 placeholder `1000` is reset here by the v2 -> v3 migration.
     maxRate: 0,
     concurrentFragments: 8,
     ipv4Only: false,

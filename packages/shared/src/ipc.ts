@@ -112,6 +112,14 @@ export const IPC_CHANNELS = {
   //          (D-98 spirit — the page is not trusted with link construction).
   STAR_PROMPT_CHECK: 'ytvdlt:starPrompt:check',
   STAR_PROMPT_ACTION: 'ytvdlt:starPrompt:action',
+  // D-173 (append-only): main-process clipboard write. Since D-170 the session
+  // denies every renderer permission, so `navigator.clipboard.writeText` (the
+  // `clipboard-sanitized-write` check) silently fails in the packaged app. The
+  // renderer hands over BOUNDED TEXT ONLY; the real write happens in the main
+  // process (`clipboard.writeText`), which never passes through the renderer
+  // permission handlers — the same "main owns the clipboard" rule the shell
+  // already states for paste prefill (A-4.1-02).
+  CLIPBOARD_WRITE: 'ytvdlt:clipboard:write',
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

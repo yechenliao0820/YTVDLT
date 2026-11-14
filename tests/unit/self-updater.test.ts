@@ -5,13 +5,14 @@
  *   - a checksum mismatch writes NOTHING (original binary untouched, no `.new`);
  *   - the `.bak` is written before the target is touched and survives a rollback;
  *   - a failed `rename()` or a bad post-swap hash restores the old binary;
- *   - `resume()` runs in `finally`, so a failed update can never wedge the queue.
+ *   - `resume()` runs in `finally` (and on the `queue-busy` early return), so
+ *     an update can never wedge the queue.
  *
  * Level: L0 (in-memory ports). The real-filesystem run is `engine-update-local`.
  */
 import { describe, it, expect } from 'vitest';
 import { Logger } from '@ytvdlt/core';
-import { SelfUpdater, parseChecksums } from '@ytvdlt/engine-ytdlp';
+import { SelfUpdater, parseChecksums, QUEUE_IDLE_TIMEOUT_MS } from '@ytvdlt/engine-ytdlp';
 import type {
   CorePorts, EngineUpdateSource, QueueIntakeGate,
 } from '@ytvdlt/shared';
@@ -42,6 +43,27 @@ function gateOf(): QueueIntakeGate & { readonly calls: string[] } {
   };
 }
 
+/** D-171 variant: a gate that also answers `waitForIdle`, like the real intake gate. */
+function gateWithIdleOf(idle: boolean): QueueIntakeGate & {
+  readonly calls: string[];
+  readonly timeouts: number[];
+} {
+  const calls: string[] = [];
+  const timeouts: number[] = [];
+  let paused = false;
+  return {
+    calls,
+    timeouts,
+    pause() { paused = true; calls.push('pause'); },
+    resume() { paused = false; calls.push('resume'); },
+    isPaused() { return paused; },
+    waitForIdle(timeoutMs: number) {
+      timeouts.push(timeoutMs);
+      return Promise.resolve(idle);
+    },
+  };
+}
+
 async function setup(options: {
   checksums?: string;
   bytes?: Uint8Array;
@@ -49,6 +71,7 @@ async function setup(options: {
   fs?: Partial<CorePorts['fs']>;
   hash?: Partial<CorePorts['hash']>;
   engineExists?: boolean;
+  intakeGate?: QueueIntakeGate;
 } = {}) {
   const mem = createInMemoryPorts();
   const bytes = options.bytes ?? NEW_BYTES;
@@ -64,7 +87,7 @@ async function setup(options: {
     hash: { ...mem.ports.hash, ...(options.hash ?? {}) },
   };
   const logger = new Logger({ ports, appVersion: '0.1.0' });
-  const gate = gateOf();
+  const gate = options.intakeGate ?? gateOf();
   const updater = new SelfUpdater({
     ports,
     logger,
@@ -210,5 +233,35 @@ describe('M5-5 · rollback', () => {
     expect(result.changed).toBe(false);
     expect(gate.calls).toEqual(['pause', 'resume']);
     expect(gate.isPaused()).toBe(false);
+  });
+});
+
+describe('D-171 · queue idle gate (waitForIdle)', () => {
+  it('defers the swap and still resumes intake when the queue never goes idle', async () => {
+    const { mem, updater, gate } = await setup({ intakeGate: gateWithIdleOf(false) });
+    const result = await updater.update();
+    expect(result.changed).toBe(false);
+    expect(result.reason).toBe('queue-busy');
+    expect(textOf(mem, ENGINE)).toBe('old-engine');
+    expect(mem.state.bytes.has(`${ENGINE}.new`)).toBe(false);
+    expect(mem.state.bytes.has(`${ENGINE}.bak`)).toBe(false);
+    // The regression this pins: the busy return sits before the try/finally,
+    // so it must resume on its own — a missed call parks the queue forever.
+    expect(gate.calls).toEqual(['pause', 'resume']);
+    expect(gate.isPaused()).toBe(false);
+    expect(gate.timeouts).toEqual([QUEUE_IDLE_TIMEOUT_MS]);
+    expect(mem.state.logLines.some((line) => line.includes('queue still busy'))).toBe(true);
+  });
+
+  it('waits for idle through the gate and swaps once it reports idle', async () => {
+    const { mem, updater, gate } = await setup({ intakeGate: gateWithIdleOf(true) });
+    const result = await updater.update();
+    expect(result.changed).toBe(true);
+    expect(textOf(mem, ENGINE)).toBe('new-engine');
+    expect(mem.state.bytes.has(`${ENGINE}.new`)).toBe(false);
+    expect(mem.state.bytes.has(`${ENGINE}.bak`)).toBe(false);
+    expect(gate.calls).toEqual(['pause', 'resume']);
+    expect(gate.isPaused()).toBe(false);
+    expect(gate.timeouts).toEqual([QUEUE_IDLE_TIMEOUT_MS]);
   });
 });

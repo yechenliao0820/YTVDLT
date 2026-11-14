@@ -36,6 +36,8 @@
 | 2026-11-13 CI 二轮修复 | 补 `.gitattributes` 把 `.mjs` 钉为 LF；Windows runner 的 CRLF shebang 让两个测试文件收集期报 SyntaxError，本地转 CRLF 已复现，修复不动任何源码与断言 | D-158 |
 | 2026-11-13 外部审计剩余项 | 任务快照损坏时先做字节级备份再写回、读错误阻断写入；预检取消按 `operationId` 隔离；组件更新镜像信任模型、快照深校验、CI 强制门禁配置清单 | D-159…D-161 |
 | 2026-11-13 外部审计 10 项修复 | 解析阶段可取消（probe 接 AbortSignal）、快照不再落盘签名 URL 且空转写盘按指纹跳过、排队任务可取消（`pending` 取代不存在的 `Queued`）、`maxRate` 真正接通 `rateLimit`（KB/s，0=不限）、开机自启真写 HKCU Run、打包版不再注册 fixture 通道、`CONFIG_SET` 不再谎报 ok、启动校验随包运行时、8 个页面加 CSP + session 权限一律拒绝、组件更新先等队列空闲再换文件 | D-162…D-171 |
+| 2026-11-14 审计遗留 bug 修复轮 | 修 D-162…D-171 上线后暴露/遗留的 8 个问题：存量配置 `maxRate=1000` 经 schema v3 迁移复位（不再把升级用户静默限速 1 MB/s）、组件更新 queue-busy 分支恢复队列入口、`CONFIG_GET` 加域白名单（general/format/subtitle）、启动弹窗换行修复 + 随包运行时哈希按 (size,mtime) 缓存 + engineVersion 回填、开机自启开关读注册表真值（主进程接线 + 设置页重绘）、快照只随结构变化写盘（thumbnail 因封面重取豁免剥离）、复制日志改走主进程剪贴板通道（`CLIPBOARD_WRITE`）、README 决策编号对齐；另把测试清理对本机只读 git 对象的 EPERM 适配为 `rmScratch`（D-181）。**本地完成，未提交、未发版、未打包** | D-173…D-181 |
+| 2026-11-14 审计存量项修复轮（二） | 下载取消的 pre-spawn 竞态真正生效（spawn 前取消不再谎报失败、不再照常跑完，P2-1）；历史记录 sizeBytes 改为引擎实测成片大小、0=未知（P2-7）；artifact 路径封链（入库主门 + 回收/打开副门，产物只认任务自己的输出根）；CI 的 4 个 action（7 处引用）全部钉 commit SHA（含审计漏数的 desktop-pack.yml `upload-artifact`）；`DOWNLOAD_START`/`URL_SUPPORT_CHECK` 统一 URL 上限 4096 字符。**本地完成，未提交、未发版、未打包** | D-182…D-186 |
 
 > 仓库版本基准为 **`0.3.0`**（最后已发布版本）；下一候选版本号按 §7 十进制规则为 `0.3.1`。
 > 实际发版时才同时改根与 `apps/desktop/package.json` 两处 `version`，并把正式版本行补进上表；本小节届时删除。

@@ -49,6 +49,11 @@ interface EngineState {
   maxActive: number;
   /** D-101: the request the engine was actually handed (output template etc.). */
   lastRequest: DownloadRequest | null;
+  /**
+   * On-disk size the fake engine reports for its completed artifact
+   * (default 10). `null` simulates "engine could not stat the file".
+   */
+  completedSizeBytes?: number | null;
 }
 
 const newEngineState = (behaviour: Behaviour): EngineState => ({
@@ -93,7 +98,10 @@ function fakeEngine(state: EngineState): DownloadEngine {
         if (behaviour === 'completed') {
           onEvent({
             type: 'completed', taskId: req.taskId,
-            artifacts: [{ taskId: req.taskId, path: artifactFor(req.taskId), kind: 'video', sizeBytes: 10 }],
+            artifacts: [{
+              taskId: req.taskId, path: artifactFor(req.taskId), kind: 'video',
+              sizeBytes: state.completedSizeBytes === undefined ? 10 : state.completedSizeBytes,
+            }],
           });
           finish();
         } else if (behaviour === 'failed') {
@@ -124,11 +132,11 @@ const okVerifier = (ok = true) => ({
   },
 });
 
-function setup(behaviour: Behaviour, verifyOk = true) {
+function setup(behaviour: Behaviour, verifyOk = true, engineOverrides: Partial<EngineState> = {}) {
   const mem = createInMemoryPorts();
   mem.state.files.set(PRIMARY, 'video-bytes');
   mem.state.files.set(artifactFor('t1'), 'video-bytes');
-  const engineState = newEngineState(behaviour);
+  const engineState = { ...newEngineState(behaviour), ...engineOverrides };
   const history = new HistoryStore({ ports: mem.ports });
   const queue = new TaskQueue({
     ports: mem.ports, engine: fakeEngine(engineState), verifier: okVerifier(verifyOk),
@@ -203,6 +211,43 @@ describe('A-M2-01 TaskQueue · happy path', () => {
     const entries = await history.query({});
     expect(entries).toHaveLength(1);
     expect(entries[0]?.videoPath).toBe(artifactFor('t1'));
+    expect(entries[0]?.sizeBytes).toBe(10);
+  });
+});
+
+describe('history sizeBytes · 完成任务的实测产物大小，未知保持 0', () => {
+  it('一个非默认尺寸也如实落史（340 MiB 级别不被抹平）', async () => {
+    const { queue, history } = setup('completed', true, { completedSizeBytes: 356_515_840 });
+    await queue.enqueue(record('t1'));
+    await tick();
+
+    const entries = await history.query({});
+    expect(entries[0]?.sizeBytes).toBe(356_515_840);
+  });
+
+  it('引擎无法 stat（sizeBytes: null）时保持 0 = 未知，不编造数字（D-107 精神）', async () => {
+    const { queue, history } = setup('completed', true, { completedSizeBytes: null });
+    await queue.enqueue(record('t1'));
+    await tick();
+
+    expect(queue.get('t1')?.state).toBe('Completed');
+    const entries = await history.query({});
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.sizeBytes).toBe(0);
+  });
+
+  it('进度流里的 lastTotalBytes 不参与历史尺寸（合并场景它是最后一条流的量）', async () => {
+    // The fake engine reports progress totalBytes: 10 (the "stream") while the
+    // artifact measures 356 MiB ("the merged product"). The history must pin
+    // the product's measured size, not the per-stream progress total.
+    const { queue, history } = setup('completed', true, { completedSizeBytes: 356_515_840 });
+    await queue.enqueue(record('t1'));
+    await tick();
+
+    expect(queue.get('t1')?.lastTotalBytes).toBe(10);
+    const entries = await history.query({});
+    expect(entries[0]?.sizeBytes).toBe(356_515_840);
+    expect(entries[0]?.sizeBytes).not.toBe(queue.get('t1')?.lastTotalBytes);
   });
 });
 
@@ -407,6 +452,7 @@ describe('M3 C11 · verify() receives a real historyEntry (C12 ordering preserve
     expect(entry === null || entry === undefined).toBe(false);
     expect(entry?.['taskId']).toBe('t1');
     expect(entry?.['videoPath']).toBe(artifactFor('t1'));
+    expect(entry?.['sizeBytes']).toBe(10);
     expect(queue.get('t1')?.state).toBe('Completed');
     expect(await history.query({})).toHaveLength(1);
   });

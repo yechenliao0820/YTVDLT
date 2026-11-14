@@ -25,7 +25,9 @@ import { createPathPicker } from './adapters/path-picker.js';
 import { createLocalFileStatusPort, createTrashFilesPort } from './adapters/local-file-status-port.js';
 import { createWinStartup } from './adapters/win-startup.js';
 import { resolveFixtureDir, resolveRuntimeDir } from './runtime-paths.js';
-import { checkRuntimeForApp } from './runtime-resolver.js';
+import {
+  checkRuntimeForApp, missingRequiredLabels, resolvedEngineVersion, runtimeCheckErrorMessage,
+} from './runtime-resolver.js';
 import { createNodeProbePort, resolveDataDir } from './data-dir.js';
 import { createQueueIntakeGate } from './adapters/queue-intake-gate.js';
 import { LocalDirUpdateSource } from './adapters/local-dir-update-source.js';
@@ -180,7 +182,14 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     // the full report, and tell the user in their own words when a REQUIRED
     // component is missing. Deliberately non-fatal: the queue, history, settings
     // and cover cache still work, and refusing to start would be worse.
-    const runtimeReport = await checkRuntimeForApp().catch((error: unknown) => {
+    const runtimeReport = await checkRuntimeForApp(
+      { isPackaged: packaged, resourcesPath, appVersion },
+      // D-169 follow-up: hash verdicts for the ~279 MB of required files are
+      // cached by (path, size, mtimeMs) in the data dir, so a healthy install
+      // re-hashes nothing before the first window; a corrupt cache degrades to
+      // hashing everything (fail closed).
+      { cachePath: join(dataDir.dataDir, 'runtime-hash-cache.json') },
+    ).catch((error: unknown) => {
       void logger.warn('runtime', 'start-up check threw', {
         detail: error instanceof Error ? error.message : String(error),
       });
@@ -193,22 +202,20 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
         optionalMissing: runtimeReport.summary.optionalMissing,
       });
     } else if (runtimeReport !== null) {
-      const missing = runtimeReport.items
-        .filter((item) => item.required && item.status !== 'OK')
-        .map((item) => item.label)
-        .join(', ');
+      const missing = missingRequiredLabels(runtimeReport);
       await logger.error('runtime', 'start-up check failed', {
         runtimeDir: runtimeReport.runtimeDir,
         missing,
         failed: runtimeReport.summary.failed,
       });
       if (packaged) {
-        dialog.showErrorBox(
-          'YTVDLT - runtime incomplete',
-          `These required components are missing or damaged in://n${runtimeReport.runtimeDir}//n//n${missing}//n//nDownloads will fail until the installation is repaired.`,
-        );
+        dialog.showErrorBox('YTVDLT - runtime incomplete', runtimeCheckErrorMessage(runtimeReport));
       }
     }
+    // D-169 follow-up: the check above already probed `yt-dlp.exe --version`;
+    // backfill it into the error report (and the engine's own error context)
+    // instead of keeping a dead 'unknown (resolved at runtime …)' string.
+    const engineVersion = resolvedEngineVersion(runtimeReport);
 
     const mapper = new ErrorMapper();
     const verifier = new ArtifactVerifier({ ports });
@@ -228,6 +235,9 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       jsRuntimePath: join(runtimeDir, 'node.exe'),
       fixturesDir: fixtureDir,
       appVersion,
+      // The version probed at start-up feeds the engine's own error context
+      // (previously a hardcoded fallback); omitted when the check failed.
+      ...(engineVersion === 'unknown' ? {} : { engineVersion }),
       ...(updateSource === null ? {} : { updateSource }),
       intakeGate,
     });
@@ -352,7 +362,7 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
         playlistFixturePath: join(fixtureDir, 'info-flat-playlist.json'),
       }),
       appVersion,
-      engineVersion: 'unknown (resolved at runtime by check-runtime)',
+      engineVersion,
       dataDir: dataDir.dataDir,
       dataDirReason: dataDir.reason,
       ...(existsSync(aria2cPath) ? { bundledAria2cPath: aria2cPath } : {}),

@@ -19,6 +19,7 @@ import type { ICancelHandle, IArtifactVerifier, IHistoryStore, ITaskQueue, ITask
 import { detectPostprocessed } from '../download-flags.js';
 import { resolveDownloadPlan } from '../decision/download-plan.js';
 import { applyCopySuffix, nextCopySuffix } from '../path-resolver/copy-suffix.js';
+import { artifactRootsOf, splitArtifactsByRoots } from '../path-resolver/containment.js';
 import {
   buildSubtitleLinks, classifyArtifact, evaluateSubtitleOutcome,
   primaryMediaArtifact, subtitleArtifactsOf, mediaArtifactsOf,
@@ -43,8 +44,10 @@ export interface TaskQueueDeps {
    */
   concurrency?: number;
   /**
-   * Throttle for mid-download snapshot writes (M4-3). Defaults to 500 ms; a
-   * value <= 0 persists on every progress event (L0 tests use 0).
+   * Throttle for mid-download snapshot persist ATTEMPTS (M4-3). Defaults to
+   * 500 ms; a value <= 0 attempts on every progress event (L0 tests use 0).
+   * D-163: an attempt only becomes a full-file rewrite when something
+   * structural changed since the last write.
    */
   persistIntervalMs?: number;
   /**
@@ -80,14 +83,22 @@ const nowIso = (ports: CorePorts): string => ports.clock.nowIso();
  *
  * Deliberately NOT a hash of the serialised JSON: the point is to skip the
  * stringify + full-file rewrite, so the comparison must not cost one itself.
- * Every field the task list / detail view can display is included, and nothing
- * else — a change that is invisible to the user does not deserve a disk write.
+ * Every structural field the task list / detail view can display is included,
+ * and nothing else — a change that is invisible to the user does not deserve a
+ * disk write.
+ *
+ * Progress numbers (`lastPercent` / bytes / speed / ETA) are deliberately NOT
+ * fingerprinted: every progress tick moves them, so including them made
+ * `tasks.json` a twice-a-second full rewrite for the whole download. A crash
+ * does not need fresh numbers there — `restore()` rewrites every interrupted
+ * state to `Canceled` and `restart()` clears progress anyway (D-107), and the
+ * resume credentials live in `<dataDir>/work/<taskId>` (D-118), never in this
+ * file. Progress values ARE still serialised whenever a structural change
+ * writes the file, so the snapshot stays internally consistent.
  */
 function snapshotFingerprint(tasks: readonly TaskRecord[]): string {
   return tasks.map((task) => [
     task.id, task.state, task.updatedAt, task.kind,
-    task.lastPercent ?? '', task.lastDownloadedBytes ?? '', task.lastTotalBytes ?? '',
-    task.lastSpeedBps ?? '', task.lastEtaSec ?? '',
     task.lastStage ?? '', task.error?.code ?? '', task.artifacts.length,
     task.subtitleFiles?.length ?? '', task.subtitleOutcome ?? '',
     task.mediaInfo?.id ?? '',
@@ -119,6 +130,9 @@ export class TaskQueue implements ITaskQueue {
    * fingerprint IS `''`, and starting from `''` made the very first
    * `restoreTasks()` write a no-op — which broke the D-159 guarantee that a
    * damaged `tasks.json` is only replaced AFTER the backup is verified.
+   * Reserved BEFORE the awaited save (so identical progress bursts cannot
+   * queue identical rewrites) and rolled back to `null` on failure (so the
+   * next attempt retries instead of skipping a lost write).
    */
   private lastPersistedFingerprint: string | null = null;
   /**
@@ -379,8 +393,14 @@ export class TaskQueue implements ITaskQueue {
         return;
       }
 
+      // --- 2b) D-182: containment — the manifest must not aim outside the
+      // task's own output roots. Only accepted paths enter the record, so
+      // every downstream consumer (subtitle links, verifier, history, D-131
+      // cleanup, recycle bin, open, file status) sees the filtered list.
+      const accepted = await this.acceptContainedArtifacts(record, effectiveRequest, outcome.artifacts);
+      if (accepted === null) return;
       // --- 3) verify BEFORE completion (C12) ---
-      record.artifacts = [...outcome.artifacts];
+      record.artifacts = [...accepted];
       // Stage 4: link every subtitle file to its media and reconcile the list
       // against what the request asked for. Both are pure and evidence-based:
       // ownership comes from this run's own manifest, never from a folder scan.
@@ -391,7 +411,7 @@ export class TaskQueue implements ITaskQueue {
         embed: subtitlePlan.embedSubs,
       };
       const subtitleFiles = buildSubtitleLinks({
-        artifacts: outcome.artifacts,
+        artifacts: accepted,
         mediaInfo: record.mediaInfo,
         subtitle: subtitleRequest,
       });
@@ -411,14 +431,14 @@ export class TaskQueue implements ITaskQueue {
       this.emit({ type: 'stage', taskId: record.id, stage: 'verifying' });
       const report = await this.deps.verifier.verify({
         taskId: record.id,
-        artifacts: outcome.artifacts,
+        artifacts: accepted,
         expected: record.mediaInfo,
         postprocessed: record.postprocessed,
         expectedManifest: this.deps.expectedManifestFor?.(record) ?? null,
         // M3 C11 (D-28 / D-42): backfill the real history entry so C11 no
         // longer SKIPs in the production chain. C12 ordering is preserved:
         // history.add() still happens ONLY after verify().ok === true.
-        historyEntry: buildHistoryEntry(record, outcome.artifacts, this.deps.ports),
+        historyEntry: buildHistoryEntry(record, accepted, outcome.sizes, this.deps.ports),
         kind: record.kind,
         // Stage 4 / D-127: advisory only — drives the embedded-subtitle probe,
         // never a verdict.
@@ -452,13 +472,13 @@ export class TaskQueue implements ITaskQueue {
       // run deliver what was requested", not "which files survive the user's
       // cleanup preference".
       const kept = await this.discardEmbeddedSubtitleArtifacts(
-        record, outcome.artifacts, subtitleFiles, subtitlePlan,
+        record, accepted, subtitleFiles, subtitlePlan,
       );
       record.artifacts = [...kept.artifacts];
       record.subtitleFiles = kept.links;
 
       // --- 4) history then Completed ---
-      const entry = buildHistoryEntry(record, kept.artifacts, this.deps.ports);
+      const entry = buildHistoryEntry(record, kept.artifacts, outcome.sizes, this.deps.ports);
       const addResult = await this.deps.history.add(entry, { privateMode: record.privateMode });
       if (addResult.added === false && addResult.reason === 'duplicate') {
         // D-101: the artifact passed every verification criterion and exists on
@@ -583,7 +603,12 @@ export class TaskQueue implements ITaskQueue {
     record: TaskRecord,
     request: NonNullable<TaskRecord['request']>,
   ): Promise<
-    | { kind: 'completed'; artifacts: string[] }
+    | {
+      kind: 'completed';
+      artifacts: string[];
+      /** Per-artifact on-disk size the engine measured when handing over. */
+      sizes: ReadonlyMap<string, number | null>;
+    }
     | { kind: 'failed'; error: AppError }
     | { kind: 'canceled' }
   > {
@@ -613,8 +638,11 @@ export class TaskQueue implements ITaskQueue {
           if (event.etaSec !== null && event.etaSec !== undefined) {
             record.lastEtaSec = event.etaSec;
           }
-          // M4-3: a hard kill mid-download must leave a usable snapshot, so
-          // progress is persisted (throttled by time, not by percentage).
+          // M4-3: a hard kill mid-download must leave a usable snapshot, so a
+          // persist is ATTEMPTED here (throttled by time, not by percentage).
+          // D-163: the fingerprint decides whether bytes are actually written —
+          // a structural change (state / stage / artifacts / error) lands with
+          // the next tick; pure progress jitter never rewrites the file.
           const now = this.deps.ports.clock.nowEpochMs();
           if (now - this.lastPersistAt >= this.persistIntervalMs) {
             this.lastPersistAt = now;
@@ -632,7 +660,11 @@ export class TaskQueue implements ITaskQueue {
           return;
         }
         if (event.type === 'completed') {
-          settle({ kind: 'completed', artifacts: event.artifacts.map((a) => a.path) });
+          settle({
+            kind: 'completed',
+            artifacts: event.artifacts.map((a) => a.path),
+            sizes: new Map(event.artifacts.map((a) => [a.path, a.sizeBytes])),
+          });
           return;
         }
         if (event.type === 'failed') {
@@ -643,6 +675,67 @@ export class TaskQueue implements ITaskQueue {
       });
       this.handles.set(record.id, handle);
     });
+  }
+
+  /**
+   * D-182: keep only artifact paths INSIDE the task's own output roots.
+   *
+   * The manifest is written by the engine's own `--print-to-file` call, but its
+   * LINES come from remote site content (`%(filepath)` of a manipulated title /
+   * extractor quirk can make yt-dlp report a path anywhere). `isAbsoluteArtifactPath()`
+   * guarantees "absolute", nothing more — and `TaskRecord.artifacts` is the
+   * authority every destructive consumer trusts: the D-120 recycle-bin cleanup,
+   * the D-131 subtitle cleanup, open-file / open-folder and history. One bad
+   * line entering the record is one bad line the recycle bin may later receive,
+   * so the gate sits HERE, at intake, before anything is persisted or verified.
+   *
+   * Roots are `paths.videoDir` / `audioDir` / per-task `tempDir` of the request
+   * that actually drove THIS run, so ` (n)` copies (D-101), same-directory
+   * subtitles, extractor / playlist subdirs and the cross-volume
+   * `.ytvdlt-incomplete` folder are inside by construction — a legitimate
+   * artifact is never dropped.
+   *
+   * Rejected paths are dropped from the list and logged (never silent, never a
+   * crash); the record itself stays. If NOTHING is acceptable the run is a
+   * failure: the record is transitioned to `Error` with a precise reason and
+   * `null` returned (the caller stops before verify / history).
+   */
+  private async acceptContainedArtifacts(
+    record: TaskRecord,
+    request: NonNullable<TaskRecord['request']>,
+    artifacts: readonly string[],
+  ): Promise<string[] | null> {
+    const { kept, rejected } = splitArtifactsByRoots(artifacts, artifactRootsOf(request.paths));
+    if (rejected.length === 0) return kept;
+    // Diagnostic parity with `manifest.droppedLines`: the WARNING carries the
+    // paths themselves (capped) so logs/app-*.jsonl alone explains the loss.
+    const capped = rejected.slice(0, 10);
+    try {
+      await this.deps.ports.logSink.appendJsonl(JSON.stringify({
+        ts: nowIso(this.deps.ports),
+        level: 'WARNING',
+        scope: 'task-queue',
+        event: 'artifact.outsideRoots',
+        payload: {
+          taskId: record.id,
+          rejected: rejected.length,
+          ...(rejected.length > capped.length ? { capped: capped.length } : {}),
+          paths: capped,
+        },
+      }));
+    } catch { /* a dead log sink must not break the run */ }
+    if (kept.length === 0) {
+      record.error = {
+        code: 'ARTIFACT_INCOMPLETE',
+        message: '产物路径超出任务输出目录，已拒绝入库',
+        detail: `all ${rejected.length} manifest path(s) outside the task output roots; first: ${capped[0] ?? ''}`,
+        retryable: true,
+        report: `ARTIFACT_OUTSIDE_ROOTS: ${rejected.length} path(s) rejected (containment)`,
+      };
+      this.transition(record, 'Error');
+      return null;
+    }
+    return kept;
   }
 
   async cancel(taskId: string): Promise<boolean> {
@@ -780,6 +873,15 @@ export class TaskQueue implements ITaskQueue {
    */
   private async persistSnapshot(): Promise<void> {
     if (this.deps.taskStore === undefined) return;
+    // D-163: a no-op write is still a full-file rewrite. `run().finally` fires
+    // on every task end, and the throttled progress ticks keep calling here
+    // (state / stage / artifact / error changes ride on the next tick), so
+    // skip the write when nothing structural moved. The fingerprint reads the
+    // IN-MEMORY records: the persisted projection only strips fields the
+    // fingerprint never looks at, so both produce the same string — and a
+    // skipped tick no longer pays for building that projection either.
+    const fingerprint = snapshotFingerprint([...this.records.values()]);
+    if (fingerprint === this.lastPersistedFingerprint) return;
     // D-163: minimise before serialising — signed CDN links never touch disk.
     const tasks: TaskRecord[] = this.list().map((record) => (record.mediaInfo === null
       ? { ...record, artifacts: [...record.artifacts] }
@@ -788,20 +890,21 @@ export class TaskQueue implements ITaskQueue {
         artifacts: [...record.artifacts],
         mediaInfo: stripCredentialUrls(record.mediaInfo),
       }));
-    // D-163: a no-op write is still a full-file rewrite. `run().finally` fires
-    // on every task end, and progress ticks can land on an unchanged record
-    // (two streams, retries), so skip the write when nothing observable moved.
-    const fingerprint = snapshotFingerprint(tasks);
-    if (fingerprint === this.lastPersistedFingerprint) return;
+    // Reserve the fingerprint BEFORE the awaited save: further progress events
+    // fire while the write is still in flight, and each of them compares
+    // against this field — updating it only after the save resolved would let
+    // identical content queue identical full-file rewrites.
+    this.lastPersistedFingerprint = fingerprint;
     try {
       await this.deps.taskStore.save({
         schemaVersion: 1,
         savedAt: nowIso(this.deps.ports),
         tasks,
       });
-      this.lastPersistedFingerprint = fingerprint;
       this.snapshotPersistFailed = false;
     } catch (error) {
+      // The write never landed: un-reserve so the next attempt retries.
+      this.lastPersistedFingerprint = null;
       if (this.snapshotPersistFailed) return;
       this.snapshotPersistFailed = true;
       try {
@@ -837,6 +940,7 @@ function toAppError(error: unknown): AppError {
 function buildHistoryEntry(
   record: TaskRecord,
   artifacts: readonly string[],
+  sizes: ReadonlyMap<string, number | null>,
   ports: CorePorts,
 ): HistoryEntry {
   const info: MediaInfo | null = record.mediaInfo;
@@ -849,6 +953,17 @@ function buildHistoryEntry(
   const thumb = artifacts.find((path) => classifyArtifact(path) === 'thumbnail') ?? null;
   const subs = subtitleArtifactsOf(artifacts);
   const timestamp = ports.clock.nowIso();
+  // The engine fs.stat'd every artifact when the completed event was emitted;
+  // the primary media file IS the product, so its measured size is the honest
+  // history value. For a merged video+audio download that file is the merged
+  // output — the per-stream progress totals (`record.lastTotalBytes`) describe
+  // only the LAST stream and would under-report the product. `0` stays the
+  // "unknown" sentinel (engine could not stat): an unknown size is never
+  // fabricated into a non-zero number (D-107 spirit).
+  const reported = sizes.get(primary);
+  const sizeBytes = typeof reported === 'number' && Number.isFinite(reported) && reported > 0
+    ? reported
+    : 0;
   return {
     id: record.id,
     taskId: record.id,
@@ -860,7 +975,7 @@ function buildHistoryEntry(
     audioPath: audio,
     thumbnailPath: thumb,
     subtitlePaths: subs,
-    sizeBytes: 0,
+    sizeBytes,
     extractorKey: info?.extractor_key ?? '',
     downloadType: record.kind,
     formatId: record.request?.format.formatId ?? null,

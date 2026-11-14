@@ -290,6 +290,10 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     siteSupport,
     // D-148: assembled above (config + clock + version + injected openExternal).
     starPrompt,
+    // D-173: the same injected `ClipboardPort` the TASK_ACTION copy actions
+    // use (electron-entry hands it in). Absent = CLIPBOARD_WRITE reports
+    // `CLIPBOARD_UNAVAILABLE` instead of a silent fake success.
+    ...(options.clipboard === undefined ? {} : { clipboard: options.clipboard }),
     // TXT import reuses the ENGINE's own URL whitelist (assertHttpUrl), the
     // same one `argv-builder-download.ts` calls before building argv. We do
     // not invent a site registry: whether yt-dlp supports a host is decided

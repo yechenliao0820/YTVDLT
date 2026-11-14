@@ -99,12 +99,22 @@ export function createWinStartup(options: WinStartupOptions): ISystemStartupPort
       return { ok: true };
     },
 
+    /**
+     * The settings toggle shows this value, so a FAILED query must not
+     * masquerade as "off" — it throws and lets the channel layer fall back to
+     * the config mirror. Only a confirmed absence (`reg` exits 1 with
+     * "unable to find", the same tolerance the `reg delete` above enjoys)
+     * reads `false`.
+     */
     async read(): Promise<boolean> {
       const plan = planFor(true);
-      if (!plan.supported || plan.registryPath === null) return false;
+      if (!plan.supported || plan.registryPath === null) {
+        throw new Error('autostart: unsupported platform');
+      }
       const result = await runReg(['query', plan.registryPath, '/v', valueName]);
-      if (result.code !== 0) return false;
-      return parseRegQueryValue(result.stdout, valueName) !== null;
+      if (result.code === 0) return parseRegQueryValue(result.stdout, valueName) !== null;
+      if (/unable to find/i.test(result.stderr)) return false;
+      throw new Error(`autostart read failed: reg exited ${result.code}`);
     },
   };
 }
