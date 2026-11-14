@@ -54,6 +54,30 @@ export const MIGRATIONS: readonly Migration[] = [
       };
     },
   },
+  {
+    from: 2,
+    to: 3,
+    /**
+     * Retire the pre-D-165 `network.maxRate` placeholder `1000`.
+     *
+     * Builds before D-165 shipped `maxRate: 1000` as the default and
+     * `createDefaultConfig()` clones the full defaults into config.json, so
+     * every file written by those builds carries `1000`. D-165 changed the
+     * default to `0` (unlimited) and wired the key to yt-dlp's `-r` — the
+     * stored placeholder became a real 1 MB/s cap on upgrade. Settings has no
+     * `maxRate` input and no UI path writes it (`CONFIG_SET` is unused by the
+     * renderer), so a stored `1000` cannot be a user decision made in the app;
+     * only the exact legacy value is reset, any other number is a real choice
+     * and survives verbatim.
+     */
+    migrate(old: ConfigFile): ConfigFile {
+      const network = old.domains['network'] ?? {};
+      const domains = network['maxRate'] === 1000
+        ? { ...old.domains, network: { ...network, maxRate: 0 } }
+        : old.domains;
+      return { schemaVersion: 3, updatedAt: old.updatedAt, domains };
+    },
+  },
 ] as const;
 
 /** Pure: apply migrations in order until the document reaches the target version. */

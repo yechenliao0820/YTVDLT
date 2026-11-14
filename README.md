@@ -295,7 +295,7 @@ download output (D-144), truly atomic config writes (D-145), and a
 detail-page cancel button aligned with what the queue can actually do
 (D-146) — is described in
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-161).
+[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-187).
 
 ## Engineering and verification
 
@@ -371,6 +371,60 @@ relaxing a single assertion. A follow-up (D-158) pins `.mjs` files to LF in
 `.gitattributes`: Windows runners otherwise check those shebang-bearing
 scripts out with CRLF, which breaks test collection. The numbers above come
 from the local run.
+
+The follow-up repair round on 2026-11-14 (D-173…D-181, not yet released) fixed
+eight issues those rounds left behind: legacy configs still carrying the
+placeholder `maxRate: 1000` are migrated (schema v3) instead of silently
+capping every upgraded install at 1 MB/s, a busy queue no longer wedges the
+intake gate when a component update defers, `config:get` answers only
+whitelisted preference domains, the start-up integrity check caches per-file
+hashes (and the crash dialog no longer shows a literal `//n`), the
+start-with-Windows toggle shows the registry's real state, `tasks.json` is
+rewritten only on structural changes, and the log page copies through a
+main-process clipboard channel instead of a permission that D-170 denies. It
+passed the same gates:
+
+| Gate | Result |
+|---|---|
+| Typecheck | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
+| Unit / contract / integration tests | **2,099 passed, 0 failed** |
+| Coverage | four dimensions ≥ the 70 floor enforced by the suite (the local summary is blocked by the D-29 delete guard; exact figures come from CI) |
+| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** |
+| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
+
+A second repair round the same day (D-182…D-186) closed the five code-level
+leftovers from that audit: a download cancelled before the child process spawns
+now cancels for real (no more "cancel failed" while the download runs to
+completion), history records carry the measured file size instead of a
+hardcoded 0, artifact paths are contained to the task's own output roots before
+they can be trashed or opened, all four GitHub Actions are pinned to commit
+SHAs (a fourth one the audit had missed included), and download / pre-check
+URLs are capped at 4,096 characters. It passed the same gates:
+
+| Gate | Result |
+|---|---|
+| Typecheck | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
+| Unit / contract / integration tests | **2,149 passed, 0 failed** |
+| Coverage | statements 89.48% / branches 86.75% / functions 91.51% / lines 89.48% (floor 70, not raised) |
+| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** |
+| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
+
+UI coverage joined the gate the same day (D-187): a shared import harness
+(`tests/unit/helpers/ui-harness.ts`) loads the zero-dependency UI scripts —
+plain IIFEs that attach their test surfaces to `window` — under fake browser
+globals, so the v8 coverage provider finally sees them (the legacy
+`runInNewContext` tests execute in VM sandboxes the provider never reports).
+Sixteen behavioural test files (~470 cases) drive every UI module to 99.2%
+statement coverage, `packages/ui` is now part of `vitest.config.ts`, and the
+threshold stays at 70. The four dimensions land at:
+
+| Gate | Result |
+|---|---|
+| Typecheck | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
+| Unit / contract / integration tests | **2,649 passed, 0 failed** (165 files) |
+| Coverage | statements 93.42% / branches 86.61% / functions 93.55% / lines 93.42% (floor 70, not raised; the UI itself: statements 99.21% / branches 86.35% / functions 97.55%) |
+| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** |
+| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
 
 Design invariants worth knowing if you plan to modify the code:
 

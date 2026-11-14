@@ -258,7 +258,18 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
       get pid() { return pid; },
       cancel: async (): Promise<boolean> => {
         canceled = true;
-        if (killTree === null) return false;
+        if (killTree === null) {
+          // No child has been spawned yet: `runDownload` checks `canceled`
+          // before `spawnStreaming`, and that check + the spawn + `register`
+          // are one synchronous block, so this cancel is already fully
+          // effective — nothing will start for this run and a `canceled`
+          // event follows. `false` is reserved for D-142's "the tree SURVIVED
+          // the kill and is still running"; answering it here would make the
+          // queue tell the user the cancel FAILED while it actually worked
+          // (the queue's own probe handle answers `true` with `pid: null` for
+          // the same reason, see D-162).
+          return true;
+        }
         return killTree();
       },
     };
@@ -304,6 +315,14 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
         : []),
     ]);
 
+    // A cancel that landed during the preparation must not reach the spawn:
+    // nothing was started, so settle as canceled instead of launching a child
+    // the user already withdrew (see `cancelBeforeSpawn`).
+    if (isCanceled()) {
+      await this.cancelBeforeSpawn(taskId, configuredTempDir, onEvent);
+      return;
+    }
+
     const argv = buildDownload(req, {
       jsRuntimePath: this.deps.jsRuntimePath,
       ffmpegDir: this.ffmpegDir(),
@@ -311,6 +330,17 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
       subtitleManifestPath: subtitlePath,
     });
     await this.deps.logger.logArgv('engine.download', argv);
+
+    // Last gate before the spawn. Everything from here through the
+    // `spawnStreaming` call and the `register` below is synchronous, so a
+    // cancel can only land here (→ no child is ever started) or after
+    // `register` (→ the `killTree` path). This closes the old window in which
+    // a pre-spawn cancel reported failure yet the child still started and ran
+    // to completion.
+    if (isCanceled()) {
+      await this.cancelBeforeSpawn(taskId, configuredTempDir, onEvent);
+      return;
+    }
 
     // yt-dlp resolves the external downloader through PATH, so the directory
     // that holds the bundled `aria2c.exe` has to be on it. ffmpeg's directory is
@@ -536,6 +566,29 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
           : undefined))
         .catch(() => undefined);
     }
+  }
+
+  /**
+   * Terminal path for a cancel that arrived BEFORE the child was spawned: no
+   * process exists, so no kill is owed and this run wrote no `.part`. The
+   * per-task temp dir is retired only when it is EMPTY — the same non-recursive
+   * D-118 rule as the post-success cleanup, so leftovers from an earlier
+   * attempt stay untouched (resumable data or evidence). The `canceled` event
+   * settles the queue's wait, which lands the task in `Canceled`.
+   */
+  private async cancelBeforeSpawn(
+    taskId: string,
+    tempDir: string,
+    onEvent: (e: EngineEvent) => void,
+  ): Promise<void> {
+    if (tempDir !== '') {
+      await this.deps.ports.fs.readdir(tempDir)
+        .then((entries) => (entries.length === 0
+          ? this.deps.ports.fs.rmdir(tempDir).catch(() => undefined)
+          : undefined))
+        .catch(() => undefined);
+    }
+    onEvent({ type: 'canceled', taskId });
   }
 
   /**

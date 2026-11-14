@@ -14,6 +14,7 @@ export interface HistoryEntry {
   audioPath: string | null;
   thumbnailPath: string | null;
   subtitlePaths: string[];
+  /** Measured on-disk size of `videoPath`; `0` = unknown, never fabricated. */
   sizeBytes: number;
   extractorKey: string;
   downloadType: DownloadKind;

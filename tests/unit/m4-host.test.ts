@@ -48,7 +48,14 @@ function engine(counter: { downloads: number; probes: number; playlistProbes: nu
         });
         onEvent({
           type: 'completed', taskId: req.taskId,
-          artifacts: [{ taskId: req.taskId, path: `C:/V/${req.taskId}.mp4`, kind: 'video', sizeBytes: 1 }],
+          // D-182: the intake gate only accepts artifacts inside the request's
+          // output roots, so the fixture must complete where yt-dlp would
+          // really write — `-P <outputDir>` (videoDir, or audioDir with -x).
+          artifacts: [{
+            taskId: req.taskId,
+            path: `${req.format.extractAudio ? req.paths.audioDir : req.paths.videoDir}/${req.taskId}.mp4`,
+            kind: 'video', sizeBytes: 1,
+          }],
         });
       });
       return { pid: 1, cancel: async () => true };

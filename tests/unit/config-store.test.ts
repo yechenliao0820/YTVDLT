@@ -95,6 +95,78 @@ describe('A-4.4-19 ConfigStore · 分域 / schemaVersion / 原子写', () => {
     expect(persisted['schemaVersion']).toBe(CONFIG_SCHEMA_VERSION);
   });
 
+  it('v2 -> v3 retires the legacy network.maxRate placeholder 1000', async () => {
+    const base = createDefaultConfig('2026-11-05T00:00:00.000Z');
+    const legacy = {
+      ...base,
+      schemaVersion: 2,
+      domains: { ...base.domains, network: { ...base.domains['network'], maxRate: 1000 } },
+    };
+    const { ports, state } = createInMemoryPorts();
+    state.files.set(CONFIG_PATH, JSON.stringify(legacy));
+    const store = new ConfigStore({ ports, migrations: MIGRATIONS });
+    await store.load();
+    // Back to the current default (0 = unlimited); without this the stored
+    // pre-D-165 placeholder would become a real `-r 1000K` cap on upgrade.
+    expect(store.get('network', 'maxRate')).toBe(0);
+    // Everything else in the domain survives untouched.
+    expect(store.get('network', 'concurrentFragments')).toBe(legacy.domains['network']?.['concurrentFragments']);
+    expect(store.get('network', 'ipv4Only')).toBe(legacy.domains['network']?.['ipv4Only']);
+    const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as Record<string, unknown>;
+    expect(persisted['schemaVersion']).toBe(CONFIG_SCHEMA_VERSION);
+  });
+
+  it('v2 -> v3 keeps a hand-edited maxRate (only the exact legacy 1000 is retired)', async () => {
+    const base = createDefaultConfig('2026-11-05T00:00:00.000Z');
+    const legacy = {
+      ...base,
+      schemaVersion: 2,
+      domains: { ...base.domains, network: { ...base.domains['network'], maxRate: 2000 } },
+    };
+    const { ports, state } = createInMemoryPorts();
+    state.files.set(CONFIG_PATH, JSON.stringify(legacy));
+    const store = new ConfigStore({ ports, migrations: MIGRATIONS });
+    await store.load();
+    expect(store.get('network', 'maxRate')).toBe(2000);
+    const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as Record<string, unknown>;
+    expect(persisted['schemaVersion']).toBe(CONFIG_SCHEMA_VERSION);
+  });
+
+  it('v2 -> v3 leaves a config without a maxRate key alone', async () => {
+    const base = createDefaultConfig('2026-11-05T00:00:00.000Z');
+    const { maxRate: _omitted, ...networkWithoutMaxRate } = base.domains['network'];
+    const legacy = {
+      ...base,
+      schemaVersion: 2,
+      domains: { ...base.domains, network: networkWithoutMaxRate },
+    };
+    const { ports, state } = createInMemoryPorts();
+    state.files.set(CONFIG_PATH, JSON.stringify(legacy));
+    const store = new ConfigStore({ ports, migrations: MIGRATIONS });
+    await store.load();
+    expect(store.get('network', 'maxRate')).toBeUndefined();
+    // The version still moves to 3 even though no value was rewritten.
+    const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as Record<string, unknown>;
+    expect(persisted['schemaVersion']).toBe(CONFIG_SCHEMA_VERSION);
+  });
+
+  it('a v0 config with the legacy maxRate 1000 walks the whole chain and lands on 0', async () => {
+    const base = createDefaultConfig('2026-11-05T00:00:00.000Z');
+    const legacy = {
+      ...base,
+      schemaVersion: 0,
+      domains: { ...base.domains, network: { ...base.domains['network'], maxRate: 1000 } },
+    };
+    const { ports, state } = createInMemoryPorts();
+    state.files.set(CONFIG_PATH, JSON.stringify(legacy));
+    const store = new ConfigStore({ ports, migrations: MIGRATIONS });
+    await store.load();
+    expect(store.get('network', 'maxRate')).toBe(0);
+    expect(store.get('paths', 'restrictFilenames')).toBe(false);
+    const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as Record<string, unknown>;
+    expect(persisted['schemaVersion']).toBe(CONFIG_SCHEMA_VERSION);
+  });
+
   it('downgrade (schemaVersion > 1) falls back to defaults and emits WARNING', async () => {
     const { ports, state } = createInMemoryPorts();
     state.files.set(CONFIG_PATH, JSON.stringify({ ...createDefaultConfig('x'), schemaVersion: 99 }));

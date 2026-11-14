@@ -13,6 +13,7 @@ import type { ITaskQueue } from '../ports.js';
 import type { ErrorReport } from '../error-report/error-report.js';
 import { maskUrlSecrets } from '../error-report/error-report.js';
 import { primaryMediaArtifact } from '../artifact-classify/kinds.js';
+import { artifactRootsOf, isPathInsideRoots } from '../path-resolver/containment.js';
 
 export type TaskDetailAction =
   | 'open-file'
@@ -116,6 +117,16 @@ export class TaskDetailService {
     // `.jpg` or a `.srt`, and "打开文件" then launched a text editor.
     const target = primaryMediaArtifact(task.artifacts) ?? task.artifacts[0];
     if (target === undefined) return this.result(action, false, 'NO_ARTIFACT', '任务没有产物路径');
+    // D-182: a record may only open what it downloaded. The gate re-derives the
+    // roots from the record's OWN request and refuses anything outside them —
+    // defence in depth behind the intake gate, covering records restored from a
+    // snapshot. No request means the gate cannot judge and stays open (same
+    // fail-open rule as the intake gate; a real download never produces a
+    // request-less record).
+    const roots = artifactRootsOf(task.request?.paths ?? {});
+    if (roots.length > 0 && !isPathInsideRoots(target, roots)) {
+      return this.result(action, false, 'REFUSED', '产物路径超出任务输出目录，已拒绝打开');
+    }
     const shell = this.deps.shell;
     if (shell === undefined) return this.result(action, false, 'SHELL_UNAVAILABLE', '当前环境未注入 shell 端口');
     const present = await this.deps.ports.fs.exists(target);

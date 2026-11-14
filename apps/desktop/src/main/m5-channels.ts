@@ -25,12 +25,13 @@ import type {
 } from '@ytvdlt/shared';
 import {
   ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES, STAR_PROMPT_ACTIONS,
-  buildTaskListSnapshot, classifyFailure, maskUrlSecrets, mergeSubtitleChoice,
+  artifactRootsOf, buildTaskListSnapshot, classifyFailure, isPathInsideRoots, maskUrlSecrets,
+  mergeSubtitleChoice,
   normalizeHexColor, normalizeLanguageCode, normalizeThemeMode, normalizeMotionMode, parseAccent,
   type SubtitleChoice,
 } from '@ytvdlt/core';
 import type {
-  AccentChoice, CommandTemplateInput, CommandTemplateStore, IConfigStore,
+  AccentChoice, ClipboardPort, CommandTemplateInput, CommandTemplateStore, IConfigStore,
   FailureKind, MotionMode, TaskDetailAction, TaskDetailResult, TaskTab, ThemeMode,
 } from '@ytvdlt/core';
 import type { ThumbnailCacheStatus, ThumbnailPruneReport } from './thumbnail-cache.js';
@@ -298,6 +299,12 @@ export interface M5ChannelDeps {
    * a fabricated "you may show" from a build without the service.
    */
   readonly starPrompt?: StarPromptPort;
+  /**
+   * D-173: the real clipboard lives in the main process (A-4.1-02). Absent =
+   * CLIPBOARD_WRITE reports `CLIPBOARD_UNAVAILABLE` instead of pretending the
+   * text was copied. Same `ClipboardPort` the TASK_ACTION copy actions use.
+   */
+  readonly clipboard?: ClipboardPort;
 }
 
 /** D-114: what `APP_INFO` answers. `version` is `''` when it is unknown. */
@@ -395,7 +402,7 @@ export interface AppearanceDto {
   /** 0.2.1 (D-93 / D-94): two independent startup-check switches. */
   readonly autoCheckAppUpdate: boolean;
   readonly autoCheckEngineUpdate: boolean;
-  /** D-166: mirrors `general.autostart` (the HKCU Run entry). */
+  /** D-166: the real HKCU Run state; `general.autostart` is only the fallback mirror. */
   readonly autostart: boolean;
   readonly systemAccent: string | null;
   readonly prefersDark: boolean;
@@ -411,6 +418,16 @@ const TASK_ACTIONS: readonly TaskDetailAction[] = [
 
 const MAX_TEMPLATE_ARGS = 32;
 const MAX_ARG_LENGTH = 400;
+
+/**
+ * D-173: how much TEXT the renderer may hand to the clipboard channel.
+ * 1,000,000 UTF-16 units is ~10x any realistic task log (thousands of lines of
+ * ~100 chars) and ≤ ~3 MB even in the worst all-CJK UTF-8 case — far below what
+ * the OS clipboard or the Electron IPC pipe cares about, while still bounding a
+ * runaway dump. Counted in code units, not bytes: the string is not decoded or
+ * truncated here, the cap only refuses absurd payloads before they reach the OS.
+ */
+const MAX_CLIPBOARD_TEXT_CHARS = 1_000_000;
 
 const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   // D-120: `refreshFileStatus` only asks for a fresh stat; it grants no path
@@ -492,6 +509,9 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   // never a URL (the repo page is resolved inside the main process).
   [IPC_CHANNELS.STAR_PROMPT_CHECK]: [],
   [IPC_CHANNELS.STAR_PROMPT_ACTION]: ['action'],
+  // D-173: exactly ONE key, `text`, and nothing else — no paths, no argv, no
+  // html. The value itself is length-capped below.
+  [IPC_CHANNELS.CLIPBOARD_WRITE]: ['text'],
 };
 
 /** Opaque, main-process-issued import ticket. */
@@ -697,14 +717,46 @@ export function readPaths(deps: Pick<M5ChannelDeps, 'config' | 'expandPath'>): P
   return { videoDir: read('videoDir'), audioDir: read('audioDir') };
 }
 
-function readAppearance(deps: M5ChannelDeps): AppearanceDto {
+/**
+ * D-166 follow-up: the HKCU Run entry is the operating system's real state, so
+ * the settings toggle must show it — `config.json` only mirrors what the app
+ * last wrote, and a registry cleaner / manual `reg delete` can remove the
+ * entry behind the app's back. Policy: the registry wins whenever it can be
+ * read; when the port is absent (non-Windows / test builds) or `read()` throws,
+ * the config value is shown so a failed query can never break SETTINGS_GET or
+ * the settings page. On a confirmed mismatch the config mirror is reconciled
+ * to the registry value (best-effort: a failed write-back only leaves the
+ * mirror stale, the registry stays the truth).
+ */
+async function readAutostart(deps: M5ChannelDeps): Promise<boolean> {
+  const configValue = deps.config.get('general', 'autostart') === true;
+  const port = deps.systemStartup;
+  if (port === undefined) return configValue;
+  let registryValue: boolean;
+  try {
+    registryValue = (await port.read()) === true;
+  } catch {
+    // Unknown registry state — show the mirror, never reconcile a guess.
+    return configValue;
+  }
+  if (registryValue !== configValue) {
+    try {
+      await deps.config.setDomain('general', { autostart: registryValue });
+    } catch {
+      // Display-only hygiene; nothing functional depends on the mirror.
+    }
+  }
+  return registryValue;
+}
+
+async function readAppearance(deps: M5ChannelDeps): Promise<AppearanceDto> {
   return {
     theme: normalizeThemeMode(deps.config.get('general', 'theme')),
     accent: parseAccent(deps.config.get('general', 'accent')),
     motion: normalizeMotionMode(deps.config.get('general', 'motion')),
     language: String(deps.config.get('general', 'language')).toLowerCase().startsWith('en') ? 'en' : 'zh-CN',
     privateMode: deps.config.get('general', 'privateMode') === true,
-    autostart: deps.config.get('general', 'autostart') === true,
+    autostart: await readAutostart(deps),
     autoCheckAppUpdate: deps.config.get('advanced', 'autoCheckAppUpdate') !== false,
     autoCheckEngineUpdate: deps.config.get('advanced', 'autoCheckEngineUpdate') !== false,
     systemAccent: deps.systemAppearance.accent(),
@@ -723,6 +775,19 @@ function assertTaskId(value: unknown): string {
 
 /** Longest URL the preview endpoint will look at (matches the service). */
 const MAX_PREVIEW_URL_LENGTH = 2048;
+/**
+ * Longest URL the renderer-submitted download channels accept — ONE shared
+ * bound for `DOWNLOAD_START` and `URL_SUPPORT_CHECK`, so the pre-check can
+ * never hard-reject a URL the enqueue path would have taken. 4096 UTF-16 code
+ * units is ~4x the preview-probe bound and far above any real video or
+ * playlist URL (long signed CDN tokens included), yet well below the Windows
+ * ~32k-char command-line limit the value later reaches through argv — the cap
+ * only bounds what can land in argv, logs and the task snapshot. Counted in
+ * code units like `MAX_CLIPBOARD_TEXT_CHARS` (D-173): the string is not
+ * decoded or truncated here, and the over-limit rejection never echoes the
+ * value back.
+ */
+const MAX_URL_CHARS = 4096;
 /**
  * Opaque ticket shape. `crypto.randomUUID()` is 36 chars of `[0-9a-f-]`, and
  * the classes stay open enough for a future id scheme while still refusing
@@ -966,7 +1031,25 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       }
       // Only the paths the engine itself recorded for THIS task are eligible.
       // The renderer never sends a path, so it cannot aim this at arbitrary files.
-      const artifacts = deps.queue.get(taskId)?.artifacts ?? [];
+      const target = deps.queue.get(taskId);
+      const artifacts = target?.artifacts ?? [];
+      // D-182: a path outside the record's own output roots never reaches the
+      // recycle bin. The intake gate (task-queue) already guarantees this for
+      // anything downloaded in this session; the check defends restored /
+      // manipulated snapshots. The whole batch is refused (nothing is trashed,
+      // the record is kept and the reason is reported) — deleting a foreign
+      // file is the one error that cannot be undone. Records without a request
+      // cannot be judged and keep the frozen D-120 semantics.
+      const removalRoots = artifactRootsOf(target?.request?.paths ?? {});
+      const refused = artifacts.filter((path) => !isPathInsideRoots(path, removalRoots));
+      if (refused.length > 0) {
+        return {
+          action: 'remove', ok: false, code: 'FILE_DELETE_FAILED', failureKind: 'file-cleanup',
+          reason: `检测到 ${refused.length} 个产物路径超出任务输出目录，为防止误删已拒绝回收`,
+          message: `本地文件清理失败：检测到 ${refused.length} 个产物路径超出任务输出目录，为防止误删已拒绝回收；任务记录已保留`,
+          failedCount: refused.length,
+        };
+      }
       // A second live record may quote the same physical file. Deleting it for
       // this record would silently destroy the other record's artifact, so the
       // shared paths are skipped (the record is still removed). In a batch the
@@ -1110,7 +1193,13 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     const record = validateM5Payload(IPC_CHANNELS.DOWNLOAD_START, payload);
     const operationId = readOperationId(record);
     const url = record['url'];
-    if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+    // Same bound as URL_SUPPORT_CHECK: the renderer may not dump an unbounded
+    // string into the pre-check, argv, logs or the task snapshot. The error
+    // does not echo the value.
+    if (typeof url !== 'string' || url.length > MAX_URL_CHARS) {
+      throw new Error('[m5-ipc] DOWNLOAD_START requires a bounded string url');
+    }
+    if (!/^https?:\/\//i.test(url)) {
       throw new Error('[m5-ipc] DOWNLOAD_START requires an http(s) url');
     }
     const kind: DownloadKind = record['kind'] === 'audio' ? 'audio' : 'video';
@@ -1769,7 +1858,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     const operationId = readOperationId(record);
     const rawUrl = record['url'];
     if (typeof rawUrl !== 'string' || rawUrl.trim() === ''
-      || rawUrl.length > MAX_PREVIEW_URL_LENGTH || /[\u0000-\u001f\u007f]/.test(rawUrl)) {
+      || rawUrl.length > MAX_URL_CHARS || /[\u0000-\u001f\u007f]/.test(rawUrl)) {
       throw new Error('[m5-ipc] URL_SUPPORT_CHECK requires a bounded string url');
     }
     if (!/^https?:\/\//i.test(rawUrl.trim())) {
@@ -1874,6 +1963,30 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     return port.applyAction(action);
   });
 
+  // D-173: the main process owns the real clipboard (A-4.1-02). Since D-170 the
+  // session denies every renderer permission — including the
+  // `clipboard-sanitized-write` check behind `navigator.clipboard.writeText` —
+  // so a renderer-side copy silently fails in the packaged app. Here the write
+  // goes through the injected `ClipboardPort` (Electron `clipboard.writeText`),
+  // which never passes a permission handler. Success/failure is an explicit
+  // `{ok}` answer, never a silent void; the codes reuse the TASK_ACTION copy
+  // vocabulary (`CLIPBOARD_UNAVAILABLE`, task-detail.ts).
+  handlers.set(IPC_CHANNELS.CLIPBOARD_WRITE, async (payload) => {
+    const record = validateM5Payload(IPC_CHANNELS.CLIPBOARD_WRITE, payload);
+    const text = record['text'];
+    if (typeof text !== 'string' || text.length > MAX_CLIPBOARD_TEXT_CHARS) {
+      throw new Error('[m5-ipc] CLIPBOARD_WRITE requires a bounded text string');
+    }
+    const port = deps.clipboard;
+    if (port === undefined) return { ok: false, code: 'CLIPBOARD_UNAVAILABLE' };
+    try {
+      await port.writeText(text);
+      return { ok: true };
+    } catch {
+      return { ok: false, code: 'CLIPBOARD_WRITE_FAILED' };
+    }
+  });
+
   handlers.set(IPC_CHANNELS.SETTINGS_GET, async (payload) => {
     validateM5Payload(IPC_CHANNELS.SETTINGS_GET, payload);
     return readAppearance(deps);
@@ -1938,7 +2051,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
 
     if (Object.keys(patch).length > 0) await deps.config.setDomain('general', patch);
     if (Object.keys(advancedPatch).length > 0) await deps.config.setDomain('advanced', advancedPatch);
-    const snapshot = readAppearance(deps);
+    const snapshot = await readAppearance(deps);
     deps.onAppearanceChanged?.(snapshot);
     return snapshot;
   });
@@ -1985,4 +2098,6 @@ export const M5_CHANNELS: readonly string[] = [
   // D-148 (append-only): the "Star on GitHub" nudge.
   IPC_CHANNELS.STAR_PROMPT_CHECK,
   IPC_CHANNELS.STAR_PROMPT_ACTION,
+  // D-173 (append-only): main-process clipboard write (bounded text only).
+  IPC_CHANNELS.CLIPBOARD_WRITE,
 ];

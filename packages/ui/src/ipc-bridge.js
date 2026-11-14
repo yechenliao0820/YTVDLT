@@ -47,7 +47,12 @@
     // registering the names here keeps a future renderer caller from being
     // silently rejected with `command-not-allowed` (the classic "click does
     // nothing" failure).
-    'STAR_PROMPT_CHECK', 'STAR_PROMPT_ACTION'
+    'STAR_PROMPT_CHECK', 'STAR_PROMPT_ACTION',
+    // D-173 (append-only): main-process clipboard write. The task-log page
+    // calls the wire string directly today (no ipc-bridge.js on that page, the
+    // settings.js pattern); §5 requires all THREE cable tables to agree so a
+    // future caller is never rejected with `command-not-allowed`.
+    'CLIPBOARD_WRITE'
   ];
 
   function bridge() {
@@ -100,7 +105,9 @@
     TEMPLATE_DELETE: 'ytvdlt:template:delete',
     // D-148: exact wire strings from shared/src/ipc.ts (append-only).
     STAR_PROMPT_CHECK: 'ytvdlt:starPrompt:check',
-    STAR_PROMPT_ACTION: 'ytvdlt:starPrompt:action'
+    STAR_PROMPT_ACTION: 'ytvdlt:starPrompt:action',
+    // D-173: exact wire strings from shared/src/ipc.ts (append-only).
+    CLIPBOARD_WRITE: 'ytvdlt:clipboard:write'
   };
 
   /** Whitelisted, synchronous-safe command dispatch. Never builds a command. */

@@ -371,6 +371,7 @@
       'log.empty.hint': '任务开始后，yt-dlp 的每一行输出都会出现在这里。',
       'log.error.title': '日志不可用',
       'log.error.hint': '任务已被移除，无法读取日志。',
+      'log.copy.failed': '复制失败：剪贴板不可用。',
 
       'batch.title': '播放列表批量入队',
       'batch.subtitle': '每条选中项生成一个独立任务（各自进度 / 取消 / 重试），并发上限 {limit}。',
@@ -962,6 +963,7 @@
       'log.empty.hint': 'Every yt-dlp output line appears here once the task starts.',
       'log.error.title': 'Log unavailable',
       'log.error.hint': 'The task was removed, so its log cannot be read.',
+      'log.copy.failed': 'Copy failed: the clipboard is unavailable.',
 
       'batch.title': 'Playlist batch enqueue',
       'batch.subtitle': 'Each selected entry becomes one task (own progress, cancel, retry); limit {limit}.',

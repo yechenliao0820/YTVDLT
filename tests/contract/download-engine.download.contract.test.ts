@@ -7,8 +7,8 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { FakeEngine, YtDlpEngine, YTVDLT_PROGRESS_TEMPLATE } from '@ytvdlt/engine-ytdlp';
-import { Logger, ErrorMapper } from '@ytvdlt/core';
-import type { DownloadEngine, DownloadRequest } from '@ytvdlt/shared';
+import { Logger, ErrorMapper, TaskQueue, HistoryStore } from '@ytvdlt/core';
+import type { DownloadEngine, DownloadRequest, EngineEvent, MediaInfo, TaskRecord } from '@ytvdlt/shared';
 import { createInMemoryPorts } from '../unit/helpers/in-memory-ports.js';
 
 const FIXTURES_DIR = fileURLToPath(new URL('../fixtures/', import.meta.url)).replace(/[\\/]+$/, '');
@@ -335,5 +335,205 @@ describe('D-89 · NSIS install into a read-only Program Files', () => {
     // This fake has NO inherited TEMP, so the engine substitutes the writable
     // dir it already pinned — the "no TEMP at all" fallback of D-118.
     expect(call?.opts.env?.['TEMP']).toBe(outputDir);
+  });
+});
+
+/**
+ * Pre-spawn cancel window (audit P2-1): a cancel that landed between
+ * `download()` and the `spawnStreaming` call used to return `false`
+ * ("cancel failed") while the child STILL started and ran to completion — the
+ * engine only checked `canceled` after the process had exited. The engine now
+ * checks `canceled` after every pre-spawn await, so the window can no longer
+ * start an unwanted child: the cancel is accepted, no child is spawned, the
+ * `canceled` event settles the run and the queue lands the task in `Canceled`.
+ */
+describe('Pre-spawn cancel window · cancel is accepted and no child starts', () => {
+  const waitFor = async (predicate: () => boolean, label: string): Promise<void> => {
+    const deadline = Date.now() + 2_000;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error(`condition not met in time: ${label}`);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  /** Let every pending microtask (cleanup, queue persistence) drain. */
+  const drain = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
+
+  it('cancel during the fs preparation: accepted, no spawn, canceled event, empty temp dir retired', async () => {
+    const { ports, state } = createInMemoryPorts();
+    // Hold the engine inside the pre-spawn fs batch (the first mkdir call).
+    let enteredPrep = false;
+    let releasePrep: () => void = () => undefined;
+    const prepGate = new Promise<void>((resolve) => { releasePrep = resolve; });
+    const realMkdir = ports.fs.mkdir.bind(ports.fs);
+    ports.fs.mkdir = async (dir: string): Promise<void> => {
+      enteredPrep = true;
+      await prepGate;
+      await realMkdir(dir);
+    };
+    const tempDir = 'C:/temp/p2-fs-1';
+    const rmdirCalls: string[] = [];
+    const realRmdir = ports.fs.rmdir.bind(ports.fs);
+    ports.fs.rmdir = async (path: string): Promise<void> => {
+      rmdirCalls.push(path);
+      await realRmdir(path);
+    };
+    const logger = new Logger({ ports, appVersion: '0.1.0' });
+    const mapper = new ErrorMapper({ clock: ports.clock });
+    const engine = new YtDlpEngine({
+      ports, logger, mapper, enginePath: 'C:/runtime/yt-dlp.exe',
+      jsRuntimePath: 'C:/runtime/node.exe', appVersion: '0.1.0',
+    });
+    const events: EngineEvent[] = [];
+    const handle = engine.download(request('p2-fs-1'), (event) => events.push(event));
+
+    await waitFor(() => enteredPrep, 'engine reached the fs preparation');
+    // The pre-spawn cancel is ACCEPTED — `false` is reserved for a kill that
+    // was attempted and failed (D-142); nothing was ever started here.
+    expect(await handle.cancel()).toBe(true);
+    expect(handle.pid).toBeNull();
+    releasePrep();
+
+    await waitFor(() => events.some((event) => event.type === 'canceled'), 'canceled event');
+    await drain();
+    expect(state.streamCalls).toHaveLength(0); // the child never started
+    expect(state.killed).toBe(0); // …and no kill was attempted either
+    expect(events.map((event) => event.type)).toEqual(['canceled']);
+    // The prep created the empty per-task dir; the D-118 empty-dir rule
+    // retires it. A dir with leftovers is never touched (see D-118 tests).
+    expect(rmdirCalls).toEqual([tempDir]);
+  });
+
+  it('cancel during logArgv (the last pre-spawn await): still accepted and the child never starts', async () => {
+    const { ports, state } = createInMemoryPorts();
+    // Hold the engine right after the fs preparation, inside the argv log
+    // write — the LAST await before the (synchronous) spawn + register.
+    let enteredLog = false;
+    let releaseLog: () => void = () => undefined;
+    const logGate = new Promise<void>((resolve) => { releaseLog = resolve; });
+    const realAppend = ports.logSink.appendJsonl.bind(ports.logSink);
+    ports.logSink.appendJsonl = async (line: string): Promise<void> => {
+      enteredLog = true;
+      await logGate;
+      await realAppend(line);
+    };
+    const logger = new Logger({ ports, appVersion: '0.1.0' });
+    const mapper = new ErrorMapper({ clock: ports.clock });
+    const engine = new YtDlpEngine({
+      ports, logger, mapper, enginePath: 'C:/runtime/yt-dlp.exe',
+      jsRuntimePath: 'C:/runtime/node.exe', appVersion: '0.1.0',
+    });
+    const events: EngineEvent[] = [];
+    const handle = engine.download(request('p2-log-1'), (event) => events.push(event));
+
+    await waitFor(() => enteredLog, 'engine reached the argv log');
+    expect(await handle.cancel()).toBe(true);
+    releaseLog();
+
+    await waitFor(() => events.some((event) => event.type === 'canceled'), 'canceled event');
+    await drain();
+    expect(state.streamCalls).toHaveLength(0);
+    expect(state.killed).toBe(0);
+    expect(events.map((event) => event.type)).toEqual(['canceled']);
+  });
+
+  it('cancel after the spawn keeps the existing killTree behaviour', async () => {
+    const { ports, state } = createInMemoryPorts();
+    state.streamScripts.set('yt-dlp.exe', {
+      chunks: [{ stream: 'stdout', text: 'YTVDLT|50|100|NA|10|5|0.5\n' }],
+      exitCode: 0,
+    });
+    const logger = new Logger({ ports, appVersion: '0.1.0' });
+    const mapper = new ErrorMapper({ clock: ports.clock });
+    const engine = new YtDlpEngine({
+      ports, logger, mapper, enginePath: 'C:/runtime/yt-dlp.exe',
+      jsRuntimePath: 'C:/runtime/node.exe', appVersion: '0.1.0',
+    });
+    const events: EngineEvent[] = [];
+    let cancelResult: boolean | null = null;
+    const handle = engine.download(request('p2-run-1'), (event) => {
+      events.push(event);
+      // The in-memory child settles one microtask after spawnStreaming, so the
+      // only deterministic "child is running" moment is the first progress
+      // chunk — cancel from inside it, before the fake's own finish() runs.
+      if (event.type === 'progress' && cancelResult === null) {
+        void handle.cancel().then((accepted) => { cancelResult = accepted; });
+      }
+    });
+
+    await waitFor(() => cancelResult !== null, 'cancel() resolved');
+    expect(handle.pid).not.toBeNull();
+    expect(cancelResult).toBe(true); // killTree's answer, unchanged
+    expect(state.killedPids).toHaveLength(1); // the tree kill WAS attempted
+    await waitFor(() => events.at(-1)?.type === 'canceled', 'canceled event');
+    await drain();
+    // The killed run settles as `canceled`, never as a failure (exitCode is
+    // null after the kill and `canceled` wins the post-run check).
+    expect(events.map((event) => event.type)).toEqual(['progress', 'canceled']);
+  });
+
+  // Queue-level wiring for the pre-spawn window: the task must land in
+  // `Canceled` — `cancel()` returning `true` transitions Running → Canceled
+  // immediately, and the engine's late `canceled` event must NOT re-transition
+  // (the D-142 guard checks `record.state === 'Running'`).
+  const okVerifier = {
+    async verify() {
+      return {
+        taskId: 'x', artifacts: [] as string[], postprocessed: false,
+        criteria: [{ id: 'C1' as const, status: 'PASS' as const, detail: 'ok' }],
+        ok: true, failureCode: null, durationMs: 1,
+      };
+    },
+  };
+  const fixtureMediaInfo = (): MediaInfo => ({
+    id: 'fixture', title: 'fixture', uploader: 'chan', uploader_id: null, duration: 10,
+    thumbnail: null, webpage_url: 'https://example.org/v', extractor_key: 'generic',
+    description: null, upload_date: null, ext: 'mp4',
+    formats: [{ format_id: '0', ext: 'mp4', width: 320, height: 240, vcodec: 'h264', acodec: 'aac', filesize: 1, filesize_approx: null, tbr: 1, fps: 25, format_note: null }],
+    subtitles: {}, automatic_captions: {}, chapters: null, _type: 'video',
+  });
+  const recordWithMediaInfo = (taskId: string): TaskRecord => ({
+    id: taskId, url: 'https://example.org/v', kind: 'video', state: 'Idle',
+    createdAt: '2026-11-05T00:00:00.000Z', updatedAt: '2026-11-05T00:00:00.000Z',
+    // Preset so the run skips the probe phase and goes straight to the
+    // download — the phase this describe block is about.
+    mediaInfo: fixtureMediaInfo(), request: request(taskId), artifacts: [],
+    lastPercent: null, error: null, privateMode: false, postprocessed: false,
+  });
+
+  it('queue-level: a pre-spawn cancel lands the task in Canceled and starts no child', async () => {
+    const { ports, state } = createInMemoryPorts();
+    let enteredPrep = false;
+    let releasePrep: () => void = () => undefined;
+    const prepGate = new Promise<void>((resolve) => { releasePrep = resolve; });
+    const realMkdir = ports.fs.mkdir.bind(ports.fs);
+    ports.fs.mkdir = async (dir: string): Promise<void> => {
+      enteredPrep = true;
+      await prepGate;
+      await realMkdir(dir);
+    };
+    const logger = new Logger({ ports, appVersion: '0.1.0' });
+    const mapper = new ErrorMapper({ clock: ports.clock });
+    const engine = new YtDlpEngine({
+      ports, logger, mapper, enginePath: 'C:/runtime/yt-dlp.exe',
+      jsRuntimePath: 'C:/runtime/node.exe', appVersion: '0.1.0',
+    });
+    // The queue drives the REAL engine. The verifier is never reached: the
+    // task cancels before the spawn.
+    const queue = new TaskQueue({
+      ports, engine, verifier: okVerifier, history: new HistoryStore({ ports }),
+      jsRuntimePath: 'C:/runtime/node.exe',
+    });
+    await queue.enqueue(recordWithMediaInfo('p2-queue-1'));
+
+    await waitFor(() => enteredPrep, 'engine reached the fs preparation');
+    expect(await queue.cancel('p2-queue-1')).toBe(true);
+    releasePrep();
+
+    await waitFor(() => queue.get('p2-queue-1')?.state === 'Canceled', 'Canceled state');
+    await drain();
+    expect(state.streamCalls).toHaveLength(0); // no child for the withdrawn run
+    expect(queue.get('p2-queue-1')?.state).toBe('Canceled');
+    // A clean cancellation never pins a junk error on the record.
+    expect(queue.get('p2-queue-1')?.error).toBeNull();
   });
 });

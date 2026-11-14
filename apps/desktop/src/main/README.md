@@ -13,10 +13,13 @@ M1 只做「骨架与引擎契约」，本目录的约束如下（违反即返�
 - `adapters/node-ports.ts`（B2）：全仓库**唯一**允许 `import fs from 'node:fs/promises'` /
   `node:crypto` / `node:child_process` 的文件。`createNodePorts()` 实现 `CorePorts`。
 
-## 唯一 electron import 点
-- `runtime-resolver.ts`（B2）：唯一 `import { app } from 'electron'`，只读 `app.isPackaged`
-  后组装端口并调用纯 TS Core 的 `checkRuntime()`。
+## electron import 点
+- `runtime-resolver.ts`（B2）：M1 时曾是唯一 `import { app } from 'electron'` 的文件；D-176 起
+  改为注入 `{ isPackaged, resourcesPath, appVersion }`，本文件**不再** import electron。
 - `runtime-paths.ts`（B2）：纯函数 `resolveRuntimeDir(env)`，开发态/打包态双路径切换。
+- electron 值导入如今集中在 `electron-entry.ts` / `bootstrap.ts` 等窗口与宿主装配文件
+  （M4/M5 起引入）；可测试性约定见 `bootstrap.ts` 头注释——electron 值导入的模块在单测
+  runner 里 import 不了，依赖一律注入。
 
 ## 分层铁律
 `packages/shared` / `packages/core` / `packages/engine-ytdlp` 的 import 图里

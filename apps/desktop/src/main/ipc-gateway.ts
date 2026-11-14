@@ -78,6 +78,34 @@ const WRITABLE_CONFIG: Readonly<Record<string, (value: unknown) => unknown>> = {
   'general.disablePreview': (value) => assertBoolean(value),
 };
 
+/**
+ * D-168 follow-up: the ONLY domains `CONFIG_GET` may read, checked as an
+ * exact, case-sensitive match. One check therefore also refuses empty names,
+ * `__proto__` / `constructor` / `prototype` and case variants — a malformed
+ * `domain` can never reach `getDomain`.
+ *
+ * Allowed: the three pure-preference domains. Every key in them is a display
+ * value with no path, no URL and no credential (`general` theme / language /
+ * concurrency, `format` quality prefs, `subtitle` language prefs).
+ *
+ * Refused on purpose (fail-closed; revisit only for a concrete renderer need):
+ *  - `paths`       real user directories. D-98 already stops the renderer from
+ *                  *naming* a path; reading them back is the same leak mirrored.
+ *  - `network`     at runtime this domain holds `proxy` (credential-shaped —
+ *                  `logger/redactor.ts` redacts it as a secret) and
+ *                  `cookiesFile` (session-cookie path); `download-plan.ts`
+ *                  reads both from here.
+ *  - `saved_links` stored links are URLs, and stored URLs never cross to the
+ *                  renderer (same redaction rule as `TASK_LIST`).
+ *  - `advanced`    main-process bookkeeping (update checks, star-prompt
+ *                  counters); the renderer has no need for it today.
+ *
+ * To open a domain up: add it here only after proving every key (present AND
+ * plausible) is non-sensitive, add a unit test, and record the decision in
+ * `docs/DECISIONS.md`.
+ */
+const READABLE_CONFIG_DOMAINS: ReadonlySet<string> = new Set(['general', 'format', 'subtitle']);
+
 function assertRange(value: unknown, min: number, max: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw new Error('[ipc] config value must be a finite number');
@@ -223,7 +251,17 @@ export function createIpcGateway(options: IpcGatewayOptions): IpcGateway {
   register(IPC_CHANNELS.CONFIG_GET, async (payload) => {
     const record = validatePayload(IPC_CHANNELS.CONFIG_GET, payload);
     const domain = record['domain'];
-    if (options.config === undefined || typeof domain !== 'string') return { value: null };
+    if (typeof domain !== 'string' || domain.length === 0) {
+      throw new Error('[ipc] config domain must be a non-empty string');
+    }
+    // D-168 follow-up: exact, case-sensitive whitelist match. Unknown domains
+    // are refused with an error, never answered with a silent empty bucket.
+    if (!READABLE_CONFIG_DOMAINS.has(domain)) {
+      throw new Error(`[ipc] config domain is not readable: ${domain}`);
+    }
+    // Same read-only contract as CONFIG_SET (D-168): no port injected means a
+    // structured refusal, not a `{value:null}` that pretends the domain is empty.
+    if (options.config === undefined) return { value: null, reason: 'read-only' };
     const bucket = options.config.getDomain(domain as Parameters<IpcConfigPort['getDomain']>[0]);
     return { value: bucket ?? null };
   });

@@ -100,9 +100,17 @@ const flood = (stream: 'stdout' | 'stderr', byteCount: number, glyph = 'x'): str
   `const c=${JSON.stringify(glyph)}.repeat(${byteCount});`
   + `(function p(){ process.${stream}.write(c); setImmediate(p); })();`;
 
-/** Writes a sentinel file 1.5 s later — so it only appears if the child SURVIVED. */
+/**
+ * Writes a sentinel file 5 s later — so it only appears if the child SURVIVED.
+ * The deadline must comfortably exceed real-world `taskkill` latency (an
+ * external process spawn): under a loaded machine the kill at ~400 ms once
+ * took >1.1 s to land, racing the old 1.5 s deadline and failing a healthy
+ * run. A longer deadline makes survival detection STRICTLY stronger — a child
+ * that dodged the kill now has 5 s to prove it — while the post-kill waits
+ * below simply cover the new window.
+ */
 const afterSurvivalProof = (sentinel: string): string =>
-  `setTimeout(()=>{require('fs').writeFileSync(${JSON.stringify(sentinel)},'alive')},1500);`;
+  `setTimeout(()=>{require('fs').writeFileSync(${JSON.stringify(sentinel)},'alive')},5000);`;
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -300,9 +308,9 @@ describe('TASK-02 · bounded spawn against the real bundled node.exe (L2)', () =
       { maxStdoutBytes: 1000 },
     );
     expect(result.stderr).toContain(OUTPUT_LIMIT_MARKER);
-    // Give the sentinel timer more than its 1.5 s deadline; a surviving child
+    // Give the sentinel timer more than its 5 s deadline; a surviving child
     // would have written it by now.
-    await wait(2200);
+    await wait(6500);
     expect(existsSync(sentinel)).toBe(false);
   });
 
@@ -322,7 +330,7 @@ describe('TASK-02 · bounded spawn against the real bundled node.exe (L2)', () =
     expect(await handle.kill()).toBe(true);
     const done = await handle.done;
     expect(done.exitCode).toBe(null);
-    await wait(1800);
+    await wait(6500);
     expect(existsSync(sentinel)).toBe(false);
     expect(await run.process.isAlive(handle.pid as number)).toBe(false);
   });
@@ -337,7 +345,7 @@ describe('TASK-02 · bounded spawn against the real bundled node.exe (L2)', () =
     );
     expect(timedOut.timedOut).toBe(true);
     expect(timedOut.exitCode).toBe(null);
-    await wait(1800);
+    await wait(6500);
     expect(existsSync(sentinel)).toBe(false);
 
     // 20 consecutive overflow spawns: a leaked listener or an un-removed child

@@ -6,8 +6,18 @@
  * application ever reads them: the format selector uses `format_id` / size /
  * codec, the subtitle planner uses `lang` / `ext`, and every renderer-facing
  * DTO strips them. Keeping them in `<configDir>/tasks.json` therefore buys
- * nothing and leaks the user's session material into a plain-text file that is
- * rewritten twice a second.
+ * nothing and leaks the user's session material into a plain-text file.
+ *
+ * `thumbnail` is deliberately NOT stripped. Unlike the links above it has a
+ * real consumer: the main process re-fetches covers at boot from the RESTORED
+ * records (`mediaInfo.thumbnail` -> `ThumbnailCache.ensure()`, whose cache key
+ * is `sha1(url)`), and `restore()` rehydrates memory from this file — so a
+ * stripped thumbnail would permanently lose every restored task's cover after
+ * a restart. Residual risk, accepted for now: the URL never leaves the main
+ * process (TASK_LIST only returns the local `thumbPath`) and grants a preview
+ * image, not the media. The clean fix is a local cover reference in the
+ * snapshot plus an URL-less boot re-attach, which is an apps/desktop change of
+ * its own.
  *
  * In-memory records keep the full object (so `restart()` can reuse a cached
  * probe and `subtitleFiles` reconciliation still sees the links). Only the

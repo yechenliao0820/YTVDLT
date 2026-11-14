@@ -1877,3 +1877,177 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① **不改规则、不绕过**：不去关分支保护、不走 API 直推、不临时放宽——业主明确表态「项目已经做起来了，这个保护就是要开的」，属长期策略而非临时障碍；② 改推**分支**：`git push -u origin main:refs/heads/audit/d-162-171`，把同一个提交 `bdd8753` 放到远端分支上，用 GitHub 回显的 `pull/new/<branch>` 建 PR，合并动作交给业主点击；③ 文档口径同步为「已生效」：§7.1 从「配置清单」改写为「状态 + 日常流程 + 直推会被拒的原文 + 复核方式」，§10 把「`main` 未启用强制 CI 门禁」这一行按本手册「完成一项就删一行」的规则移除并记入已删除行，铁律 12 补一句「只能推分支再开 PR」；④ 推送成功后把本地 `main` 的上游从临时分支改回 `origin/main`，避免下一次 `git status` 误读。 |
 | 验证 | `git ls-remote origin refs/heads/audit/d-162-171` → `bdd875307af614ceaf374130766c882befb546b7`，与本地 `HEAD` 逐字符一致；`git branch --set-upstream-to=origin/main main` 后 `git status -sb` 为 `## main...origin/main [ahead 1]`；工作树干净。PR 入口：`https://github.com/yechenliao0820/YTVDLT/pull/new/audit/d-162-171`。 |
 | 未覆盖 | ① PR 尚未创建（需要业主在网页端点击，AI 不代操作）；② 该分支上的首次 CI 结果尚未观察——干净 runner 的历史坑（D-157 资产取回、D-158 的 `.mjs` 行尾）已在代码里，但仍以 Actions 实际结论为准，红了按日志定位、不改断言；③ 分支合并后是否删除由业主决定（当前文档要求保留作远端溯源点）；④ 推送时 GitHub 另外提示默认分支有 9 个依赖漏洞（4 critical / 5 moderate），与本轮改动无关，未处理。 |
+
+> **补记（2026-11-13 16:55，合并后回填）**：D-172 的「未覆盖①②」已闭合，事实如下。PR **#1** 已合并，`main` 新头为合并提交 `73c9eea`（`Merge pull request #1 from yechenliao0820/audit/d-162-171`），本地快进到同一提交、与 `origin/main` 无差。**PR 侧 CI：run #5（`43396265006`）job `typecheck · tests · gates (windows-latest)` 全绿**，08:49:38→08:50:41（63 s），11 个步骤逐项 success（Typecheck / Fetch yt-dlp / Fetch node / Tests 带覆盖率门 / Layering / Frozen gate）。**合并后 `main` 的 CI 同样通过**：`73c9eea` 的 check-run `131789633168` conclusion=success（08:53:46→08:55:19，93 s）——分支保护的 required check 名副其实。唯一告警是 GitHub 的 Node 20 弃用注解（`actions/checkout@v4` / `setup-node@v4` / `pnpm/action-setup@v4` 被强制跑在 Node 24 上），不影响结果，属后续待升级项。远端分支 `audit/d-162-171` 仍在（`d5ea7e8`），保留作溯源点，删除与否待业主决定。
+
+## D-173 · 2026-11-14 · 存量 config.json 的遗留 maxRate=1000 升级后不再限速（schema v3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-165 接通 `maxRate → -r` 后，凡是旧版生成过 config.json 且未手改 `network.maxRate` 的用户，升级后全部被 `-r 1000K` 限到 1 MB/s；且设置页没有 maxRate 输入项、`CONFIG_SET` 无 UI 调用方（D-168 未覆盖③），用户在界面上既发现不了也改不掉。 |
+| 根因 | 旧版默认值 `maxRate: 1000` 经 `createDefaultConfig()` 全量克隆持久化进 config.json；D-165 只把新装默认改为 0 并接通映射层，没有处理存量文件——「占位值」与「用户决定」在升级那一刻变成同一个数字。 |
+| 决策 | ① `CONFIG_SCHEMA_VERSION` 2→3；② 新增 v2→v3 纯迁移：仅当 `network.maxRate === 1000`（数字严格相等）时复位为当前默认 `0`（=不限速），其它任何值原样保留；③ 迁移必须总是返回 schemaVersion:3（否则 applyMigrations 空转 guard），无键时只升版本不改值；④ argv/映射层不动——根源在配置遗留值，`toRateLimit(0) → null` 后 argv 自然不再输出 `-r`。 |
+| 取舍 | 无法区分用户主动设置的 1000 与遗留默认 1000；但设置页无输入项且无任何 UI 路径能写入该值，存量 1000 只能来自旧版默认克隆（本 bug 本体）或手改 config.json（罕见且可手动改回）。宁可放过手改的 1000，不可让全部存量用户被静默降速。 |
+| 验证 | config-store 15/15（新增 4 例：1000→0、2000 保留、无键不动+版本升 3、v0 全链落到 0）；关联 m4-host/task-host/task-recovery/download-plan/argv 86/86（`rateLimit: '500K'` 既有用例不变）；逐包 `tsc --noEmit` 5/5。 |
+| 未覆盖 | ① 设置页仍无 maxRate 输入项（D-165 未覆盖①延续），用户依然无法从 UI 主动限速；② 手改 config.json 设 1000 的用户升级后会被复位为不限速（有意为之的可接受误伤）；③ `CONFIG_SET` 白名单仍允许 maxRate 0..1e6，将来 UI 接入该通道后「主动设 1000 再升级」会被误复位——届时需引入显式用户意图标记而非值匹配；④ 真实升级场景（拿 0.2.x 旧 config.json 启动）未做打包实测。 |
+
+## D-174 · 2026-11-14 · queue-busy 提前 return 绕过 finally，队列入口永久停摆（D-171 遗留）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-171 上线后，队列持续繁忙（60 s 内未空闲）时组件更新按设计返回 `queue-busy`，但该提前 return 位于 try 块之前、不经过 finally，`intakeGate.resume()` 不执行；`TaskQueue.intakePausedFlag` 停在 true，`enqueue` 入口永久拒绝新任务，直到重启或下一次组件更新流程走完 finally 才恢复。 |
+| 根因 | `SelfUpdater.update()` 的不变式「`resume()` runs in `finally`」只覆盖了 try 块内的路径；`pause()` 与 `try` 之间的唯一分叉（`!idle` → queue-busy return）成了漏网之鱼——文件头与 finally 注释宣称的保证与实际控制流不一致。 |
+| 决策 | 选最小改法：queue-busy 分支在 return 前显式 `intakeGate?.resume()`，且置于可抛的 `logger.error` 之前，使该分支内不变式无条件成立；不改 try 边界，避免 `waitForIdle` 的 reject 被 catch 误报成 `swap-failed` 并触发无谓 rollback（最坏会把陈旧 `.bak` 自动盖回目标文件）。同步修正文件头、busy 分支、finally 三处注释，明示不变式「pause 之后的一切退出路径都必须 resume」的两个落实点。`QUEUE_IDLE_TIMEOUT_MS` 追加导出（append-only）供测试引用。 |
+| 验证 | self-updater 14/14（新增 2 例：busy 分支 `gate.calls === ['pause','resume']`、idle 后正常换文件）；component-updater + engine-update-local 28/28；变异验证（临时移除该 resume）恰好仅新 queue-busy 用例失败，恢复后全绿；逐包 `tsc --noEmit` 5/5。 |
+| 未覆盖 | ① `waitForIdle` 自身若 reject（端口契约未禁止），异常在进入 try 前传播，resume 不执行——真实实现（queue-intake-gate.ts）不可能 reject，属已知理论空洞；② busy 分支内 `logger.error` 若 reject，resume 已前置不受影响，但 update 以 reject 结束（与文件内其它日志调用同一失败模型）；③ 未在真机复现「下载中触发更新且 60 s 未空闲」的端到端场景（需打包 + 真实组件源 + 长任务）。 |
+
+## D-175 · 2026-11-14 · `CONFIG_GET` 加域白名单，渲染层不再能读任意配置域
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-168 只收紧了 `CONFIG_SET` 的写；`CONFIG_GET` 的 `domain` 仍只校验「是字符串」，渲染层经 preload 全量通道白名单 invoke `ytvdlt:config:get` 即可取**任意域**的完整 clone：`paths`（用户真实目录）、`saved_links`（存储 URL）、`network`（运行时含 `proxy`/`cookiesFile`，redactor 把 proxy 当凭证）等。UI 当时无调用点，属纯暴露面。 |
+| 根因 | D-168 决策①只给了写路径白名单，读路径沿用 M3 桩的「有问必答」形状；D-168「未覆盖②」已自我标注但未闭合。 |
+| 决策 | ① `ipc-gateway.ts` 新增 `READABLE_CONFIG_DOMAINS`（与 `WRITABLE_CONFIG` 相邻）：只放行 `general`/`format`/`subtitle` 三个纯偏好域（每键均可证明无路径/URL/凭证）；`paths`、`network`（proxy/cookiesFile 实读于 download-plan.ts）、`saved_links`（URL 红线）、`advanced`（主进程簿记）一律拒绝；② 拒绝抛错（`config domain is not readable`），不静默回空；无 config 端口时回 `{value:null, reason:'read-only'}` 镜像 CONFIG_SET；③ domain 参数强校验：非字符串/空串抛错，精确大小写敏感 Set 匹配一次性拒绝 `__proto__`/`constructor`/`prototype` 与大小写变体；④ 放开新域的流程写进常量注释：逐键证明非敏感 + 补单测 + 记决策。 |
+| 验证 | 新增 `tests/unit/ipc-gateway-config.test.ts` 6/6（合法域只返回该域、白名单外域拒绝且端口零触碰、畸形输入全拒、read-only）；邻域回归 m5-host/m4-host/shared-contract/config-store/bootstrap 72/72；逐包 `tsc --noEmit` 5/5。 |
+| 未覆盖 | ① 白名单三域当前仍无渲染层调用方——通道「存在但无人用」，若 UI 永不需要可考虑未来整个降级为只报错；② 白名单域的输出未过 `omitUrl()`（三域现无 `url` 键，但放开任何含 URL 的域时必须先补脱敏）；③ 未在真机窗口实测渲染层被拒的报错呈现。 |
+
+## D-176 · 2026-11-14 · D-169 收尾：启动弹窗换行修复 + 运行时哈希缓存 + engineVersion 回填
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-169 上线的启动校验有三处遗留：① 打包态错误弹窗把 `\n` 写成了字面 `//n`，用户看到 `in://nC:\...//n//n…` 的破碎文案；② `checkRuntimeForApp()` 在建窗口前对 12 个 required 文件（292,229,632 B ≈ 278.7 MB）无条件 `sha256File`，冷启动首帧被哈希拖慢；③ 错误报告的 "Engine:" 行永远是死字符串 `'unknown (resolved at runtime by check-runtime)'`。 |
+| 根因 | ① 字面转义笔误；② 完整性校验被做成「每次启动从头算」，没有任何缓存；③ 调用点写死占位串，而校验报告里其实已经拿到 `yt-dlp --version` 的真实值。 |
+| 决策 | ① 文案抽成纯函数 `runtimeCheckErrorMessage()`（数组 `join('\n')`），缺项列表抽 `missingRequiredLabels()` 供日志/弹窗共用，语义不变；② 按 `(规范化路径, sizeBytes, mtimeMs)` 缓存哈希结论：命中=元数据逐位相等且条目形状合法（sha256 64 位 hex），任一变化只重算该文件；缓存落 `<dataDir>/runtime-hash-cache.json`（写探针验证过的可写目录，刻意不放只读的 runtime 目录）；缺失/损坏/外来 schema/非法条目 → 全量重算并重写（fail closed，校验永不跳过）；哈希与 IO 全注入以便单测。**威胁模型**：能改 runtime 文件并伪造 mtime 的攻击者本就能改同目录未签名的 manifest 期望哈希，全量重算同样拦不住——残余风险与现状同阶；缓存防的是意外损坏（写一半/杀毒隔离/自更新换文件，必然改变 size 或 mtime）；③ 校验报告里 `items[kind=ytdlp].version` 同步可拿 → `resolvedEngineVersion()` 回填（校验失败或探针没跑 → `'unknown'`），并顺带给 `createEngine` 传同一版本（原引擎错误上下文落到硬编码 `'2026.10.26'`）；m5-host site-support 本就用活值 `engine.version()`，不动。附带：`checkRuntimeForApp` 改注入 `{isPackaged, resourcesPath, appVersion}`，main 层该文件不再值导入 `electron`（对齐 bootstrap.ts 的可测性约定）。 |
+| 验证 | 新增 `tests/unit/runtime-startup-check.test.ts` 13 用例全过（换行/回填/缓存命中失效损坏降级 + core 接线端到端 + 真实 fs 往返）；相关既有测试合并回归 92/92；逐包 `tsc --noEmit` 全过；check-layering 0；frozen-gate PASS。 |
+| 未覆盖 | ① 未打包真机验证弹窗与首帧提速（铁律 9，等业主点名）；② 版本探针（3 次 `--version` spawn）未缓存，只省了哈希；③ 便携盘符变化后旧缓存键残留（几 KB JSON，无正确性影响）；④ shared `FsStat` 无 mtimeMs，装饰器自带带 mtime 的 stat（每文件多一次 syscall），未改 shared 契约；⑤ `apps/desktop/src/main/README.md` 关于「唯一 electron import 点」的描述已随本决策过时并同日更正。 |
+
+## D-177 · 2026-11-14 · 开机自启开关显示注册表真值（`win-startup.read()` 第一次被调用）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-166 落地了「SETTINGS_SET 先写 HKCU Run、成功才写 config」，但 `ISystemStartupPort.read()` 全仓零调用：`readAppearance()` 仍以 `config.get('general','autostart')` 回显。注册表项被外部（清理工具 / 手工 `reg delete`）删除后，config 镜像不再反映真实状态且永不自愈。 |
+| 根因 | `read()` 写好了但没有人消费；且其原实现把「值确认缺席」（reg 退出码 1 + unable to find）与「查询真失败」（拒绝访问 / spawn 失败）都折叠成 `false`，调用方无法区分「关」与「未知」，是它一直没被安全接线的隐性原因。 |
+| 决策 | ① 注册表为准：`readAppearance` 接入新私有 `readAutostart()`——端口存在且 `read()` 成功即显示注册表值；② `win-startup.read()` 收紧异常语义：仅确认缺席读 `false`，真失败抛错；③ 回落策略：端口缺席（非 Windows / 测试构建）或 `read()` 抛错时显示 config 值，`SETTINGS_GET` 保证 resolve——查询失败绝不能打不开设置页；抛错路径不对账（拿猜测写镜像等于让 config 谎言翻倍）；④ 确认的不一致做 best-effort 对账（`setDomain('general',{autostart:registryValue})`，合并语义不冲域内其它键）：config 只是意图镜像，回写失败仅影响镜像整洁，开自启的生效机构是注册表本身——显示与功能解耦。 |
+| 验证 | 新增 `tests/unit/win-startup.test.ts`（11 例，适配器首次有直接单测，`runReg` 注入双打，不触真实注册表）+ `m5-channels.test.ts` 追加 7 例（显示来源/双向对账/回写失败/抛错回落/端口缺席/SET 写序/失败不撒谎）；定向 6 文件 108 项 0 失败；逐包 `tsc --noEmit` 5/5。 |
+| 未覆盖 | ① 渲染层消费缺口（settings.js 快照回调不重绘 autostart）已由 D-178 同日闭合；② 未在真机注册表实测（会改业主启动项，沿用 D-166 口径不擅自执行）；③ 每次 SETTINGS_GET/SET 各多一次 `reg query` 子进程（设置页单次调用，毫秒级，未做缓存）；④ `read()` 对「stdout 有值但 name 不匹配」等畸形输出按缺席处理，未再细分。 |
+
+## D-178 · 2026-11-14 · 「复制日志」改走主进程剪贴板通道；设置页自启复选框消费快照真值
+
+| 项 | 内容 |
+|---|---|
+| 现象 | ① task-log 页「复制日志」直接调 `navigator.clipboard.writeText`；D-170 起主进程 `setPermissionCheckHandler(() => false)` 会拒绝 `clipboard-sanitized-write`，打包版点击后 promise 静默拒绝，剪贴板无内容且无任何用户可见反馈。② settings 页 autostart 复选框只读 `__YTVDLT_SETTINGS__`（打包版从不注入），快照回调重绘了 appAuto/engineAuto 却漏了 autostart——主进程 DTO 已回注册表真值（D-177），UI 不消费，复选框仍可能停在陈旧 false。 |
+| 根因 | ① 该页写在 D-170 之前，违反项目既定的「渲染层不碰剪贴板、主进程拥有真实剪贴板」规则（app-shell A-4.1-02 注释、task-detail `ClipboardPort` 先例）；② D-177 只打通了主进程链路，渲染层消费端漏一个键（坑 29 的渲染层变体：通道/DTO/单测都在，页面不消费）。 |
+| 决策 | ① `shared/src/ipc.ts` append-only 新增 `CLIPBOARD_WRITE: 'ytvdlt:clipboard:write'`；② `m5-channels.ts` PAYLOAD_KEYS 只放 `text` 单键，长度上限 `MAX_CLIPBOARD_TEXT_CHARS = 1_000_000` UTF-16 单位（最坏 ≈3 MB UTF-8，远超真实日志、仍拒无界倾倒）；handler 走既有注入端口 `ClipboardPort`（electron-entry 已注入，m5-host 一行条件转发），回 `{ok:true}` / `{ok:false, code:'CLIPBOARD_UNAVAILABLE'|'CLIPBOARD_WRITE_FAILED'}`，不假装成功；③ ipc-bridge.js 两张表同步登记（坑 29；preload 取 `Object.values(IPC_CHANNELS)` 自动覆盖，task-log 页不加载 ipc-bridge.js，按 settings.js 先例直调 wire 字符串）；④ task-log.js copy 分支改走 bridge，失败把 i18n 句子写进既有可见 `#ytvdlt-output`（queue.js notify 风格），静态 DOM 零变化；无 bridge 的纯浏览器预览保留 navigator 回退；i18n 中英成对新增 `log.copy.failed`；⑤ settings.js 快照回调补 autostart 重绘（`typeof snapshot.autostart === 'boolean'` 守卫），live-only。**弃 execCommand('copy') 回退**：已废弃、失败无信号，且与「主进程拥有剪贴板」架构相悖。 |
+| 验证 | 逐包 `tsc --noEmit` 5/5；定向 8 个 unit 文件 132/132（含 m5-channels 新 6 用例、task-log-copy 5、settings-autostart-repaint 4）；contract 13/13；check-layering 0；frozen-gate PASS；e2e 31/31 + 反例 5/5 全部 0 px（两处 UI 改动均 live-only，静态基线零变化）。 |
+| 未覆盖 | ① 未真机验证（Electron 对 `clipboard-sanitized-write` 的拒绝语义是文档+代码推演；打包后真机点一遍仍是铁律 9 必做项）；② 1,000,000 上限是拍的保守值，未来若有更大合法文本需复核；③ task-log 页 live 模式至今无 `__YTVDLT_TASK__` 注入器与导航入口，「复制日志」暂无真实用户路径（已列入手册 §10）；④ settings 快照覆盖用户未落库点击的竞态与既有开关一致，未处理。 |
+
+## D-179 · 2026-11-14 · 快照写盘只随结构变化；thumbnail 因封面重取豁免剥离
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-163 交付后复检发现两点：① 指纹含 percent/bytes/speed/eta 五个进度字段，每个进度 tick 必变，下载全程 tasks.json 仍按 500ms 节流全量重写；② `stripCredentialUrls` 未覆盖 `mediaInfo.thumbnail`。 |
+| 根因 | ① 指纹把「每次 tick 都变的数」当成可观测变化，而崩溃恢复并不消费快照里的实时进度（restore 一律转 Canceled、restart 清空进度 D-107、续传凭据在 work/<taskId> D-118）；② 任务书默认 thumbnail 无消费方，实际 `electron-entry.ts` 启动封面重取读恢复记录的 `mediaInfo.thumbnail`，且 `ThumbnailCache` 以 `sha1(url)` 为缓存键、`TASK_LIST` 的 `thumbPath` 由 `pathOf()` 提供——剥了它，重启后所有恢复任务封面永久丢失。 |
+| 决策 | ① 指纹只留结构性字段（id/state/updatedAt/kind/lastStage/error.code/artifacts.length/subtitleFiles.length/subtitleOutcome/mediaInfo.id），纯进度抖动不再写盘；进度 tick 的节流 attempt 保留，结构变化（stage 等）随下一 tick 落盘，任务终态由 `run().finally` 无条件落盘；② 指纹改读内存记录并在投影构造前比较（剥离不动指纹字段，两边等价，跳过时不付投影成本）；③ `lastPersistedFingerprint` 改为 save 前「预留」、失败回滚 null：否则写盘在途中的同指纹事件拿旧值比较，重复排队相同内容的全量重写；null 初值语义不变（空队列指纹为空串，D-159 不回归）；④ **thumbnail 刻意不剥离**，豁免理由与残余风险写入 snapshot-media.ts 头注释；快照仍不出现任何媒体流 URL。 |
+| 验证 | 新增 `tests/unit/task-snapshot-persist.test.ts`：6 进度 tick 1 次写、stage 推进下一 tick 第 2 次写、终态强制写 + 投影剥离断言 + thumbnail 保留断言；task-store(47，含 D-159 全部用例)/task-recovery/task-queue 等定向全绿；offline integration 40 绿；逐包 `tsc --noEmit` 5/5；check-layering 0。 |
+| 未覆盖 | ① 仍为整文件重写，无增量持久化（沿用 D-163 未覆盖①）；② 指纹不含 artifacts 具体路径与 error.message（沿用 D-163 未覆盖②）；③ 下载中崩溃后恢复卡片的百分比是最后一次结构写时刻的值（展示层取舍，与 D-107 同取态）；④ thumbnail 的彻底脱敏需要「快照落本地封面引用 + 启动无 URL 重挂」，涉及 apps/desktop，留待独立决策。 |
+
+## D-180 · 2026-11-14 · README 决策编号残留对齐（D-161 → 实际进度）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | README.md 仍写 "(now at D-161)"、README.zh-CN.md 仍写「（已到 D-161）」，而 DECISIONS.md 已到 D-172；两份 README 是镜像，指针同时落后 11 个决策。 |
+| 根因 | D-162 起每轮决策只追加进 DECISIONS.md，没有同步 README 的指针行；铁律 13 管「两份 README 必须同时改」，但没有「README 指针必须随决策推进」的检查，handoff-check 也未覆盖该行。 |
+| 决策 | ① 两份 README 的指针行同步改为当前实际最大编号（本轮完成后为 D-181）；② 逐一核对两份 README 内约 90 处 D-xx 引用：除指针行外均与 DECISIONS.md 实际内容相符，未改；③ 收尾规则并入交付口径——改完 DECISIONS 必须同步两份 README 指针行，两份永远成对改（铁律 13）。 |
+| 验证 | 两份各恰 1 行 diff（指针行）+ 本轮新增的修复轮段落镜像一致；行尾无扰动。 |
+| 未覆盖 | ① handoff-check 尚不检查 README 指针行与 DECISIONS 最大编号的一致性（可作后续小改进）；② 正文中的历史范围引用（如 D-150…D-171）按历史叙述保留，不随后续决策推进。 |
+
+## D-181 · 2026-11-14 · 测试清理适配本机只读 git 对象（frozen-gate.test.ts::rmScratch）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 本机全量测试 3 个失败，全部在 `tests/unit/frozen-gate.test.ts`：三个用例的 gate 行为断言**全部通过之后**，`finally` 里的 `rmSync(dir, {recursive:true, force:true})` 抛 EPERM 把绿跑染红。独立探针证明：系统 temp 里普通目录 rmSync 正常；`git init + commit` 后的目录必现 EPERM——git for Windows 把 `.git/objects` 松散对象写成只读，而本机 Node（Electron 运行时 v24.21.0）的 `rmSync` 不清只读位。与本轮 8 项修复零关联（该文件未被任何批次触碰）；CI（windows-latest，常规 Node）同代码绿。 |
+| 根因 | 测试清理假设「rmSync recursive+force 能删掉自己刚建的东西」，在只读对象 + 该 Node 构建下不成立；清理失败发生在断言之后，掩盖了本已通过的判定。 |
+| 决策 | 新增 `rmScratch()`：先递归清只读位（readdirSync + chmodSync 0o666，均 best-effort），再 rmSync，清理整体包 try/catch——清理失败绝不外抛、绝不掩盖断言结论；三个 finally 统一改走 rmScratch。**不改任何断言、不跳过用例**（铁律 6/8）；常规 Node/CI 环境下 clearReadOnly 是无害 no-op。 |
+| 验证 | frozen-gate.test.ts 19/19 全绿（含原 3 个失败用例）；全量口径由「2096 过 / 3 失败」变为 **2099 过 / 0 失败**。 |
+| 未覆盖 | ① 全量运行中仅此文件出现该现象（其余用例清理均正常）；本机 coverage summary 仍被 D-29 删除守卫挡住（coverage/.tmp bulk delete），精确覆盖率数字以 CI 为准；② 手册坑 33 已补该原理注记。 |
+
+## D-182 · 2026-11-14 · 下载取消的 pre-spawn 窗口：spawn 前取消真正生效（审计 P2-1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 在 `download()` 发起后、`spawnStreaming` 之前（fs 准备批与 `logArgv` 两个 await）取消：`cancel()` 返回 `false`，UI 层经 task-detail 回「取消失败：进程未终止」；子进程却照常启动并完整下载到结束，`canceled` 事件直到进程退出后才发出。 |
+| 根因 | `runDownload` 只在 `await handle.done` 之后检查 `isCanceled()`；spawn 前有两个 await（fs 批、logArgv），窗口内 `killTree` 仍为 null，`cancel()` 按 killTree 的布尔语义回了 `false`，而 runDownload 不看这个标志继续 spawn。 |
+| 决策 | ① runDownload 在每个 pre-spawn await 之后检查 `isCanceled()`，最后一处紧贴 `spawnStreaming`（其后到 `register` 是同一同步块，取消只能落在检查前或 register 后，窗口结构性消失）；已取消则不 spawn，走 `cancelBeforeSpawn()`：按 D-118 既有惯例仅在临时目录为空时非递归 rmdir，再发 `canceled` 事件提前返回。② `cancel()` 在 `killTree === null` 时返回 `true`：`false` 的唯一语义是 D-142 的「树没死仍在跑」，对未启动的进程是谎言，会让用户看到「取消失败」；返回 `true` 让 queue 立即迁移 `Running → Canceled`，随后的 `canceled` 事件被 D-142 既有守卫吸收，与 D-162 probe 句柄及 FakeEngine 语义一致。③ spawn 后路径（killTree/canceled 判定）一字未动；D-156 signal 与 D-162 probe 取消不涉及。 |
+| 验证 | `download-engine.download.contract.test.ts` 14/14（含 4 个新用例：fs 窗口、logArgv 窗口、spawn 后 killTree 不变、queue 终态 Canceled 无子进程）；engine 相关定向 84/84；task-queue 39/39；L2 真进程 `cancel-local` 2/2。 |
+| 未覆盖 | ① 真机窗口里在「正在启动」瞬间点取消未实测（铁律 9）；② `cancelBeforeSpawn` 的 rmdir 与极快 restart 同 taskId 的并发只在单测环境验证（实际需用户手动触发，且目录为空才删）；③ cancel() 返回 true 后若 runDownload 已因 buildDownload 同步抛出而失败，存在一个微任务级竞态可让已失败任务被迁成 Canceled（窗口为 IPC 不可达的亚毫秒级，行为上限是记录多带一个错误字段）。 |
+
+## D-183 · 2026-11-14 · 历史记录的 sizeBytes：从恒 0 改为引擎实测的成片大小（0 = 未知）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `buildHistoryEntry` 写死 `sizeBytes: 0`，`history.json` 里每条记录的文件大小都是假的 0。 |
+| 根因 | 引擎 `completed` 事件本来就带每个产物的 `fs.stat` 实测尺寸（`Artifact.sizeBytes`），队列在 `executeDownload` 里 `.map(a => a.path)` 把尺寸丢弃了；历史字段于是没有来源，只能填 0。 |
+| 决策 | ① 尺寸来源取引擎完成时上报的实测尺寸（零新端口、零额外 IO）；语义 = 主产物（`videoPath` 指向的成片）磁盘大小，与 import 夹具既有语义一致。② **否决 `lastTotalBytes`**：合并场景它只是最后一条流（通常音轨）的量，严重低报成片；「文件已存在」场景无进度行；restart 后清空——用它就是编数字。③ 类型契约 `sizeBytes: number` 不动（改可空非 append-only），**`0` 明确为「未知」哨兵**（引擎 stat 失败等），与 app-update `sizeBytes` 的既有归一化先例一致；只在真未知时为 0，绝不为完整感编非零数（D-107 精神）。④ `HISTORY_QUERY` 通道当前休眠、UI 不消费该字段，本轮不改投影层。 |
+| 验证 | task-queue.test.ts 新增 3 例（非默认尺寸落史 / null→0 / 进度总量≠历史尺寸）+ 强化 happy-path 与 C11 backfill 断言；相关 16 个测试文件 200 例全过；core/shared tsc 干净；分层门禁 0 违规。 |
+| 未覆盖 | ① `0` 同时表达「未知」与「真实的 0 字节文件」——生产链路里 0 字节主产物过不了 C1、到不了落史，故仅理论重叠；② UI/导出尚未展示该字段，待 `HISTORY_QUERY` 激活时按「0=未知」语义渲染（不得显示成 `0 B`）；③ 存量历史记录的 0 不做回填（需对每个文件补 stat，属新需求）。 |
+
+## D-184 · 2026-11-14 · artifact 路径封链：产物只认任务自己的输出根（入库主门 + 动作前副门）
+
+| 项 | 内容 |
+|---|---|
+| 现象（审计） | `parseArtifactManifestDetailed()` 只判绝对路径，产物清单若被站点内容操纵（病态标题/提取器怪癖影响 `%(filepath)` 解析），一条指向 `C:\Windows\...` 或任意用户文件的路径会随 `TaskRecord.artifacts` 入库，随后被 withFiles 回收站删除或 open-file 打开。 |
+| 根因 | `TaskRecord.artifacts` 是全部破坏性消费方（D-120 回收、D-131 字幕清理、open-file/open-folder、fileStatus、history）的唯一信任输入，但从清单解析到入库没有任何根归属校验。 |
+| 决策 | ① **纯函数封链**放 core：`path-resolver/containment.ts`（分隔符归一、`\\?\`/UNC 解包、大小写不敏感对齐 `pathKeyOf`、拒绝 `..`/`.` 段、按段前缀匹配、不做 URL 解码），roots = 驱动本次下载的请求的 `videoDir/audioDir/逐任务 tempDir`——` (1)` 副本、同目录字幕、跨卷 `.ytvdlt-incomplete` 按构造放行。② **入库为主门**：TaskQueue 在 completed 事件落 `record.artifacts` 前过滤，拒绝者丢弃并记 `artifact.outsideRoots` WARNING（paths 上限 10 条），全拒时转 `Error`（code 沿用 ARTIFACT_INCOMPLETE，report 串 ARTIFACT_OUTSIDE_ROOTS）；**动作前为副门**：withFiles 删除整批拒绝（FILE_DELETE_FAILED + 真实原因，记录保留，复用 D-120 契约），open 动作回 REFUSED。③ **失败-open 边界**：无 request 的记录（旧快照/测试 fixture）不做判断、保持 D-120 原语义——真实下载对 request 为 null 早在 probe 前失败，入库门已全覆盖。④ 不改 engine（manifest 解析保持「只判绝对」）、不改 UI 契约。 |
+| 验证 | 新增 3 个测试文件 34 例（穿越全形态被拒、副本/字幕/跨卷/工作目录放行、入库拒绝+WARNING、混合保留、withFiles 整批拒绝、open REFUSED、失败-open 钉死）；m4-host fixture 产物路径按 `-P` 输出目录修正（断言零改动）；定向 22 文件 339 例全过，core/apps typecheck 通过，check-layering 0 violations。 |
+| 未覆盖 | ① 自定义命令模板的 `-o` 值法未强制相对路径，用户用绝对 `-o` 把产物写往外部的合法配置会触发拒收（安全侧失败，WARN 可诊断）；② restore() 不重过滤，恢复记录依赖动作层防御；③ **fail-open 边界**：当前仅「request===null 的 legacy 记录」一条路径可达（两侧有测试钉住），若未来出现「request 存在但三个路径字段全部不可用」的形态会静默放行——收紧只需改 `artifactRootsOf` 一处；④ 未真机/在线复验（铁律 9）。 |
+
+## D-185 · 2026-11-14 · CI 的 4 个 action 全部钉 commit SHA（含审计漏数的 upload-artifact）
+
+| 项 | 内容 |
+|---|---|
+| 现象（审计） | `.github/workflows/ci.yml` 三处 `uses:` 浮动引用 `@v4`；复核发现 `desktop-pack.yml` 还有四处（checkout / pnpm-action-setup / setup-node / **upload-artifact**，后者为审计漏数），共 7 处。上游 tag 可移动——今天绿的 workflow 明天可能在未经审查的代码上跑。 |
+| 根因 | workflow 建立时（D-161/D-157 轮）按 tag 引用是惯例，未做供应链收紧。 |
+| 决策 | 7 处全部改为 `owner/action@<完整40位commit SHA> # v<版本>`。SHA 解析与验证：本机 `git ls-remote` 被 TLS 重置挡住（代理客户端未运行），改走 GitHub API 双向回环——`commits/<tag>` 解引用取 commit SHA + `commits/<SHA>` 回环核对（sha 逐字符一致且 commit 主题与该 action 仓库吻合）：checkout v4.4.0→`11d5960a…677262`、pnpm/action-setup v4.4.0→`fc06bc12…8b55320`、setup-node v4.4.0→`49933ea5…6820020`、upload-artifact v4.6.2→`ea165f8d…607fa02`。**绝不猜 SHA**——钉错比浮动更糟。步骤名/with 参数/缩进/注释语义全部未动。 |
+| 验证 | diff 严格 7 行 `uses`；QA 独立经 GitHub API 复核 4 个 tag→commit 全部一致；typecheck/layering/frozen-gate/全量测试不受影响（workflow 文件不参与构建）。 |
+| 未覆盖 | ① 将来升级 action 版本时按同法双向回环验证后改 SHA（行尾 `# v<版本>` 注释保持人工可核对）；② `desktop-pack.yml` 的 `npx electron-builder` 运行期二进制解析属另一层面供应链项，另行立项。 |
+
+## D-186 · 2026-11-14 · DOWNLOAD_START 的 URL 加长度上限（MAX_URL_CHARS，与 URL_SUPPORT_CHECK 统一）
+
+| 项 | 内容 |
+|---|---|
+| 现象（审计） | `DOWNLOAD_START` 的 handler 只校验 url 是 http(s) 字符串，无长度上限；渲染层可把任意长度的字符串送进主进程，进入预检 spawn、argv、日志与任务快照。逐入口核查：URL_SUPPORT_CHECK 原有 2048 上限（审计结论过时），SUBTITLE_PREVIEW / PLAYLIST_PREVIEW / PLAYLIST_BATCH_ENQUEUE / TXT 导入链路均已各自有界，唯 DOWNLOAD_START 无界。 |
+| 根因 | 该通道交付时只做了 scheme 白名单；长度边界从未登记。其它入口各自演进了边界（2048/2000/TXT_IMPORT_LIMITS），没有共享常量，边界互不一致且 DOWNLOAD_START 落在缝外。 |
+| 决策 | 新增共享常量 `MAX_URL_CHARS = 4096`（UTF-16 code units，同 D-173 剪贴板 1,000,000 的计数与注释风格），同时用于 `DOWNLOAD_START` 与 `URL_SUPPORT_CHECK`：4096 远超任何真实视频/播放列表 URL（含长签名 CDN token），远低于 Windows ~32k argv 限制，只拒「无界倾倒」不截断。URL_SUPPORT_CHECK 由 2048 统一到 4096，消除「预检硬拒下载可接受 URL」的窗口（符合 D-134 fail-open 精神）；预览探针通道维持 2048 不动。超限抛静态短句 `requires a bounded string url`，绝不回显 URL 内容；控制字符/凭据校验仍由引擎层 `assertHttpUrl` 负责。 |
+| 验证 | m5-channels.test.ts 66/66（新增 6 例：超限拒/恰好上限过/非 http(s) 拒/两通道不回显）；precheck-cancel + m5-host 40/40 无回归；tsc（apps/desktop）通过。 |
+| 未覆盖 | ① 未在真机验证超长 URL 的实际报错呈现（渲染层对 `bounded string url` 抛错走通用错误提示路径）；② 预览通道（2048）与入队通道（4096）双上限并存，若未来要完全归一需连 `subtitle-preview-service.ts` 一起改。 |
+
+## D-187 · 2026-11-14 · UI 覆盖率纳入统计：import 装载架 + 16 个行为测试文件（99.2% 语句覆盖）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `vitest.config.ts` 的 coverage.include 只有 shared/core/engine-ytdlp/desktop 四包，packages/ui 的 10,505 行 JS 完全在覆盖率门禁之外；且既有 UI 测试全部走 `runInNewContext` 沙箱，v8 覆盖率 provider 对 VM 沙箱完全不可见（实测整个 UI 只贡献 63 条语句）。若直接把 ui 塞进统计，聚合语句从 89.48% 跌到 53.48%，四维门限当场全崩——这正是该盲区长期存在的原因。 |
+| 根因 | UI 是零依赖静态页的经典脚本：无 ES import/export，全是「IIFE 接收 window 并把测试面挂到 window 上」的结构（queue.js 尾部注释明言 test/smoke surface，D-148 系列沿用同一惯例）；「浏览器代码测不了」的早期假设沿袭成惯性，runInNewContext 写法被顺手复制，覆盖率视角从未建立。 |
+| 决策 | ① **共享装载架** `tests/unit/helpers/ui-harness.ts`：假 document/window/localStorage/location/XMLHttpRequest（FakeXHR 按浏览器同样的相对解析规则服务真实录制 fixture，dialogs 用真实 L1 数据启动）+ `loadUiModule()` 真实 `import()`（v8 由此可达）+ `restore()`（defineProperty 安装以兼容 Node≥21 的 getter-only `navigator`/`localStorage` 内建）；② **24 模块装载冒烟** `ui-module-load-smoke.test.ts`：按页面脚本顺序（YTVDLT 命名空间/i18n/shortcuts/app-shell/probe-fixture 先行）在 beforeAll 单共享 window 上装载——ESM registry 按文件缓存，beforeEach 换新 window 会让后续模块饿死；③ **16 个行为测试文件约 470 用例**分两批：批次 1（queue 97.9%、subtitle-picker/txt-import/settings/supported-sites 99.9-100%）+ 批次 2（playlist-import 100%、update-dialog 99.6%、task-detail 99.7%、i18n/about/shortcuts/task-log/shell 家族/dialog-state/theme/playlist-batch 98.5-100%），断言钉真实行为（D-141/D-104/D-114/D-130/D-148/D-173 等语义在 import 路线下重钉），不为残余防御分支刷覆盖率（各文件尾注登记不可达原因）；④ `vitest.config.ts` include 追加 `packages/ui/src/**/*.js`——**阈值 70 一字未动**；⑤ 既有 runInNewContext 语义测试全部保留：它们钉语义不贡献覆盖率，两套并存各司其职。 |
+| 取舍 | 不引入 jsdom（D-61 依赖白名单冻结，且假 DOM 已够）；测试侧协作桩（parentNode 回填、可编程 deferred 桥、`vi.resetModules()` 换世界）留在各测试文件内，不动共享架。 |
+| 验证 | 全量 **165 文件 / 2649 用例 / 0 失败**（两次连续全量结果一致）；覆盖率四维 **93.42 / 86.61 / 93.55 / 93.42**（纳入前 53.48%），UI 自身语句 9758/9836（99.21%）、函数 97.55%、分支 86.35%；e2e 31/31 + 反例 5/5 全部 0 px、零基线重建；layering 0 违规、frozen-gate PASS；QA 阶段四放行（抽查 4 个测试文件断言质量、冒烟清单 24/24 对照 find 无遗漏、配置 diff 仅一项）。 |
+| 未覆盖 | ① 文档级监听（visibilitychange/DOMContentLoaded）等 harness 不可达分支与若干防御臂，已在各测试文件尾注登记；② **新 UI 模块必须手工登记进冒烟清单 MODULES**（否则覆盖率为 0，手册坑 36 已写明）；③ **install/restore 必须对称**（漏 restore 会向同 worker 后续文件泄漏全局，手册坑 36）；④ 测试发现并汇总定级的 UI 存量 bug 12 条（1 条 P1：queue.js `sortTasks` 的 oldest 分支与 newest 同实现；11 条 P2：settings `checkEngine({results:[]})` TypeError、两处 promise 无 `.catch`、`patchProgress` 不更新 data-stage 等）**只报未修**，待业主排轮；⑤ 手册坑 33 的本机 rmSync EPERM 现象在 UI 测试量增大后未复现，coverage 汇总本机可稳定产出。 |
+
+## D-188 · 2026-11-14 · 验收登记补齐（26 个测试文件入 M3_TEST_FILE_MAP）与 L2 哨兵竞态加固
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 重跑 M5 验收暴露两类问题：① `M5-GATE-file-coverage` 红——D-173…D-181 轮新增的 8 个测试文件（task-log-copy、settings-autostart-repaint、runtime-startup-check、win-startup、ipc-gateway-config、task-snapshot-persist、config-store 扩展用例等）与 D-187 轮的 17 个 UI 测试文件共 26 个从未登记进 acceptance 的 `M3_TEST_FILE_MAP`，此前一直「绿」是因为验收报告过期未重跑；② `probe-output-limit` 的 8/9a/9b 三例在负载下偶发红：子进程哨兵定时器 1.5 s 与 kill@400 ms 之间只有 1.1 s 余量给 `taskkill`（外部进程 spawn），机器繁忙时 kill 落点晚于哨兵期限 → 「进程幸存」假失败。 |
+| 根因 | ① 验收体系是「新测试文件必须挂语义相关的真断言」的显式约定（防孤儿文件），此前轮次只写了测试漏了登记，过期报告把缺口掩盖到重跑才暴露；② 哨兵 deadline 拍得太紧，没给 kill 延迟留负载余量。 |
+| 决策 | ① 补 13 条真断言（A-D173/174/175/176/177/178/179/181/182/183/184/186/187，每条对齐其决策的测试文件与证据源），26 个测试文件全部登记进 `M3_TEST_FILE_MAP`（UI 17 个统一挂 A-D187，其余按各自决策）；D-180/D-185 属无测试文件的流程性决策（README 对齐 / CI action 钉 SHA），按 D-172 先例不设断言；② 哨兵 deadline 1.5 s→5 s、三处 post-kill 等待统一 6.5 s——幸存检测**严格更强**（真幸存的子进程有 5 s 暴露窗口），断言语义与判定方向一字未动。 |
+| 验证 | acceptance M5 重跑 **allGreen=true**（56/59 断言 PASS + 3 SKIPPED，10/10 门禁，fresh）；probe-output-limit 26/26；全量 2649/0 不受影响；handoff-check 干净。 |
+| 未覆盖 | ① 未来新增测试文件仍需手工登记断言与 map（手册 §7 步骤 8 已写明纪律）；② `taskkill` 极端延迟超过 4.6 s 余量理论上仍可假红，概率已压到可忽略；③ CI（windows-latest）下 1.5 s 旧余量从未触发过该竞态（run #1 起全绿），本加固只影响本机高负载场景。 |
+
+## D-189 · 2026-11-14 · CI 首红修复：切片测试在 CRLF 检出下归一化行尾（坑 33 / D-158 同族）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | PR CI（windows-latest，run 43557179835）在 Tests 步 4 个用例全红——`settings-autostart-repaint.test.ts` 的源码切片断言 `expected 55 to be greater than 39538`；本机（LF 工作树）同文件全绿。Checkout / pnpm / setup-node / typecheck / fetch-runtime 全部 PASS（SHA 钉定无恙）。 |
+| 根因 | 该测试按字符串标记把 settings.js 源码切片后 `runInNewContext`，而 `endMarker` 是跨行模板串（以 `\n    }` 结尾）；CI 检出 CRLF（`.gitattributes` 只钉 `*.mjs`，坑 33 同族），`\n` 标记永不匹配 → `indexOf` 返回 -1 → `end = -1 + 56 = 55`。本机看不见它，是因为本地检出恰好是 LF。 |
+| 决策 | 按坑 33 / D-158 既定修法在**测试输入边界归一化行尾**（`readFileSync(...)` 后 `.replace(/\r\n/g, '\n')`，注明缘由），断言零改动；全测试目录扫描确认无第二个同款切片器（源码读取 + indexOf 组合仅此一处）。 |
+| 验证 | 本机该文件 4/4；CRLF 复现实验（LF 下标记匹配 true / CRLF 未归一 false）；全量 2649/0；CI 重跑通过（同 PR）。 |
+| 未覆盖 | ① 未来新增源码切片测试必须同样在输入边界归一化（坑 33 已载明）；② 仓库级 `*.js/*.ts eol=lf` 全量钉定未做（影响面大，另行决策）。 |
