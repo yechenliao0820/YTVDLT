@@ -32,6 +32,15 @@ export class ConfigStore implements IConfigStore {
   private state: ConfigFile;
   private writeQueue: Promise<void> = Promise.resolve();
   private loaded = false;
+  /**
+   * D-201: memoized first-load attempt. `load()` used to set `loaded` BEFORE
+   * any await, so of two concurrent callers the second returned immediately and
+   * read the constructor defaults (a following `set()` could even persist them
+   * over the real file). Concurrent callers now share one attempt; `loaded`
+   * settles only after the whole attempt finished — failure included, so a
+   * later `load()` stays a no-op exactly like the pre-D-201 failure semantics.
+   */
+  private loadPromise: Promise<void> | null = null;
 
   constructor(deps: ConfigStoreDeps) {
     this.ports = deps.ports;
@@ -43,7 +52,18 @@ export class ConfigStore implements IConfigStore {
   /** Read (or initialize) the config file. Idempotent and safe to call twice. */
   async load(): Promise<void> {
     if (this.loaded) return;
-    this.loaded = true;
+    if (this.loadPromise === null) {
+      // D-201: `loaded` is NOT set here — only after the attempt settles, so a
+      // caller arriving mid-load shares the promise instead of reading defaults.
+      this.loadPromise = this.performLoad().finally(() => {
+        this.loaded = true;
+      });
+    }
+    await this.loadPromise;
+  }
+
+  /** The single real load attempt; concurrent `load()` callers share it. */
+  private async performLoad(): Promise<void> {
     await this.ports.fs.mkdir(this.ports.env.configDir());
     const exists = await this.ports.fs.exists(this.filePath);
     if (!exists) {

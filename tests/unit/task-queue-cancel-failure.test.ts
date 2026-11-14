@@ -289,3 +289,97 @@ describe('D-142 · cancel() === false keeps the task honest and unstartable', ()
     expect(queue.pendingCount).toBe(0);
   });
 });
+
+// --- D-200 · cancel() between probe end and engine handle registration -------
+
+describe('D-200 · cancel() lands in the handle-less probe → engine window', () => {
+  /**
+   * The window opens inside `withCopySuffix`, which only awaits `fs.readdir`
+   * when the output template carries `%(id)s` — so the windowed record needs
+   * that template. `readdir` is parked on a latch the test controls, holding
+   * the run exactly between "probe handle removed" and "engine handle
+   * registered".
+   */
+  const recordWithIdTemplate = (taskId: string): TaskRecord => {
+    const base = record(taskId);
+    const req = base.request;
+    if (req === null) return base;
+    return { ...base, request: { ...req, paths: { ...req.paths, outputTemplate: '%(title)s [%(id)s].%(ext)s' } } };
+  };
+
+  const setupWindowed = () => {
+    const mem = createInMemoryPorts();
+    mem.state.files.set(artifactFor('t1'), 'video-bytes');
+    let release: (() => void) | null = null;
+    let gated = false;
+    const inner = mem.ports.fs.readdir.bind(mem.ports.fs);
+    mem.ports.fs.readdir = async (dir: string): Promise<string[]> => {
+      if (gated) return inner(dir);
+      gated = true;
+      await new Promise<void>((resolve) => { release = resolve; });
+      return inner(dir);
+    };
+    const engineState = newEngineState();
+    const queue = new TaskQueue({
+      ports: mem.ports, engine: fakeEngine(engineState), verifier: okVerifier,
+      history: new HistoryStore({ ports: mem.ports }), jsRuntimePath: 'C:/runtime/node.exe',
+    });
+    const events: string[] = [];
+    queue.onEvent((event) => {
+      if (event.type === 'state-changed') events.push(`state:${event.from}->${event.to}`);
+    });
+    return { queue, engineState, events, openGate: (): void => { release?.(); } };
+  };
+
+  it('cancel() in the window returns true, lands Canceled, and the engine never spawns', async () => {
+    const { queue, engineState, events, openGate } = setupWindowed();
+    await queue.enqueue(recordWithIdTemplate('t1'));
+    await tick();
+    // The run finished the probe and is parked inside the handle-less window.
+    expect(queue.get('t1')?.state).toBe('ReadyWithInfo');
+    expect(engineState.downloadCalls).toBe(0);
+
+    expect(await queue.cancel('t1')).toBe(true);
+    expect(queue.get('t1')?.state).toBe('Canceled');
+    expect(events).toContain('state:ReadyWithInfo->Canceled');
+    expect(queue.get('t1')?.error ?? null).toBeNull();
+
+    openGate();
+    await tick();
+    // The run consumed the recorded request: it never reached `Running`, never
+    // spawned the engine, and pinned no junk UNKNOWN error on the clean cancel.
+    expect(engineState.downloadCalls).toBe(0);
+    expect(events).not.toContain('state:ReadyWithInfo->Running');
+    expect(queue.get('t1')?.state).toBe('Canceled');
+    expect(queue.get('t1')?.error ?? null).toBeNull();
+    expect(queue.activeTaskIds).not.toContain('t1');
+  });
+
+  it('restart() clears a stale cancel request so the fresh run actually starts', async () => {
+    const { queue, engineState } = setup();
+    // A restored `ReadyWithInfo` record never auto-starts and holds no handle,
+    // so cancel() records the request while no run is in flight to consume it.
+    await queue.restore({
+      schemaVersion: 1,
+      savedAt: '2026-11-12T00:00:00.000Z',
+      tasks: [{ ...record('t1'), state: 'ReadyWithInfo', mediaInfo: mediaInfo() }],
+    });
+    expect(await queue.cancel('t1')).toBe(true);
+    expect(queue.get('t1')?.state).toBe('Canceled');
+
+    await queue.restart('t1');
+    await tick();
+
+    // Without the clearing, the fresh run would abort on the stale request and
+    // the task would sit in `ReadyWithInfo` forever with zero engine spawns.
+    expect(engineState.downloadCalls).toBe(1);
+    expect(queue.get('t1')?.state).toBe('Running');
+
+    // This file's engine settles only on demand: end the fresh run and confirm
+    // it lands as a clean Canceled (no junk error from the stale request).
+    engineState.settle?.('canceled');
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Canceled');
+    expect(queue.get('t1')?.error ?? null).toBeNull();
+  });
+});

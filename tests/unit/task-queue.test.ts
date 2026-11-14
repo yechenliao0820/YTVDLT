@@ -381,6 +381,61 @@ describe('A-4.4-13 / A-4.4-14 · cancel and restart', () => {
   });
 });
 
+// D-199: restart() of a restored record used to throw
+// `IllegalTaskTransitionError` — a restored `Idle` / `ReadyWithInfo` record
+// already sits ON the recomputed target state and the machine has no self-loop
+// edges. The UI gate (`isRestartable`) only covers Error/Canceled, but the IPC
+// `TASK_ACTION restart` path reaches `restart()` directly.
+describe('D-199 · restart() of restored Idle / ReadyWithInfo records', () => {
+  const snapshotOf = (task: TaskRecord) => ({
+    schemaVersion: 1 as const,
+    savedAt: '2026-11-05T00:00:00.000Z',
+    tasks: [task],
+  });
+
+  it('a restored Idle record ("queued, not started") restarts into a full run', async () => {
+    const { queue, engineState } = setup('completed');
+    await queue.restore(snapshotOf(record('t1')));
+    expect(queue.get('t1')?.state).toBe('Idle');
+
+    await queue.restart('t1');
+    await tick();
+
+    expect(engineState.probeCalls).toBe(1);
+    expect(engineState.downloadCalls).toBe(1);
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+
+  it('a restored ReadyWithInfo record restarts without re-probing (cached mediaInfo)', async () => {
+    const { queue, engineState } = setup('completed');
+    await queue.restore(snapshotOf({ ...record('t1'), state: 'ReadyWithInfo', mediaInfo: mediaInfo() }));
+    const probesBefore = engineState.probeCalls;
+
+    await queue.restart('t1');
+    await tick();
+
+    expect(engineState.probeCalls).toBe(probesBefore);
+    expect(engineState.downloadCalls).toBe(1);
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+
+  it('a restored Idle record carrying a pre-probed mediaInfo walks the two legal info edges', async () => {
+    // No `Idle -> ReadyWithInfo` edge exists, so restart() must use the same
+    // two-edge walk `run()` uses for pre-probed records.
+    const { queue, engineState, events } = setup('completed');
+    await queue.restore(snapshotOf({ ...record('t1'), mediaInfo: mediaInfo() }));
+    const probesBefore = engineState.probeCalls;
+
+    await queue.restart('t1');
+    await tick();
+
+    expect(engineState.probeCalls).toBe(probesBefore);
+    expect(events).toContain('state:Idle->FetchingInfo');
+    expect(events).toContain('state:FetchingInfo->ReadyWithInfo');
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+});
+
 describe('A-M2-01 · serial execution (concurrency:1 keeps M2 semantics)', () => {
   it('never runs two downloads at once when three tasks are enqueued', async () => {
     const mem = createInMemoryPorts();

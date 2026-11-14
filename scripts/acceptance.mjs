@@ -545,6 +545,8 @@ const M3_TEST_FILE_MAP = {
   'ui-dialog-state.test.ts': ['A-D187'],
   'ui-theme.test.ts': ['A-D187'],
   'ui-playlist-batch.test.ts': ['A-D187'],
+  // D-198 · D-170 session 权限门的生产接线（session-permission-gate）。
+  'session-permission-gate.test.ts': ['A-D198'],
   // 0.2.1 (D-91…D-94, D-97): menu wiring, GitHub-release app update, engine check.
   'app-menu.test.ts': ['A-M5-00'],
   'app-update.test.ts': ['A-4.4-29'],
@@ -1407,6 +1409,11 @@ const M5_ASSERTIONS = [
   { id: 'A-D184', layer: 'L1', subject: 'artifact 路径封链双门：入库主门按请求输出根过滤（全拒 ARTIFACT_OUTSIDE_ROOTS）、回收/打开副门；copy-suffix/字幕/跨卷按构造放行', tests: ['path-containment', 'task-queue-containment', 'artifact-containment-actions'], needs: ['vitest'], evidence: ['reports/vitest-results.json::path-containment.test.ts,task-queue-containment.test.ts,artifact-containment-actions.test.ts', 'packages/core/src/path-resolver/containment.ts', 'docs/DECISIONS.md::D-184'] },
   { id: 'A-D186', layer: 'L1', subject: 'DOWNLOAD_START / URL_SUPPORT_CHECK 的 URL 上限 MAX_URL_CHARS=4096（越界拒且不回显 URL）', tests: ['m5-channels'], needs: ['vitest'], evidence: ['reports/vitest-results.json::m5-channels.test.ts', 'apps/desktop/src/main/m5-channels.ts::MAX_URL_CHARS', 'docs/DECISIONS.md::D-186'] },
   { id: 'A-D187', layer: 'L0', subject: 'UI 覆盖率纳入统计：共享 import 装载架（假浏览器全局 + 真实 import，FakeXHR 服务真实录制 fixture）+ 24 模块装载冒烟 + 16 个行为测试文件（UI 语句覆盖 99.21%）；vitest.config include 加入 packages/ui 且阈值 70 未动', tests: ['ui-module-load-smoke', 'ui-queue-page', 'ui-subtitle-picker', 'ui-txt-import', 'ui-settings-page', 'ui-supported-sites', 'ui-playlist-import', 'ui-update-dialog', 'ui-task-detail-page', 'ui-i18n-runtime', 'ui-about', 'ui-shortcuts', 'ui-task-log', 'ui-shell-family', 'ui-dialog-state', 'ui-theme', 'ui-playlist-batch'], needs: ['vitest'], evidence: ['reports/vitest-results.json::ui-module-load-smoke.test.ts 与 16 个 ui-*.test.ts', 'tests/unit/helpers/ui-harness.ts', 'vitest.config.ts', 'docs/DECISIONS.md::D-187'] },
+  // D-198 · 审计核实：D-170 的 session 全拒门在生产构建里从未安装（electronSurface()
+  // 缺 session 键，双层可选链短路）。修复后两个 handler 在真机 Electron 里真实注册，
+  // 对任意 permission 一律拒绝；surface 未带 session（仅单测假对象）时静默跳过。
+  // 与 A-D135/A-D137 同一做法：真断言，状态由 findTestCount() 对真实 vitest 结果计数。
+  { id: 'A-D198', layer: 'L1', subject: 'D-170 session 权限门真实接线：生产 electronSurface() 提供 session.defaultSession，setPermissionRequestHandler 对任意权限回调 false、setPermissionCheckHandler 返回 false；surface 未带 session（单测假对象）时两门静默跳过且 bootstrap 照常完成', tests: ['session-permission-gate'], needs: ['vitest'], evidence: ['reports/vitest-results.json::session-permission-gate.test.ts', 'apps/desktop/src/main/electron-entry.ts::electronSurface', 'apps/desktop/src/main/bootstrap.ts::setPermissionRequestHandler'] },
 ];
 
 /** M5 e2e cases that must exist and pass for the visual assertions. */

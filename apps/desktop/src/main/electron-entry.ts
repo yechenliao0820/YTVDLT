@@ -12,7 +12,7 @@
  * still the renderer's probe path; replacing it with `engine.probe()` belongs to
  * the same N1 block.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, shell, Tray } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, session, shell, Tray } from 'electron';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -72,6 +72,11 @@ export function electronSurface(): ElectronLike {
     Tray: Tray as unknown as ElectronLike['Tray'],
     Menu: Menu as unknown as ElectronLike['Menu'],
     clipboard: clipboard as unknown as ElectronLike['clipboard'],
+    // D-198: the ACTUAL wiring point of the D-170 permission gate. Without this
+    // key, `electron.session?.defaultSession` in bootstrap() short-circuits and
+    // the deny-all handlers are never installed in a real Electron run. Only
+    // unit-test fakes that omit `session` keep the silently-skipped behaviour.
+    session: session as unknown as NonNullable<ElectronLike['session']>,
   };
 }
 
