@@ -2020,3 +2020,24 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 新增共享常量 `MAX_URL_CHARS = 4096`（UTF-16 code units，同 D-173 剪贴板 1,000,000 的计数与注释风格），同时用于 `DOWNLOAD_START` 与 `URL_SUPPORT_CHECK`：4096 远超任何真实视频/播放列表 URL（含长签名 CDN token），远低于 Windows ~32k argv 限制，只拒「无界倾倒」不截断。URL_SUPPORT_CHECK 由 2048 统一到 4096，消除「预检硬拒下载可接受 URL」的窗口（符合 D-134 fail-open 精神）；预览探针通道维持 2048 不动。超限抛静态短句 `requires a bounded string url`，绝不回显 URL 内容；控制字符/凭据校验仍由引擎层 `assertHttpUrl` 负责。 |
 | 验证 | m5-channels.test.ts 66/66（新增 6 例：超限拒/恰好上限过/非 http(s) 拒/两通道不回显）；precheck-cancel + m5-host 40/40 无回归；tsc（apps/desktop）通过。 |
 | 未覆盖 | ① 未在真机验证超长 URL 的实际报错呈现（渲染层对 `bounded string url` 抛错走通用错误提示路径）；② 预览通道（2048）与入队通道（4096）双上限并存，若未来要完全归一需连 `subtitle-preview-service.ts` 一起改。 |
+
+## D-187 · 2026-11-14 · UI 覆盖率纳入统计：import 装载架 + 16 个行为测试文件（99.2% 语句覆盖）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `vitest.config.ts` 的 coverage.include 只有 shared/core/engine-ytdlp/desktop 四包，packages/ui 的 10,505 行 JS 完全在覆盖率门禁之外；且既有 UI 测试全部走 `runInNewContext` 沙箱，v8 覆盖率 provider 对 VM 沙箱完全不可见（实测整个 UI 只贡献 63 条语句）。若直接把 ui 塞进统计，聚合语句从 89.48% 跌到 53.48%，四维门限当场全崩——这正是该盲区长期存在的原因。 |
+| 根因 | UI 是零依赖静态页的经典脚本：无 ES import/export，全是「IIFE 接收 window 并把测试面挂到 window 上」的结构（queue.js 尾部注释明言 test/smoke surface，D-148 系列沿用同一惯例）；「浏览器代码测不了」的早期假设沿袭成惯性，runInNewContext 写法被顺手复制，覆盖率视角从未建立。 |
+| 决策 | ① **共享装载架** `tests/unit/helpers/ui-harness.ts`：假 document/window/localStorage/location/XMLHttpRequest（FakeXHR 按浏览器同样的相对解析规则服务真实录制 fixture，dialogs 用真实 L1 数据启动）+ `loadUiModule()` 真实 `import()`（v8 由此可达）+ `restore()`（defineProperty 安装以兼容 Node≥21 的 getter-only `navigator`/`localStorage` 内建）；② **24 模块装载冒烟** `ui-module-load-smoke.test.ts`：按页面脚本顺序（YTVDLT 命名空间/i18n/shortcuts/app-shell/probe-fixture 先行）在 beforeAll 单共享 window 上装载——ESM registry 按文件缓存，beforeEach 换新 window 会让后续模块饿死；③ **16 个行为测试文件约 470 用例**分两批：批次 1（queue 97.9%、subtitle-picker/txt-import/settings/supported-sites 99.9-100%）+ 批次 2（playlist-import 100%、update-dialog 99.6%、task-detail 99.7%、i18n/about/shortcuts/task-log/shell 家族/dialog-state/theme/playlist-batch 98.5-100%），断言钉真实行为（D-141/D-104/D-114/D-130/D-148/D-173 等语义在 import 路线下重钉），不为残余防御分支刷覆盖率（各文件尾注登记不可达原因）；④ `vitest.config.ts` include 追加 `packages/ui/src/**/*.js`——**阈值 70 一字未动**；⑤ 既有 runInNewContext 语义测试全部保留：它们钉语义不贡献覆盖率，两套并存各司其职。 |
+| 取舍 | 不引入 jsdom（D-61 依赖白名单冻结，且假 DOM 已够）；测试侧协作桩（parentNode 回填、可编程 deferred 桥、`vi.resetModules()` 换世界）留在各测试文件内，不动共享架。 |
+| 验证 | 全量 **165 文件 / 2649 用例 / 0 失败**（两次连续全量结果一致）；覆盖率四维 **93.42 / 86.61 / 93.55 / 93.42**（纳入前 53.48%），UI 自身语句 9758/9836（99.21%）、函数 97.55%、分支 86.35%；e2e 31/31 + 反例 5/5 全部 0 px、零基线重建；layering 0 违规、frozen-gate PASS；QA 阶段四放行（抽查 4 个测试文件断言质量、冒烟清单 24/24 对照 find 无遗漏、配置 diff 仅一项）。 |
+| 未覆盖 | ① 文档级监听（visibilitychange/DOMContentLoaded）等 harness 不可达分支与若干防御臂，已在各测试文件尾注登记；② **新 UI 模块必须手工登记进冒烟清单 MODULES**（否则覆盖率为 0，手册坑 36 已写明）；③ **install/restore 必须对称**（漏 restore 会向同 worker 后续文件泄漏全局，手册坑 36）；④ 测试发现并汇总定级的 UI 存量 bug 12 条（1 条 P1：queue.js `sortTasks` 的 oldest 分支与 newest 同实现；11 条 P2：settings `checkEngine({results:[]})` TypeError、两处 promise 无 `.catch`、`patchProgress` 不更新 data-stage 等）**只报未修**，待业主排轮；⑤ 手册坑 33 的本机 rmSync EPERM 现象在 UI 测试量增大后未复现，coverage 汇总本机可稳定产出。 |
+
+## D-188 · 2026-11-14 · 验收登记补齐（26 个测试文件入 M3_TEST_FILE_MAP）与 L2 哨兵竞态加固
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 重跑 M5 验收暴露两类问题：① `M5-GATE-file-coverage` 红——D-173…D-181 轮新增的 8 个测试文件（task-log-copy、settings-autostart-repaint、runtime-startup-check、win-startup、ipc-gateway-config、task-snapshot-persist、config-store 扩展用例等）与 D-187 轮的 17 个 UI 测试文件共 26 个从未登记进 acceptance 的 `M3_TEST_FILE_MAP`，此前一直「绿」是因为验收报告过期未重跑；② `probe-output-limit` 的 8/9a/9b 三例在负载下偶发红：子进程哨兵定时器 1.5 s 与 kill@400 ms 之间只有 1.1 s 余量给 `taskkill`（外部进程 spawn），机器繁忙时 kill 落点晚于哨兵期限 → 「进程幸存」假失败。 |
+| 根因 | ① 验收体系是「新测试文件必须挂语义相关的真断言」的显式约定（防孤儿文件），此前轮次只写了测试漏了登记，过期报告把缺口掩盖到重跑才暴露；② 哨兵 deadline 拍得太紧，没给 kill 延迟留负载余量。 |
+| 决策 | ① 补 13 条真断言（A-D173/174/175/176/177/178/179/181/182/183/184/186/187，每条对齐其决策的测试文件与证据源），26 个测试文件全部登记进 `M3_TEST_FILE_MAP`（UI 17 个统一挂 A-D187，其余按各自决策）；D-180/D-185 属无测试文件的流程性决策（README 对齐 / CI action 钉 SHA），按 D-172 先例不设断言；② 哨兵 deadline 1.5 s→5 s、三处 post-kill 等待统一 6.5 s——幸存检测**严格更强**（真幸存的子进程有 5 s 暴露窗口），断言语义与判定方向一字未动。 |
+| 验证 | acceptance M5 重跑 **allGreen=true**（56/59 断言 PASS + 3 SKIPPED，10/10 门禁，fresh）；probe-output-limit 26/26；全量 2649/0 不受影响；handoff-check 干净。 |
+| 未覆盖 | ① 未来新增测试文件仍需手工登记断言与 map（手册 §7 步骤 8 已写明纪律）；② `taskkill` 极端延迟超过 4.6 s 余量理论上仍可假红，概率已压到可忽略；③ CI（windows-latest）下 1.5 s 旧余量从未触发过该竞态（run #1 起全绿），本加固只影响本机高负载场景。 |

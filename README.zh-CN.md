@@ -236,7 +236,7 @@ Error（D-142），以及外部审计四项修复：出站连接 DNS 钉扎（D-
 有界化（D-144）、配置「原子写入」真替换（D-145）、详情页取消按钮对齐（D-146）
 ——记在
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) 与
-[`docs/DECISIONS.md`](docs/DECISIONS.md)（已到 D-186）。
+[`docs/DECISIONS.md`](docs/DECISIONS.md)（已到 D-187）。
 
 版本流水见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)，每条决策的现象 / 根因 /
 取舍 / 验证见 [`docs/DECISIONS.md`](docs/DECISIONS.md)。
@@ -329,6 +329,21 @@ runner 会把带 shebang 的脚本检出成 CRLF，导致测试收集期语法�
 | 类型检查 | 5/5 工作区包通过（逐包 `tsc --noEmit`） |
 | 单元 / 契约 / 集成测试 | **2149 项通过，0 失败** |
 | 覆盖率 | 语句 89.48% / 分支 86.75% / 函数 91.51% / 行 89.48%（门槛 70，未上调） |
+| 截图 E2E | 31/31 用例 + 5/5 反例；**0 px 像素偏差，未重建任何基线** |
+| `check-layering` / `frozen-gate` / `request.ts` 冻结 | 0 违规 / 通过 / 逐字节一致 |
+
+同日，UI 覆盖率纳入统计（D-187）：共享 import 装载架
+（`tests/unit/helpers/ui-harness.ts`）在假浏览器全局下装载零依赖 UI 脚本——
+它们是把测试面挂到 window 的 IIFE——让 v8 覆盖率终于看得见（旧 runInNewContext
+测试跑在 VM 沙箱里，覆盖率完全不可见）。16 个行为测试文件（约 470 用例）把每个
+UI 模块驱动到 99.2% 语句覆盖，`packages/ui` 进入 `vitest.config.ts`，门限保持
+70 不动。四维落在：
+
+| 门禁 | 结果 |
+|---|---|
+| 类型检查 | 5/5 工作区包通过（逐包 `tsc --noEmit`） |
+| 单元 / 契约 / 集成测试 | **2649 项通过，0 失败**（165 个文件） |
+| 覆盖率 | 语句 93.42% / 分支 86.61% / 函数 93.55% / 行 93.42%（门槛 70，未上调；UI 自身：语句 99.21% / 分支 86.35% / 函数 97.55%） |
 | 截图 E2E | 31/31 用例 + 5/5 反例；**0 px 像素偏差，未重建任何基线** |
 | `check-layering` / `frozen-gate` / `request.ts` 冻结 | 0 违规 / 通过 / 逐字节一致 |
 

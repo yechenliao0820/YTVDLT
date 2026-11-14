@@ -295,7 +295,7 @@ download output (D-144), truly atomic config writes (D-145), and a
 detail-page cancel button aligned with what the queue can actually do
 (D-146) — is described in
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-186).
+[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-187).
 
 ## Engineering and verification
 
@@ -406,6 +406,23 @@ URLs are capped at 4,096 characters. It passed the same gates:
 | Typecheck | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
 | Unit / contract / integration tests | **2,149 passed, 0 failed** |
 | Coverage | statements 89.48% / branches 86.75% / functions 91.51% / lines 89.48% (floor 70, not raised) |
+| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** |
+| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
+
+UI coverage joined the gate the same day (D-187): a shared import harness
+(`tests/unit/helpers/ui-harness.ts`) loads the zero-dependency UI scripts —
+plain IIFEs that attach their test surfaces to `window` — under fake browser
+globals, so the v8 coverage provider finally sees them (the legacy
+`runInNewContext` tests execute in VM sandboxes the provider never reports).
+Sixteen behavioural test files (~470 cases) drive every UI module to 99.2%
+statement coverage, `packages/ui` is now part of `vitest.config.ts`, and the
+threshold stays at 70. The four dimensions land at:
+
+| Gate | Result |
+|---|---|
+| Typecheck | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
+| Unit / contract / integration tests | **2,649 passed, 0 failed** (165 files) |
+| Coverage | statements 93.42% / branches 86.61% / functions 93.55% / lines 93.42% (floor 70, not raised; the UI itself: statements 99.21% / branches 86.35% / functions 97.55%) |
 | Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** |
 | `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
 

@@ -265,13 +265,13 @@ ui（零依赖） ← preload ← apps/desktop
 6. 动了 UI → node scripts/build-desktop.mjs，再按 §0 铁律 9 打包
             打包后立刻还原被改写的 package.json（见 §9 坑 2）
 7. 打包产物真机验证：--remote-debugging-port=9222 启动，用 reports/l3-probe/ 下的驱动
-8. docs/DECISIONS.md 追加 D-xx；发版另在 CHANGELOG.md 加一行
+8. docs/DECISIONS.md 追加 D-xx；发版另在 CHANGELOG.md 加一行。**新增测试文件必须在 `scripts/acceptance.mjs` 补语义相关的真断言（A-Dxxx）并登记 `M3_TEST_FILE_MAP`**——漏登记会让 `M5-GATE-file-coverage` 变红，且过期验收报告会掩盖缺口（D-188 教训）
 9. 回复末尾输出「修改文件清单」（§0 格式）
 ```
 
 | 改了什么 | 至少重跑 |
 |---|---|
-| `packages/ui/**` | `build-desktop` + `run-e2e` + 打包后真机点一遍 |
+| `packages/ui/**` | UI 单测（`tests/unit/ui-*.test.ts`，import 路线见坑 36）随 `npm test` 全量 + `build-desktop` + `run-e2e` + 打包后真机点一遍 |
 | `packages/core/**` | `typecheck` + `npm test` |
 | `packages/engine-ytdlp/**` | `typecheck` + `npm test` + `scripts/l3-smoke.mjs`（真下载） |
 | `apps/desktop/src/main/**` | `typecheck` + `npm test` + 打包后真机走一遍 |
@@ -428,6 +428,8 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 
 34. **静态页的 CSP 必须放行 `connect-src file:`**（D-170 实测）：`packages/ui/src/fixtures/probe-fixture.js` 用**同步 XHR** 读同目录的 fixture JSON，这是 8 个页面唯一的数据来源。把 CSP 写成 `connect-src 'none'`（「页面不联网」的直觉写法）会让页面自己的数据源失效：`XMLHttpRequest` 抛异常 → 脚本停住 → DOM 停在初始态，视觉上不白屏，**只有 `--dump-dom` 快照能看出来**。正确写法是 `connect-src 'self' file: data:`：`file:` 给页面自己，`http(s)` 仍然被拦（这才是安全目标）。排查手法：截图基线像素没变但 DOM 快照整片退化成初始态 → 先怀疑 CSP 掐了脚本，别先去查渲染。
 35. **快照里绝不能出现媒体 URL，且写盘不能靠「每次都写」**（D-163 实测）：`MediaInfo.formats[].url` / `subtitles[].url` 是带 `sig`/`expire` 的签名 CDN 链接，任何业务代码都不读它们（格式化选择器只读 id/尺寸/码率，字幕规划只读 lang/ext，渲染层 DTO 已剥 url），所以落盘前必须过 `stripCredentialUrls()`。配套的指纹短路有个**必须记住的初值细节**：空队列的指纹是空串，`lastPersistedFingerprint` 必须以 `null` 起手，写成 `''` 会让 `restoreTasks()` 的第一次写回被当成「无变化」而跳过——D-159 的「损坏快照先备份再覆盖」当场失效，测试会红在 `task-store.test.ts` 的 D-159 用例上。例外注记（D-179）：`mediaInfo.thumbnail` **刻意保留**——它是启动时封面重取的唯一凭据（`ensureCover` → `ThumbnailCache.ensure`，缓存键 `sha1(url)`，taskId→封面的内存映射只在 ensure 时回填），剥离它会让重启后恢复任务的封面永久丢失；该 URL 只授予预览图、永不出主进程，签名残留风险记录在 `snapshot-media.ts` 头注释。
+36. **UI 脚本要覆盖率就必须走 import 路线，runInNewContext 沙箱对 v8 完全不可见**（D-187）：packages/ui 是无 ES 导入的经典脚本（IIFE 接收 window、把 `YTVDLT*` 测试面挂上去），旧式 `runInNewContext` 测试在 VM 沙箱里执行，覆盖率 provider 一个字节都看不到（实测整个 UI 只贡献 63 条语句）。UI 单测统一用 `tests/unit/helpers/ui-harness.ts`：`installUiGlobals`（假 document/window/localStorage/location/FakeXHR——FakeXHR 按浏览器相对解析规则服务真实录制 fixture）→ `loadUiModule`（真实 `import()`）→ `restore()`，**install/restore 必须对称**（漏 restore 会向同 worker 的后续文件泄漏全局）。两条配套纪律：① **新 UI 模块必须登记进 `ui-module-load-smoke.test.ts` 的 MODULES 清单**（按页面脚本顺序装载，YTVDLT 命名空间/i18n/shortcuts/app-shell/probe-fixture 先行），否则新模块覆盖率为 0；② ESM registry 按测试文件缓存——同文件内共享单 window 顺序装载，跨世界切换用 `vi.resetModules()`。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 

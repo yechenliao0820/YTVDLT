@@ -41,6 +41,11 @@ export default defineConfig({
         'packages/core/src/**/*.ts',
         'packages/engine-ytdlp/src/**/*.ts',
         'apps/desktop/src/**/*.ts',
+        // D-187: the zero-dependency UI scripts join the gate. They are plain
+        // <script> IIFEs (no ES imports/exports) loaded for coverage through
+        // tests/unit/helpers/ui-harness.ts — the runInNewContext legacy tests
+        // execute in VM sandboxes the v8 provider never reports.
+        'packages/ui/src/**/*.js',
       ],
       exclude: ['**/*.d.ts', '**/node_modules/**'],
       thresholds: {
