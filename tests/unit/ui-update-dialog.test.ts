@@ -248,10 +248,15 @@ describe('D-187 · update-dialog 装载面', () => {
     win.ytvdltBridge = real;
   });
 
-  it('对话框未打开前节点不存在；__apply(null/非对象) 是安全早退', () => {
+  it('对话框未打开前节点不存在；__apply(null/非对象/缺 latest 形状) 是安全早退', () => {
     expect(backdrop()).toBeNull();
     expect(() => updateDialog!.__apply(null)).not.toThrow();
     expect(() => updateDialog!.__apply('not-an-object')).not.toThrow();
+    // D-190: `latest === null` 漏判 undefined。apply({}) 曾在轮询的 promise
+    // 里抛 TypeError（latest.version），界面静默冻结且无任何可见错误。
+    expect(() => updateDialog!.__apply({})).not.toThrow();
+    expect(() => updateDialog!.__apply({ phase: 'available' })).not.toThrow();
+    expect(() => updateDialog!.__apply({ phase: 'available', latest: 'bad-shape' })).not.toThrow();
     expect(backdrop()).toBeNull();
   });
 });

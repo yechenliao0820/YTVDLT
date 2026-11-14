@@ -92,7 +92,9 @@
   var CABLE = { TASK_DETAIL: 'ytvdlt:task:detail', TASK_ACTION: 'ytvdlt:task:action' };
 
   function invoke(channel, payload) {
-    if (bridge === null) return Promise.resolve({ ok: false, message: '桥接不可用' });
+    // D-190: `bridge` is frozen at import time and `invoke()` is only reachable
+    // from the live paths, where it is non-null. The dead null branch is gone;
+    // the surrounding try/catch still normalises a throwing bridge.
     try {
       return Promise.resolve(bridge.invoke(CABLE[channel] || channel, payload || {})).catch(function (error) {
         return { ok: false, message: String(error && error.message ? error.message : error) };

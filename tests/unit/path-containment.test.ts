@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   normalizedForContainment, artifactRootsOf, isPathInsideRoots, splitArtifactsByRoots,
+  isSpecificRoot, trustedArtifactRoots,
 } from '@ytvdlt/core';
 
 const ROOTS = ['C:/Videos', 'C:/Music'];
@@ -170,5 +171,36 @@ describe('D-182 splitArtifactsByRoots', () => {
 
   it('empty roots keep everything (fail open)', () => {
     expect(splitArtifactsByRoots(['C:/x/a.mp4'], [])).toEqual({ kept: ['C:/x/a.mp4'], rejected: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-193 · 收紧 fail-open 边界：损坏/恢复快照不得让 roots 变成「整盘」
+// ---------------------------------------------------------------------------
+describe('D-193 · isSpecificRoot / trustedArtifactRoots', () => {
+  it('盘符根 / POSIX 根 / 裸 UNC 共享根不可信，具体目录可信', () => {
+    expect(isSpecificRoot('C:/')).toBe(false);
+    expect(isSpecificRoot('c:')).toBe(false);
+    expect(isSpecificRoot('/')).toBe(false);
+    expect(isSpecificRoot('//srv/share')).toBe(false);
+    expect(isSpecificRoot('C:/Videos/../evil')).toBe(false); // `..` 段
+    expect(isSpecificRoot('C:/Videos')).toBe(true);
+    expect(isSpecificRoot('//srv/share/Videos')).toBe(true);
+    expect(isSpecificRoot('/home/user/Videos')).toBe(true);
+  });
+
+  it('空 / 全无效 / 全过宽的 paths → null（调用层必须 fail-closed）', () => {
+    expect(trustedArtifactRoots(null)).toBeNull();
+    expect(trustedArtifactRoots({})).toBeNull();
+    expect(trustedArtifactRoots({ videoDir: '', audioDir: '', tempDir: '' })).toBeNull();
+    expect(trustedArtifactRoots({ videoDir: 'C:/', audioDir: '/', tempDir: '' })).toBeNull();
+  });
+
+  it('混合场景丢弃过宽根、保留具体根；正常 request 输出不变', () => {
+    expect(trustedArtifactRoots({ videoDir: 'C:/', audioDir: 'C:/Videos', tempDir: '' }))
+      .toEqual(['c:/videos']);
+    expect(trustedArtifactRoots({
+      videoDir: 'C:/Videos', audioDir: 'C:/Music', tempDir: 'C:/V/.ytvdlt-incomplete/t1',
+    })).toEqual(['c:/videos', 'c:/music', 'c:/v/.ytvdlt-incomplete/t1']);
   });
 });

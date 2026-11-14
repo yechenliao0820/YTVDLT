@@ -195,6 +195,13 @@ describe('D-187 · parseAccelerator 与 matches', () => {
     expect(shortcuts.isEditingTarget({ tagName: 'DIV' })).toBe(false);
     expect(shortcuts.isEditingTarget(null)).toBe(false);
     expect(shortcuts.isEditingTarget(undefined)).toBe(false);
+    // D-190: 对齐 core/src/shortcuts/shortcuts.ts 的归一逻辑。真实 DOM 的
+    // tagName 恒大写，但 XML 文档 / 测试替身可能给小写或非字符串。
+    expect(shortcuts.isEditingTarget({ tagName: 'input' })).toBe(true);
+    expect(shortcuts.isEditingTarget({ tagName: 'textarea' })).toBe(true);
+    expect(shortcuts.isEditingTarget({ tagName: 'Select' })).toBe(true);
+    expect(shortcuts.isEditingTarget({ tagName: undefined })).toBe(false);
+    expect(shortcuts.isEditingTarget({ tagName: 42 })).toBe(false);
   });
 });
 

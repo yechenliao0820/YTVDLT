@@ -19,7 +19,7 @@ import type { ICancelHandle, IArtifactVerifier, IHistoryStore, ITaskQueue, ITask
 import { detectPostprocessed } from '../download-flags.js';
 import { resolveDownloadPlan } from '../decision/download-plan.js';
 import { applyCopySuffix, nextCopySuffix } from '../path-resolver/copy-suffix.js';
-import { artifactRootsOf, splitArtifactsByRoots } from '../path-resolver/containment.js';
+import { splitArtifactsByRoots, trustedArtifactRoots } from '../path-resolver/containment.js';
 import {
   buildSubtitleLinks, classifyArtifact, evaluateSubtitleOutcome,
   primaryMediaArtifact, subtitleArtifactsOf, mediaArtifactsOf,
@@ -705,7 +705,14 @@ export class TaskQueue implements ITaskQueue {
     request: NonNullable<TaskRecord['request']>,
     artifacts: readonly string[],
   ): Promise<string[] | null> {
-    const { kept, rejected } = splitArtifactsByRoots(artifacts, artifactRootsOf(request.paths));
+    // D-193: a LIVE request must yield at least one specific root. `paths: {}`
+    // or a volume root means the request is malformed; accepting anything under
+    // empty roots would put the whole manifest into the record (the action gate
+    // afterwards derives its roots from that SAME record). Fail closed here.
+    const trustedRoots = trustedArtifactRoots(request.paths);
+    const { kept, rejected } = trustedRoots === null
+      ? { kept: [] as string[], rejected: [...artifacts] }
+      : splitArtifactsByRoots(artifacts, trustedRoots);
     if (rejected.length === 0) return kept;
     // Diagnostic parity with `manifest.droppedLines`: the WARNING carries the
     // paths themselves (capped) so logs/app-*.jsonl alone explains the loss.

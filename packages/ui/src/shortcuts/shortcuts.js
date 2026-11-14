@@ -84,8 +84,11 @@
   function isEditingTarget(target) {
     if (target === null || target === undefined) return false;
     if (target.isContentEditable === true) return true;
+    // D-190: mirror core/src/shortcuts/shortcuts.ts. Real DOM tagNames are
+    // uppercase, but XML documents and test doubles may hand us lower case
+    // (or a non-string); normalising keeps both mirrors in agreement.
     var tag = target.tagName;
-    return EDITABLE_TAGS.indexOf(tag) !== -1;
+    return typeof tag === 'string' && EDITABLE_TAGS.indexOf(tag.toUpperCase()) !== -1;
   }
 
   /** Resolve an event to a binding id, honouring the editing guard. */

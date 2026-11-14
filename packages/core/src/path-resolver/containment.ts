@@ -37,6 +37,14 @@
  * record produced by a real run ever reaches the gate rootless; refusing
  * everything for a degenerate legacy record would only break the frozen
  * D-120 cleanup semantics for data that was never manifest-derived.
+ *
+ * D-193 narrows that tolerance: it belongs to `request === null` legacy
+ * records ONLY. A stored request whose paths produce no *specific* root is a
+ * damaged / restored snapshot, not a legacy record — the shape guard in
+ * task-store only checks that the five request domains are objects, so
+ * `paths: {}` (or `videoDir: "C:/"`) sails through while BOTH the intake and
+ * the action gate derive their roots from that SAME record. Every destructive
+ * consumer now uses `trustedArtifactRoots()` and fails closed in that case.
  */
 
 export interface ArtifactRootsInput {
@@ -138,4 +146,46 @@ export function splitArtifactsByRoots(
     else rejected.push(path);
   }
   return { kept, rejected };
+}
+
+/**
+ * D-193 · Is a stored root specific enough to be trusted?
+ *
+ * A volume root (`C:` after normalisation), the POSIX root (`/`) or a bare
+ * UNC share (`//host/share`) would make "inside" mean "almost anywhere".
+ * Real download directories always have at least one segment below the
+ * volume / share root (the defaults live under the user's Videos folder), so
+ * discarding these costs nothing legitimate and stops a tampered snapshot
+ * from widening the scope with `videoDir: "C:/"`.
+ */
+export function isSpecificRoot(root: string): boolean {
+  const normalized = normalizedForContainment(root);
+  if (normalized === null || normalized === '/') return false;
+  // Trailing separators are already stripped, so a Windows volume root is `c:`.
+  if (/^[a-z]:$/.test(normalized)) return false;
+  if (normalized.startsWith('//')) {
+    return normalized.slice(2).split('/').filter((part) => part !== '').length > 2;
+  }
+  return true;
+}
+
+/**
+ * D-193 · Trusted containment scope for a STORED record's request.
+ *
+ * `isPathInsideRoots()` fails open on empty roots — a tolerance that exists
+ * for `request === null` legacy records only. A record that DOES carry a
+ * request but yields no specific roots is a damaged / restored snapshot;
+ * failing open there lets an arbitrary path (`C:/Windows/...`) pass BOTH
+ * gates, because both derive their roots from that same record.
+ *
+ * Returns `null` when no trustworthy root exists. Callers keep the legacy
+ * fail-open ONLY when the record has no request at all; otherwise they must
+ * fail closed. `artifactRootsOf()` is intentionally left unchanged so the
+ * pure function and its pinned semantics stay intact.
+ */
+export function trustedArtifactRoots(
+  paths: ArtifactRootsInput | null | undefined,
+): readonly string[] | null {
+  const roots = artifactRootsOf(paths).filter(isSpecificRoot);
+  return roots.length > 0 ? roots : null;
 }

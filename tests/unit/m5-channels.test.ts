@@ -355,6 +355,31 @@ describe('m5 ipc · DOWNLOAD_START carries the user choice (D-83)', () => {
     expect(seen).toHaveLength(0);
   });
 
+  it('D-190：DOWNLOAD_START 拒绝越界 kind，不再静默降级为 video', async () => {
+    const seen: SingleDownloadInput[] = [];
+    const { handlers } = await harness(undefined, {
+      enqueueSingle: async (input) => { seen.push(input); return ['single-invalid']; },
+    });
+    const channel = handlers.get(IPC_CHANNELS.DOWNLOAD_START);
+    for (const bad of ['audioo', 'VIDEO', 'movie', '', 7, null]) {
+      await expect(channel?.({ url: 'https://example.org/v', kind: bad }))
+        .rejects.toThrow(/invalid kind/);
+    }
+    expect(seen).toHaveLength(0); // 一次错误类型的下载都没有执行
+  });
+
+  it('D-190：kind 缺省仍默认 video，合法 audio 照旧透传', async () => {
+    const seen: SingleDownloadInput[] = [];
+    const { handlers } = await harness(undefined, {
+      enqueueSingle: async (input) => { seen.push(input); return ['single-default']; },
+    });
+    const channel = handlers.get(IPC_CHANNELS.DOWNLOAD_START);
+    await channel?.({ url: 'https://example.org/v' });
+    expect(seen[0]).toEqual({ url: 'https://example.org/v', kind: 'video' });
+    await channel?.({ url: 'https://example.org/v', kind: 'audio' });
+    expect(seen[1]).toEqual({ url: 'https://example.org/v', kind: 'audio' });
+  });
+
   it('still reports "disabled" when the build has no enqueue port', async () => {
     const { handlers } = await harness();
     const result = await handlers.get(IPC_CHANNELS.DOWNLOAD_START)?.({

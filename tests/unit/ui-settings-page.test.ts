@@ -536,15 +536,23 @@ describe('引擎检查按钮（component:check）', () => {
     expect(callsOn('ytvdlt:component:status').length).toBeGreaterThan(0);
   });
 
-  it('空结果列表 → 走进 catch（源码对空数组取 [0] 后直接读 .error，见报告），按钮恢复', async () => {
+  it('D-190：空结果列表 → 稳定「尚未查询远端版本」，不抛 TypeError、按钮恢复', async () => {
     reply = (channel) => channel === 'ytvdlt:component:check' ? { results: [] } : {};
     node('settings-engine-check').dispatch('click');
     await flush();
-    // 真实源码 bug：results 为空数组时 result 是 undefined（不是 null），
-    // `result.error` 抛 TypeError 被 .catch 兜成检查失败 —— 本测试按现状钉住。
+    // D-190 起空数组按「尚未查询远端版本」处理（results[0] ?? null 语义）。
+    // 修复前 `result.error` 抛 TypeError，用户看到的是英文异常串。
     expect(node('settings-components').getAttribute('data-component-state')).toBe('failed');
-    expect(node('settings-components').textContent).toContain('TypeError');
+    expect(node('settings-components').textContent).toBe('尚未查询远端版本');
+    expect(String(node('settings-components').textContent)).not.toContain('TypeError');
     expect(node('settings-engine-check').disabled).toBe(false);
+
+    // 稀疏数组（[undefined]）同样不能让 `result.error` 抛异常。
+    reply = (channel) => channel === 'ytvdlt:component:check' ? { results: [undefined] } : {};
+    node('settings-engine-check').dispatch('click');
+    await flush();
+    expect(node('settings-components').textContent).toBe('尚未查询远端版本');
+    expect(String(node('settings-components').textContent)).not.toContain('TypeError');
   });
 
   it('应答没有 results 数组 → failed「尚未查询远端版本」', async () => {
@@ -1303,5 +1311,53 @@ describe('语言切换（重载语义 + D-85 SETTINGS_SET）', () => {
     node('settings-language').children.find((b: any) => b.getAttribute('data-locale') === 'zh-CN').click();
     expect(locationReplace).toHaveBeenLastCalledWith('file:///C:/app/pages/queue/index.html?v=9.9.9');
     expect(lastCall('ytvdlt:settings:set')?.payload).toEqual({ language: 'zh-CN' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-190 · 存量 BUG 修复回归
+// ---------------------------------------------------------------------------
+describe('D-190 · 开关持久化失败回拨与引擎按钮复位', () => {
+  it('appAuto / engineAuto 的 SETTINGS_SET 被拒绝 → 复选框回拨（对齐 autostart 先例）', async () => {
+    const saved = reply;
+    try {
+      reply = (channel) => channel === 'ytvdlt:settings:set'
+        ? Promise.reject(new Error('disk full'))
+        : {};
+      for (const id of ['settings-app-auto', 'settings-engine-auto']) {
+        const box = node(id);
+        const before = box.checked;
+        box.checked = !before;
+        box.dispatch('change');
+        await flush();
+        expect(box.checked).toBe(before);
+      }
+      expect(callsOn('ytvdlt:settings:set')).toHaveLength(2);
+    } finally {
+      reply = saved;
+    }
+  });
+
+  it('无桥时点 check / update → 离线文案，按钮恢复到点击前状态（不永久禁用）', () => {
+    const check = node('settings-engine-check');
+    const update = node('settings-engine-update');
+    const checkBefore = check.disabled;
+    const updateBefore = update.disabled;
+    const saved = reply;
+    delete win.ytvdltBridge;
+    try {
+      check.disabled = false;
+      update.disabled = false;
+      check.dispatch('click');
+      expect(check.disabled).toBe(false);
+      update.dispatch('click');
+      expect(update.disabled).toBe(false);
+      expect(node('settings-components').getAttribute('data-component-state')).toBe('offline');
+    } finally {
+      win.ytvdltBridge = realBridge;
+      check.disabled = checkBefore;
+      update.disabled = updateBefore;
+      reply = saved;
+    }
   });
 });

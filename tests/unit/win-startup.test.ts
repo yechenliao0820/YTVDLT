@@ -13,12 +13,18 @@
 import { describe, it, expect } from 'vitest';
 import { planAutostart } from '@ytvdlt/core';
 import {
-  createWinStartup, parseRegQueryValue, planToRegArgs,
+  createWinStartup, parseRegQueryValue, planToRegArgs, isRegValueAbsent,
 } from '../../apps/desktop/src/main/adapters/win-startup.js';
 
 const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const VALUE_LINE = '    YTVDLT    REG_SZ    "C:\\Program Files\\YTVDLT\\YTVDLT.exe" --autostart';
 const ABSENT_STDERR = 'ERROR: The system was unable to find the specified registry key or value.';
+/** D-194: `reg.exe` localises this line; English is not the only Windows locale. */
+const ABSENT_LOCALIZED = [
+  '错误: 系统找不到指定的注册表项或值。',          // zh-CN
+  '錯誤: 系統找不到指定的登錄機碼或值。',          // zh-TW
+  'エラー: 指定されたレジストリ キーまたは値が見つかりませんでした。', // ja-JP
+];
 
 type RegResult = { code: number; stdout: string; stderr: string };
 
@@ -114,5 +120,39 @@ describe('win-startup · read() shows the real entry state', () => {
       runReg: async () => ({ code: 0, stdout: '', stderr: '' }),
     });
     await expect(port.read()).rejects.toThrow(/unsupported platform/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-194 · 在线审计 P2：中文 Windows 的「值不存在」判断
+// ---------------------------------------------------------------------------
+describe('D-194 · localized "value not found" diagnostics', () => {
+  it('isRegValueAbsent 正向识别中英日，且对真错误/成功退出保持 false', () => {
+    for (const stderr of [ABSENT_STDERR, ...ABSENT_LOCALIZED]) {
+      expect(isRegValueAbsent({ code: 1, stdout: '', stderr })).toBe(true);
+    }
+    expect(isRegValueAbsent({ code: 1, stdout: '', stderr: 'Access is denied.' })).toBe(false);
+    expect(isRegValueAbsent({ code: 1, stdout: '', stderr: 'Fehler: unbekannter Fehler' })).toBe(false);
+    expect(isRegValueAbsent({ code: 0, stdout: '', stderr: ABSENT_STDERR })).toBe(false);
+  });
+
+  it('中文 Windows 删除一个已不存在的值仍是成功终态', async () => {
+    for (const stderr of ABSENT_LOCALIZED) {
+      const port = winAdapter(async () => ({ code: 1, stdout: '', stderr }));
+      await expect(port.apply(false)).resolves.toEqual({ ok: true });
+    }
+  });
+
+  it('中文 Windows 的 reg query 读到 false，不再抛错回落 config 镜像', async () => {
+    for (const stderr of ABSENT_LOCALIZED) {
+      const port = winAdapter(async () => ({ code: 1, stdout: '', stderr }));
+      await expect(port.read()).resolves.toBe(false);
+    }
+  });
+
+  it('真错误（拒绝访问）仍按失败处理，不被多语言匹配误吞', async () => {
+    const port = winAdapter(async () => ({ code: 1, stdout: '', stderr: '错误: 拒绝访问。' }));
+    await expect(port.apply(false)).resolves.toMatchObject({ ok: false });
+    await expect(port.read()).rejects.toThrow(/reg exited 1/);
   });
 });

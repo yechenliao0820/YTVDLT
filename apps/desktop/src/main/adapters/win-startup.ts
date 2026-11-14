@@ -49,6 +49,28 @@ function runRegProcess(args: readonly string[]): Promise<{ code: number; stdout:
   });
 }
 
+/**
+ * D-194 · `reg.exe` LOCALISES its "value not found" diagnostic. English is not
+ * the only locale: a Simplified-Chinese Windows prints
+ * `错误: 系统找不到指定的注册表项或值。`, Traditional Chinese `錯誤: 系統找不到…`,
+ * Japanese `…見つかりませんでした。`. Matching `/unable to find/` alone made
+ * `read()` throw for an already-absent value — the settings toggle then fell
+ * back to a possibly stale config mirror — and `apply(false)` reported a
+ * failure for what is already the desired end state.
+ *
+ * Deliberately POSITIVE and narrow: an unknown locale still fails closed
+ * (throws / reports failure), and a real error such as "Access is denied." is
+ * never mistaken for absence.
+ */
+const REG_NOT_FOUND_RE = /unable to find|找不到|不存在|未找到|見つかりません/i;
+
+/** True only for a confirmed "key or value does not exist" reg failure. */
+export function isRegValueAbsent(result: {
+  readonly code: number; readonly stdout: string; readonly stderr: string;
+}): boolean {
+  return result.code === 1 && REG_NOT_FOUND_RE.test(result.stderr);
+}
+
 /** `reg query` prints `    YTVDLT    REG_SZ    "C:\...\YTVDLT.exe" --autostart`. */
 export function parseRegQueryValue(stdout: string, valueName: string): string | null {
   for (const line of stdout.split(/\r?\n/)) {
@@ -93,7 +115,7 @@ export function createWinStartup(options: WinStartupOptions): ISystemStartupPort
       const result = await runReg(args);
       // `reg delete` returns 1 when the value is already absent — that is the
       // desired end state, not a failure.
-      if (result.code !== 0 && !(plan.action === 'remove' && /unable to find/i.test(result.stderr))) {
+      if (result.code !== 0 && !(plan.action === 'remove' && isRegValueAbsent(result))) {
         return { ok: false, reason: `reg exited ${result.code}` };
       }
       return { ok: true };
@@ -102,9 +124,9 @@ export function createWinStartup(options: WinStartupOptions): ISystemStartupPort
     /**
      * The settings toggle shows this value, so a FAILED query must not
      * masquerade as "off" — it throws and lets the channel layer fall back to
-     * the config mirror. Only a confirmed absence (`reg` exits 1 with
-     * "unable to find", the same tolerance the `reg delete` above enjoys)
-     * reads `false`.
+     * the config mirror. Only a confirmed absence (see `isRegValueAbsent`,
+     * locale-aware; the same tolerance the `reg delete` above enjoys) reads
+     * `false`.
      */
     async read(): Promise<boolean> {
       const plan = planFor(true);
@@ -113,7 +135,7 @@ export function createWinStartup(options: WinStartupOptions): ISystemStartupPort
       }
       const result = await runReg(['query', plan.registryPath, '/v', valueName]);
       if (result.code === 0) return parseRegQueryValue(result.stdout, valueName) !== null;
-      if (/unable to find/i.test(result.stderr)) return false;
+      if (isRegValueAbsent(result)) return false;
       throw new Error(`autostart read failed: reg exited ${result.code}`);
     },
   };

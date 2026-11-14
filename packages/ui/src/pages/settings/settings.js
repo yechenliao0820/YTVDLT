@@ -403,16 +403,25 @@
 
   function checkEngine() {
     var button = doc.getElementById('settings-engine-check');
+    // D-190: remember the pre-click state. The trailing `.then` that re-enables
+    // the button is skipped by the null (no bridge / throwing invoke) branch,
+    // which used to leave both engine buttons disabled until a page reload.
+    var wasDisabled = button === null ? false : button.disabled;
     if (button !== null) button.disabled = true;
     setComponentState('checking', t('settings.app.checking'));
     var pending = invokeBridge(COMPONENT_CHANNELS.check, {});
     if (pending === null) {
+      if (button !== null) button.disabled = wasDisabled;
       setComponentState('offline', offlineText());
       return;
     }
     Promise.resolve(pending).then(function (report) {
-      var result = report && Array.isArray(report.results) ? report.results[0] : null;
-      if (result === null) {
+      // D-190: `{results: []}` yields `undefined`, not `null`; reading
+      // `result.error` from that threw a TypeError which reached the user as a
+      // raw English exception string. Guard both empty arrays and sparse holes.
+      var results = report && Array.isArray(report.results) ? report.results : [];
+      var result = results.length > 0 ? results[0] : null;
+      if (result === null || result === undefined) {
         setComponentState('failed', t('settings.engine.unknown'));
         return;
       }
@@ -437,10 +446,14 @@
 
   function runComponentUpdate() {
     var button = doc.getElementById('settings-engine-update');
+    // D-190: same early-return trap as checkEngine — restore the pre-click
+    // state instead of leaving the button disabled forever.
+    var wasDisabled = button === null ? false : button.disabled;
     if (button !== null) button.disabled = true;
     setComponentState('running', t('settings.engine.updating'));
     var pending = invokeBridge(COMPONENT_CHANNELS.update, {});
     if (pending === null) {
+      if (button !== null) button.disabled = wasDisabled;
       setComponentState('offline', offlineText());
       return;
     }
@@ -864,9 +877,18 @@
     if (appAuto !== null) {
       appAuto.checked = settingsInjected().autoCheckAppUpdate !== false;
       appAuto.addEventListener('change', function () {
+        // D-190: mirror the autostart switch — a rejected SETTINGS_SET used to
+        // be an unhandled rejection and left the checkbox lying about config.
         var bridge = global.ytvdltBridge;
         if (bridge && typeof bridge.invoke === 'function') {
-          try { bridge.invoke('ytvdlt:settings:set', { autoCheckAppUpdate: appAuto.checked }); } catch (error) { /* offline */ }
+          try {
+            var pending = bridge.invoke('ytvdlt:settings:set', { autoCheckAppUpdate: appAuto.checked });
+            if (pending && typeof pending.catch === 'function') {
+              pending.catch(function () { appAuto.checked = !appAuto.checked; });
+            }
+          } catch (error) {
+            appAuto.checked = !appAuto.checked;
+          }
         }
       });
     }
@@ -874,9 +896,17 @@
     if (engineAuto !== null) {
       engineAuto.checked = settingsInjected().autoCheckEngineUpdate !== false;
       engineAuto.addEventListener('change', function () {
+        // D-190: same failure contract as appAuto / autostart.
         var bridge = global.ytvdltBridge;
         if (bridge && typeof bridge.invoke === 'function') {
-          try { bridge.invoke('ytvdlt:settings:set', { autoCheckEngineUpdate: engineAuto.checked }); } catch (error) { /* offline */ }
+          try {
+            var pending = bridge.invoke('ytvdlt:settings:set', { autoCheckEngineUpdate: engineAuto.checked });
+            if (pending && typeof pending.catch === 'function') {
+              pending.catch(function () { engineAuto.checked = !engineAuto.checked; });
+            }
+          } catch (error) {
+            engineAuto.checked = !engineAuto.checked;
+          }
         }
       });
     }

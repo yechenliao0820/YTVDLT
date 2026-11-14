@@ -2051,3 +2051,53 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 按坑 33 / D-158 既定修法在**测试输入边界归一化行尾**（`readFileSync(...)` 后 `.replace(/\r\n/g, '\n')`，注明缘由），断言零改动；全测试目录扫描确认无第二个同款切片器（源码读取 + indexOf 组合仅此一处）。 |
 | 验证 | 本机该文件 4/4；CRLF 复现实验（LF 下标记匹配 true / CRLF 未归一 false）；全量 2649/0；CI 重跑通过（同 PR）。 |
 | 未覆盖 | ① 未来新增源码切片测试必须同样在输入边界归一化（坑 33 已载明）；② 仓库级 `*.js/*.ts eol=lf` 全量钉定未做（影响面大，另行决策）。 |
+
+## D-190 · 2026-11-14 · UI 存量缺陷修复：D-187 首次执行 UI 代码暴露的 11 条
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-187 把 `packages/ui` 纳入 v8 覆盖率后新增的行为测试第一次真正执行 UI 源码，暴露 11 条存量缺陷（BUG-U1…U8、U10…U12），均非本轮引入。按根因分三类：**① 分支复制后方向/属性未对齐** —— U1 `queue.js::sortTasks` 的 `oldest` 分支与 `newest` 兜底逐字同为 `copy.reverse()`，而注释自证「列表按最旧在前到达」，用户选「最早优先」得到反序；U2 `patchProgress` 的 working 增量补丁只改阶段行文本与 `data-progress`，卡片根 `data-stage` 滞后到下次全量重绘（全量 `card()` 路径是写的）。**② Promise 失败路径缺守卫** —— U3 `settings.js::checkEngine` 对 `{results: []}` 取 `[0]` 得 `undefined` 却只判 `=== null`，`result.error` 抛 TypeError，经 `.catch` 兜成英文异常串给用户；U4 `appAuto`/`engineAuto` 的 `SETTINGS_SET` fire-and-forget 无 `.catch`（主进程拒绝即 unhandled rejection）；U5 `checkEngine`/`runComponentUpdate` 的无桥分支提前 return，跳过末尾恢复按钮的 `.then`，两个引擎按钮永久禁用；U6 `supported-sites.js::load` 的 `.then` 无 `.catch`，通道 reject 后 `loading` 恒 true、refresh 永久禁用；U7 `update-dialog.js::apply({})` 时 `latest` 为 `undefined`，`=== null` 漏判后 `latest.version` 在轮询 promise 里抛错，弹窗静默冻结且无可见错误。**③ 模块单例状态与 DOM 不同步** —— U8 `playlist-batch.js` 的模块级 `model` 只在 import 时赋值，公开的 `render()` 不回写，重渲染后点击 emit 首次 import 的旧选择；U12 `playlist-import.js` 预览挂起期间已把 `currentPreviewId` 清空，取消时手里没有票据 id，陈旧答复被丢弃后主进程票据只靠 5 min TTL 回收。另：U10 UI 版 `isEditingTarget` 未归一 `tagName`/未查类型，与 `core` 版漂移（真实 DOM 恒大写，无用户可见影响）；U11 `task-detail.js::invoke` 的 `bridge === null` 分支不可达（live 页 import 定格有桥、静态页不调 invoke），属死代码。 |
+| 根因 | 三层：① 成功路径写全、失败路径（reject / 空数组 / 畸形 DTO / 无桥）从未被当输入；② 全量渲染与增量补丁两套路径各自维护属性，补丁路径漏同步；③ 工厂/IIFE 模块的单例变量与公开重渲染入口之间没有回写约定。U10/U11 是镜像漂移与死代码残留。 |
+| 决策 | 逐条最小修复，不扩大改动面：**U1** `oldest` 改 `return copy`；**U2** working 分支同步 `setAttribute('data-stage', …)`（该路径 live-only，按坑 30 评估不触碰静态 DOM）；**U3** 长度守卫 + `undefined` 守卫，空数组/稀疏洞按「尚未查询远端版本」处理；**U4** 对齐 autostart 既有先例补 `.catch` 回拨复选框；**U6** 抽 `fail(code)` 复用既有稳定失败码呈现，成功/拒绝两条路径同归；**U7** 加 `hasLatest()` 形状守卫，`apply`/`paint`/`rememberSessionDismiss` 三处同治（只做渲染层守卫，未改主进程契约层 schema）；**U10** 对齐 `core` 版 `typeof === string && toUpperCase()`；**U11** 删死分支，保留 `try/catch` 兜底。**三处不照抄任务单建议修法**：① **U5** 恢复「点击前」状态而非无条件 `disabled=false` —— 离线时启用一个必然失败的按钮会引入新 bug，且会推翻 `ui-settings-page.test.ts` 已钉住的「无桥按钮保持禁用」语义；② **U8** 让 `render()` 回写模块级 `model`（闭包持的是变量绑定而非值快照），不重绑监听 —— 重绑会叠加监听器，比原问题更糟；③ **U12** 任务单建议「cancel 路径补 `PLAYLIST_PREVIEW_CANCEL`」不成立（cancel 时 `currentPreviewId===''`，无 id 可发），改为 `cancel()` 递增 `generation` 作废挂起预览、陈旧答复落地时按 `reply.previewId` 主动发 CANCEL，失败/空答复不误发。另核实主进程 `PlaylistPreviewService` 有同 URL in-flight 去重，U12 的真实影响是**孤儿票据**而非重复探测，跨 URL 才会两个 probe 并跑。**U3 附带纠正一条既有断言**：D-187 轮把「空数组显示 TypeError」当现状钉住；修复后该断言改为「显示稳定文案且不含 TypeError」，方向更严，不是改松。全部回归用例落在既有 11 个测试文件内，**未新增测试文件**，故 `M3_TEST_FILE_MAP` 无需登记。 |
+| 验证 | `typecheck` 5/5 successful；定向 11 个相关测试文件 **382/382**；全量 `npm test` **165 文件 / 2660 用例 / 0 failed**，覆盖率 **93.43 / 86.66 / 93.41 / 93.43**（基线 93.42 / 86.63 / 93.4 / 93.42，四维均 ≥70 且未下调门限）；`run-e2e.mjs` **31/31 case + 5/5 反例，全部 0 px、零基线重建**（坑 30 动态行为路线）；`acceptance.mjs --milestone M5` **allGreen=true**（56/59 PASS + 3 deferred、10/10 gates）；`handoff-check.mjs` 干净。冻结面零改动：`request.ts`、`electron-builder.yml`、`package.json`、`vitest.config.ts` diff 均为空。 |
+| 未覆盖 | ① U8 当前生产页面一次性加载，不触发重渲染，修复的是公开 `render()` 面的未来安全性，真机无用户可见路径；② U11 属卫生清理、无行为变化，若将来有非 live 路径调用 `invoke()`，现有 `try/catch` 仍会归一化成 `ok:false`；③ U12 释放票据依赖答复最终到达，通道彻底失联仍由主进程 5 min TTL 兜底，跨 URL 竞态未做真机窗口验证；④ U7 只在渲染层做形状守卫，主进程契约层未加 schema 校验；⑤ 全部为离线受控测试，未在真机 Electron 窗口点击复现。 |
+
+## D-191 · 2026-11-14 · BUG-U9 核验结论：zh-CN 默认分支零写入是冻结契约，不改源码
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 任务单登记：`i18n.js::apply()` 在默认语言 zh-CN 分支提前 return，不写 `lang`/`data-lang`、不回写中文；称「en 状态下动态切回 zh 停留英文」，建议「默认分支同样复位 DOM」。核验后确认**代码现象属实，但它不是缺陷**。 |
+| 根因 | 该提前 return 是刻意的冻结纪律：`i18n.js` 头注释明写「M3 dialogs are frozen baselines, so the Chinese rendering may not change by a single pixel: `apply()` therefore writes NOTHING when the locale is the default `zh-CN`」；手册 §9 坑 30 要求动态行为改动不得触碰静态 DOM；`settings.js::switchLocale` 的主链路本来就是 `location.replace()` 整页重载（注释：「i18n.js only translates forward (zh -> en)」）。`PHRASES` 是单向 zh→en 短语表，没有反表可把英文回写中文；e2e 基线里的 `<html lang="zh-CN">` 是静态 HTML 自带属性，不是 i18n 写的。 |
+| 决策 | **不改源码**。按建议修会同时造成三个回归：① 推翻 `ui-i18n-runtime.test.ts` 两条既有断言（`:262` 「zh-CN 默认语言零写入」、`:281` 「en 应用后再 apply(zh-CN) 也不改 DOM」），违反「不许改松/跳过既有断言」硬规则；② 给全部 zh 基线加上 `data-lang="zh-CN"` 属性，触发 31 张基线重建，与「零基线重建」验收目标直接冲突；③ 即便写了属性也无法真正「回写中文」，反而制造「属性是中文、正文是英文」的第三种真相。任务单标注的「主链路是整页重载」已由 `settings.js` 源码复核，动态 en→zh 的生产路径不存在。判定结论写入任务单 §6 与 `DECISIONS.md`，不改 `i18n.js`、不改测试。 |
+| 验证 | `ui-i18n-runtime.test.ts` 全部用例通过（含上述两条冻结断言）；`run-e2e.mjs` 31/31 case 全部 0 px、DOM 快照一致；`grep` 全仓无 `i18n.apply(` 的外部动态调用方；全量 `npm test` 2660/0。 |
+| 未覆盖 | ① 若将来真的引入「整页不重载的动态语言切换」，需要同时补 en→zh 反表（或保存原 DOM）并按 §7 逐 case 重建基线，属独立设计决策；② 未评估非默认语言（en）之外的第三种 locale，当前 `normalizeLocale` 只会归一到 `en`/`zh-CN`。 |
+
+## D-192 · 2026-11-14 · 两处下载入口的 kind 严格枚举校验（外部审计 N-01 / BUG-U13）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `m5-channels.ts` 的 `DOWNLOAD_START`（原 `:1205`）与 `PLAYLIST_BATCH_ENQUEUE`（原 `:1643`）用 `record['kind'] === 'audio' ? 'audio' : 'video'` 取值：任何非 `'audio'` 的无效值（拼写错误、大小写、数字、null）都被**静默当成 video**，可能执行错误类型的下载且不报参数错。TXT 入口 `TXT_IMPORT_ENQUEUE`（`:1390-1396`）已有严格守卫（§5 rule 1），另两个入口未对齐。审计来源：外部 AI 审计 N-01，本轮逐行核实属实。 |
+| 根因 | 枚举校验按通道逐个补，TXT 是较晚新增的通道所以带了守卫；单视频与播放列表两个早期入口沿用「宽松兜底」写法，与 §5 rule 1「越界枚举是协议失败，不是静默降级」不一致。 |
+| 决策 | 两处入口在取 `kind` 前照抄 TXT 守卫：`if (rawKind !== undefined && rawKind !== 'video' && rawKind !== 'audio') throw new Error('[m5-ipc] invalid kind');`，随后用 `rawKind === 'audio' ? 'audio' : 'video'`。**`undefined → 默认 video` 保持不变**（向后兼容既有调用方）；守卫位于票据 `consume()` 之前，越界值不会烧掉预览票据。`PAYLOAD_KEYS` 白名单、`request.ts`、`electron-builder.yml` 均未改。补 4 条用例：两通道的越界拒绝矩阵（含字符串/数字/null）+ kind 缺省落 video、合法 audio 透传。 |
+| 验证 | `m5-channels.test.ts` 与 `playlist-batch-ipc.test.ts` 定向全绿；全量 `npm test` 2660/0；`typecheck` 5/5；M5 acceptance allGreen=true（10/10 gates）。 |
+| 未覆盖 | ① 主进程其它早期通道的枚举是否还有同类宽松兜底未做全量审计（本轮只覆盖审计点名的两处）；② 未做真机窗口对无效 payload 的端到端复现，验证停留在 handler 边界单测。 |
+
+## D-193 · 2026-11-14 · 收紧 D-184 封链的 fail-open 边界（外部在线审计 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 在线审计 P1：D-184「产物只认任务自己的输出根」的**入库主门**（`TaskQueue.acceptContainedArtifacts`）与**动作前副门**（`m5-channels` 的 withFiles 删除、`TaskDetailService.open`）的 roots **都来自同一条 `TaskRecord.request.paths`**。而 `task-store.sanitizeRecord()` 只校验 request 五个域是对象（D-161），`paths: {}`、三个目录字段全空/全无效、甚至 `videoDir: 'C:/'` 都能通过形状校验；`artifactRootsOf()` 返回空数组（或过宽根），`isPathInsideRoots()` 在空 roots 上刻意 fail-open → 两道门同时失效，任意路径（`C:/Windows/...`）可入库、进回收站、被 shell 打开。既有测试 `task-queue-containment.test.ts` 把「degenerate request without any roots fails open」当现状钉住；`artifact-containment-actions.test.ts` 也钉住了 request-less 记录的 fail-open。触发条件是本地快照被改/损坏/恢复异常后再点 remove/open，不是远程无条件，故审计定 P1 而非 P0。D-184 决策「未覆盖③」已预言此形态（「若未来出现 request 存在但三个路径字段全部不可用的形态会静默放行」）。 |
+| 根因 | ① fail-open 容错的**适用对象**被写成了「roots 为空」这一运行期结果，而不是「记录根本没有 request」这一数据事实；② 两道门共享同一信任源，缺一个独立的合理性校验；③ 形状校验只看「五个域是对象」，不看 `paths` 内部是否至少有一个可用且**具体**的目录。 |
+| 决策 | 新增 `path-resolver/containment.ts::isSpecificRoot()` 与 `trustedArtifactRoots()`：过滤掉过宽根（Windows 卷根 `c:`、POSIX `/`、裸 UNC 共享 `//host/share`），无任何可用根返回 `null`。三处消费方统一改为「记录**有** request 但 `roots === null` → fail-closed」：入库层把整批产物判为拒绝并转 `ARTIFACT_INCOMPLETE`/`Error`（沿用既有拒绝日志与文案，不新增错误码）；withFiles 删除整批拒绝（`FILE_DELETE_FAILED` + 「任务输出目录不可判定」真实理由，零回收、记录保留）；open 返回 `REFUSED`、shell 零调用。**`request === null` 的 legacy 记录仍 fail-open**，保持 D-120/D-184 冻结语义（既有两条测试钉住，本轮再补一条显式不回归）。不改 `artifactRootsOf()` / `isPathInsideRoots()` 的纯函数语义（有测试钉住 `[]` fail-open），不改 `sanitizeRecord()`——把坏 request 置 null 反而会触发 fail-open，是错误方向。纠正一条把漏洞钉成现状的既有断言（从「放行」改为「拒绝」，方向更严）。**两处独立判断**：① 审计提到「roots 都来自同一条记录」，根治需引入当前 config 下载目录作独立信任源；但用户改过下载目录后，历史任务会全部被误拒，改动面与回归风险远大于收益，故不做，改用「根必须具体」的合理性校验提高篡改门槛。② 过宽根过滤会让「把下载目录设成盘符根 / UNC 共享根」的极端配置无法打开或删除历史产物——该配置下 D-182 封链本就形同虚设，判为安全侧失败可接受；正常目录（至少一层子目录）零影响。 |
+| 验证 | `typecheck` 5/5；定向 14 个相关测试文件 **265/265**；新增/纠正用例覆盖：纯函数过宽根矩阵、空/全无效/全过宽 paths、混合根保留具体根、入库层整批拒绝转 Error + 不写历史 + WARNING、withFiles 零回收且记录保留、open REFUSED 且 shell 零调用、盘符根绕过被拒、legacy fail-open 不回归。未新增测试文件，`M3_TEST_FILE_MAP` 无需登记。 |
+| 未覆盖 | ① 若攻击者已有本地写权限，可把 `artifacts` 与 `paths` 同时改成一致的具体目录（如都指向 `C:/Windows`），纯软件自校验无法根治——需要外部信任源或签名快照，属独立设计决策；② 未在真机 Electron 窗口复现回收站删除（铁律 9）；③ UNC 共享**根**被判过宽，若用户确实把 NAS 共享根设为下载目录，需改为在配置层拒绝该设置并给出提示，本轮未做。 |
+
+## D-194 · 2026-11-14 · 中文 Windows 开机自启「值不存在」判断（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 在线审计 P2：`win-startup.ts` 的 `apply()` 与 `read()` 都用 `/unable to find/i.test(result.stderr)` 判定「Run 值已不存在」。中文 Windows 的 `reg.exe` 输出本地化文案（简中 `错误: 系统找不到指定的注册表项或值。`、繁中 `錯誤: 系統找不到指定的登錄機碼或值。`，日文亦不同），正则不命中 → `read()` 抛 `autostart read failed`，上层回落 config 镜像，开关可能显示旧值；`apply(false)` 把「值已不存在」这个本已是目标态的结果报成失败。仅中文 Windows + Run 值已不存在时触发，无数据丢失。 |
+| 根因 | 把**英文文案**当成「值不存在」这一结构化事实的代理；退出码 1 与空 stdout 才是与语言无关的信号，但原实现完全没用。 |
+| 决策 | 抽出导出的纯函数 `isRegValueAbsent(result)`：`code === 1` 且 stderr 正向命中多语言「未找到」词表（`unable to find` / `找不到` / `不存在` / `未找到` / `見つかりません`）。**刻意保持正向且窄**：未知语言仍 fail-closed（抛错/报失败，安全侧），`Access is denied.` 等真错误绝不被误吞。两处调用点统一替换，不再各自写正则。另按铁律 13 / D-181 的收尾规则，把 `README.md`「(now at D-187)」与 `README.zh-CN.md`「（已到 D-187）」两份镜像指针同步到本轮实际最大编号 **D-194**（全仓扫描确认只有这两行是「当前编号」指针，其余 D-xx 均为历史叙述引用；`docs/CHANGELOG.md` 维护方式第 3 条「不回头改历史行」，故审计提到的「未提交/未发版」历史行**不改**）。 |
+| 验证 | `win-startup.test.ts` 新增 4 例：英/简中/繁中/日文案正向识别、`apply(false)` 成功终态、`read()` 返回 false 不再抛错回落、真错误（拒绝访问/未知语言/成功退出）仍 fail-closed；定向 14 文件 265/265；`typecheck` 5/5。 |
+| 未覆盖 | ① 德/法/俄等未列入词表的 locale 仍会抛错回落 config（fail-closed，无错删风险），若需全覆盖应改为「退出码 1 + stdout 空 + 排除已知权限/语法错误」的结构化判定，另行决策；② 未在真实中文 Windows 上跑 `reg.exe` 验证文案逐字形态，词表依据系统本地化文案与注入式测试替身；③ 未覆盖 `reg.exe` 把诊断写到 stdout 而非 stderr 的非标准构建。 |

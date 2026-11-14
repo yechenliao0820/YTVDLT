@@ -212,3 +212,57 @@ describe('D-182 · open actions refuse an outside target (core task-detail)', ()
     expect(h.shellCalls).toEqual([{ op: 'open', path: 'C:/Windows/evil.mp4' }]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// D-193 · 在线审计 P1：恢复/损坏快照不得让两道门同时失效
+// 两道门的 roots 都来自同一条记录；request 存在但 paths 无可用根时，
+// 旧的 fail-open 会让任意路径进回收站 / 被 shell 打开。
+// ---------------------------------------------------------------------------
+describe('D-193 · damaged/restored snapshots cannot bypass the action gate', () => {
+  /** A record WITH a request (so it is not the legacy fail-open case). */
+  const damaged = (overrides: Partial<DownloadRequest['paths']>): TaskRecord => {
+    const base = record(['C:/Windows/evil.mp4']);
+    return { ...base, request: { ...REQUEST, paths: { ...REQUEST.paths, ...overrides } } };
+  };
+
+  it('paths 三个目录全空 → withFiles 整批拒绝，零回收且记录保留', async () => {
+    const h = await harness(damaged({ videoDir: '', audioDir: '', tempDir: '' }));
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
+      taskId: 't1', action: 'remove', withFiles: true,
+    });
+    expect(result['ok']).toBe(false);
+    expect(result['code']).toBe('FILE_DELETE_FAILED');
+    expect(String(result['message'])).toContain('不可判定');
+    expect(h.trashCalls).toEqual([]);
+    expect(h.performCalls).toEqual([]);
+    expect(h.recordGone()).toBe(false);
+  });
+
+  it('paths 被改成盘符根 → 同样拒绝（不能让 inside 等于整盘）', async () => {
+    const h = await harness(damaged({ videoDir: 'C:/', audioDir: '', tempDir: '' }));
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
+      taskId: 't1', action: 'remove', withFiles: true,
+    });
+    expect(result['ok']).toBe(false);
+    expect(h.trashCalls).toEqual([]);
+    expect(h.recordGone()).toBe(false);
+  });
+
+  it('损坏快照的 open-file 返回 REFUSED，shell 零调用', async () => {
+    const h = await harness(damaged({ videoDir: '', audioDir: '', tempDir: '' }));
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, { taskId: 't1', action: 'open-file' });
+    expect(result['ok']).toBe(false);
+    expect(result['code']).toBe('REFUSED');
+    expect(h.shellCalls).toEqual([]);
+  });
+
+  it('request-less legacy 仍保持 D-120 fail-open（收紧没有误伤既有契约）', async () => {
+    const h = await harness(record(['C:/Windows/evil.mp4'], false));
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
+      taskId: 't1', action: 'remove', withFiles: true,
+    });
+    expect(result['ok']).toBe(true);
+    expect(h.trashCalls).toEqual([['C:/Windows/evil.mp4']]);
+    expect(h.recordGone()).toBe(true);
+  });
+});

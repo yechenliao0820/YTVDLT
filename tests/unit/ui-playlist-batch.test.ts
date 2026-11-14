@@ -284,4 +284,18 @@ describe('D-187 · playlist-batch：emit 契约（页面绝不启动下载，只
     const emitted = JSON.parse(node('ytvdlt-output').textContent);
     expect(emitted.taskIds).toEqual(['PL_fixture_01-a1']);
   });
+
+  it('D-190：重调 render() 后点击 emit 的是最新模型，不再锁死首次 import 的选择', async () => {
+    const fresh = await reloadBatch('', REAL_PLAYLIST_FIXTURE);
+    // 引导模型是全选；改变查询参数后走公开的 render() 重渲染。
+    win().location.search = '?selected=a3';
+    node('batch-rows').children.length = 0;
+    const next = fresh.render();
+    expect(next.ids).toEqual(['a3']);
+    // 按钮闭包读的是模块级 model 变量：修复后 render() 已把它回写。
+    node('batch-enqueue').dispatch('click');
+    const emitted = JSON.parse(node('ytvdlt-output').textContent);
+    expect(emitted.taskIds).toEqual(['PL_fixture_01-a3']);
+    win().location.search = '';
+  });
 });

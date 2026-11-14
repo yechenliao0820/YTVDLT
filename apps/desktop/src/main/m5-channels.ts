@@ -25,7 +25,7 @@ import type {
 } from '@ytvdlt/shared';
 import {
   ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES, STAR_PROMPT_ACTIONS,
-  artifactRootsOf, buildTaskListSnapshot, classifyFailure, isPathInsideRoots, maskUrlSecrets,
+  buildTaskListSnapshot, classifyFailure, isPathInsideRoots, maskUrlSecrets, trustedArtifactRoots,
   mergeSubtitleChoice,
   normalizeHexColor, normalizeLanguageCode, normalizeThemeMode, normalizeMotionMode, parseAccent,
   type SubtitleChoice,
@@ -1040,8 +1040,21 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       // the record is kept and the reason is reported) — deleting a foreign
       // file is the one error that cannot be undone. Records without a request
       // cannot be judged and keep the frozen D-120 semantics.
-      const removalRoots = artifactRootsOf(target?.request?.paths ?? {});
-      const refused = artifacts.filter((path) => !isPathInsideRoots(path, removalRoots));
+      const hasRequest = target?.request !== null && target?.request !== undefined;
+      const removalRoots = trustedArtifactRoots(target?.request?.paths ?? {});
+      // D-193: the fail-open tolerance belongs to request-less legacy records
+      // ONLY. A record WITH a request but no trustworthy roots is a damaged /
+      // restored snapshot: empty roots would let ANY path into the recycle bin,
+      // and both gates derive their roots from this same record.
+      if (hasRequest && removalRoots === null) {
+        return {
+          action: 'remove', ok: false, code: 'FILE_DELETE_FAILED', failureKind: 'file-cleanup',
+          reason: '任务输出目录不可判定，为防止误删已拒绝回收',
+          message: '本地文件清理失败：任务输出目录不可判定，为防止误删已拒绝回收；任务记录已保留',
+          failedCount: artifacts.length,
+        };
+      }
+      const refused = artifacts.filter((path) => !isPathInsideRoots(path, removalRoots ?? []));
       if (refused.length > 0) {
         return {
           action: 'remove', ok: false, code: 'FILE_DELETE_FAILED', failureKind: 'file-cleanup',
@@ -1202,7 +1215,13 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     if (!/^https?:\/\//i.test(url)) {
       throw new Error('[m5-ipc] DOWNLOAD_START requires an http(s) url');
     }
-    const kind: DownloadKind = record['kind'] === 'audio' ? 'audio' : 'video';
+    // D-190 / §5 rule 1: an out-of-range enum is a protocol failure, not a
+    // silent downgrade to `video`. Same guard TXT_IMPORT_ENQUEUE already had.
+    const rawKind = record['kind'];
+    if (rawKind !== undefined && rawKind !== 'video' && rawKind !== 'audio') {
+      throw new Error('[m5-ipc] invalid kind');
+    }
+    const kind: DownloadKind = rawKind === 'audio' ? 'audio' : 'video';
     const rawQuality = record['quality'];
     const rawAudioQuality = record['audioQuality'];
     const rawAudioFormat = record['audioFormat'];
@@ -1504,6 +1523,12 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
         }
       }
     }
+    // D-190 / §5 rule 1: same strict `kind` enum guard as DOWNLOAD_START and
+    // TXT_IMPORT_ENQUEUE; an invalid value must not silently become `video`.
+    const rawKind = record['kind'];
+    if (rawKind !== undefined && rawKind !== 'video' && rawKind !== 'audio') {
+      throw new Error('[m5-ipc] invalid kind');
+    }
     const rawQuality = record['quality'];
     const rawAudioQuality = record['audioQuality'];
     const rawAudioFormat = record['audioFormat'];
@@ -1640,7 +1665,7 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
     const report = await deps.playlistBatch({
       selectedIds: enqueueIds,
       playlistUrl: url,
-      kind: record['kind'] === 'audio' ? 'audio' : 'video',
+      kind: rawKind === 'audio' ? 'audio' : 'video',
       playlist,
       ...(rawQuality === undefined ? {} : { quality: rawQuality as VideoQualityChoice }),
       ...(rawAudioQuality === undefined ? {} : { audioQuality: rawAudioQuality as AudioQualityChoice }),

@@ -177,16 +177,36 @@ describe('D-182 intake gate · legitimate artifacts are never dropped', () => {
     expect(queue.get('t1')?.artifacts).toEqual(['c:\\VIDEOS\\Title.MP4']);
   });
 
-  it('a degenerate request without any roots fails open (documented rule)', async () => {
+  it('D-193 · request 存在但三个路径全不可用 → 整批拒绝转 Error（不再 fail-open）', async () => {
+    // 修前这条用例把「空 roots 静默放行任意路径」当现状钉住，正是 D-184
+    // 未覆盖③ 与本次在线审计 P1 指出的绕过路径。收紧后方向更严。
     const bare = request();
     const noRoots: DownloadRequest = {
       ...bare,
       paths: { ...bare.paths, videoDir: '', audioDir: '', tempDir: '' },
     };
-    const { queue } = setup(['C:/anywhere/a.mp4'], noRoots);
+    const { mem, queue, history } = setup(['C:/anywhere/a.mp4'], noRoots);
     await queue.enqueue({ ...record(), request: noRoots });
     await tick();
-    expect(queue.get('t1')?.state).toBe('Completed');
-    expect(queue.get('t1')?.artifacts).toEqual(['C:/anywhere/a.mp4']);
+    const task = queue.get('t1');
+    expect(task?.state).toBe('Error');
+    expect(task?.error?.code).toBe('ARTIFACT_INCOMPLETE');
+    expect(task?.artifacts).toEqual([]);
+    expect(await history.get('t1')).toBeNull();
+    expect(outsideWarnings(mem)).toHaveLength(1); // 拒绝有日志，不静默
+  });
+
+  it('D-193 · 快照把输出根改成盘符根也不能放行整盘', async () => {
+    const bare = request();
+    const wide: DownloadRequest = {
+      ...bare,
+      paths: { ...bare.paths, videoDir: 'C:/', audioDir: '', tempDir: '' },
+    };
+    const { queue, history } = setup(['C:/Windows/evil.mp4'], wide);
+    await queue.enqueue({ ...record(), request: wide });
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Error');
+    expect(queue.get('t1')?.artifacts).toEqual([]);
+    expect(await history.get('t1')).toBeNull();
   });
 });

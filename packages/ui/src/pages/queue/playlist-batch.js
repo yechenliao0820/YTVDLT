@@ -134,7 +134,13 @@
     button.setAttribute('aria-disabled', rows.length === 0 || errorMode ? 'true' : 'false');
     button.setAttribute('data-confirm', rows.length === 0 || errorMode ? 'disabled' : 'enabled');
 
-    return { playlist: playlist, rows: rows, concurrency: concurrency, ids: ids };
+    var next = { playlist: playlist, rows: rows, concurrency: concurrency, ids: ids };
+    // D-190: `YTVDLTBatch.render()` is a public re-render surface. The click
+    // listener closes over the module-level `model` variable (a binding, not a
+    // snapshot), so every render must refresh it; otherwise a programmatic
+    // re-render followed by a click emits the selection from first import.
+    model = next;
+    return next;
   }
 
   function emit(model) {
@@ -152,7 +158,8 @@
     }, null, 2);
   }
 
-  var model = render();
+  var model = null;
+  render(); // populates `model` (see the assignment at the end of render()).
   var button = doc.getElementById('batch-enqueue');
   if (button !== null) {
     button.addEventListener('click', function () { emit(model); });

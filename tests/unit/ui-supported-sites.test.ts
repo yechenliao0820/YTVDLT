@@ -448,6 +448,37 @@ describe('失败呈现：绝不把失败渲染成空名单', () => {
     // timeout / unavailable / empty / tooLarge / failed 是五种不同处境
     expect(texts.size).toBe(5);
   });
+
+  it('D-190：SUPPORTED_SITES 通道 reject → 落失败态、控件禁用、refresh 可重试', async () => {
+    let rejected = true;
+    const calls: Array<{ channel: string; payload: any }> = [];
+    const call = (channel: string, payload?: unknown): Promise<unknown> => {
+      calls.push({ channel, payload });
+      // 修复前 `.then(...)` 没有 .catch：拒绝后 loading 恒 true、refresh 永久禁用。
+      return rejected
+        ? Promise.reject(new Error('channel down'))
+        : Promise.resolve(catalogDto({}));
+    };
+    const panel = sites.create({ doc, t, call });
+    const h: Panel = { panel, calls, setResponder: () => {} };
+    const { overlay } = opened(h);
+    expect(panel.stateOf()).toBe('loading');
+    await flush();
+    expect(panel.stateOf()).toBe('failed');
+    expect(byIdIn(overlay, 'sites-status').textContent).toBe(MESSAGES['sites.error.failed']);
+    expect(listRows(overlay)).toHaveLength(0);
+    expect(byIdIn(overlay, 'sites-search').disabled).toBe(true);
+    expect(byIdIn(overlay, 'sites-sort').disabled).toBe(true);
+    expect(byIdIn(overlay, 'sites-refresh').disabled).toBe(false);
+
+    // 失败不是终局：切回成功应答，点刷新应重新查询并进入 ready。
+    rejected = false;
+    byIdIn(overlay, 'sites-refresh').dispatch('click', { preventDefault() {} });
+    await flush();
+    expect(panel.stateOf()).toBe('ready');
+    expect(rowNames(overlay)).toEqual(['youtube']);
+    expect(calls.filter((c) => c.channel === 'SUPPORTED_SITES')).toHaveLength(2);
+  });
 });
 
 describe('refresh 按钮：只带 refresh:true；进行中禁用并吞并发', () => {

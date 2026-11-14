@@ -456,6 +456,10 @@
       // D-115: `working` has no numbers to patch, but merging → finalizing
       // changes the copy, so it is patched here instead of forcing a re-render.
       if (mode === 'working') {
+        // D-190: the full-render `card()` path writes the stage on the CARD
+        // root. Keep the in-place patch in sync, otherwise merging -> verifying
+        // leaves `data-stage` stale until the next full repaint.
+        if (isStage(task.stage)) node.setAttribute('data-stage', task.stage);
         var stageLine = findByClass(node, 'card-progress');
         if (stageLine !== null) {
           stageLine.textContent = stageText(task.stage);
@@ -1321,7 +1325,9 @@
   /** D-87: display order is view-only — the queue itself is never reordered. */
   function sortTasks(list) {
     var copy = list.slice();
-    if (model.sort === 'oldest') return copy.reverse();
+    // D-190: the list arrives oldest-first, so "最早优先" must keep the
+    // arrival order. Reversing here made it byte-identical to "newest".
+    if (model.sort === 'oldest') return copy;
     if (model.sort === 'name') {
       return copy.sort(function (a, b) { return String(a.title).localeCompare(String(b.title)); });
     }
