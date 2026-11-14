@@ -236,7 +236,7 @@ Error（D-142），以及外部审计四项修复：出站连接 DNS 钉扎（D-
 有界化（D-144）、配置「原子写入」真替换（D-145）、详情页取消按钮对齐（D-146）
 ——记在
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) 与
-[`docs/DECISIONS.md`](docs/DECISIONS.md)（已到 D-194）。
+[`docs/DECISIONS.md`](docs/DECISIONS.md)（已到 D-196）。
 
 版本流水见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)，每条决策的现象 / 根因 /
 取舍 / 验证见 [`docs/DECISIONS.md`](docs/DECISIONS.md)。

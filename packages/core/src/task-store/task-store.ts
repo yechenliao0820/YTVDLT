@@ -121,10 +121,17 @@ function sanitizeRecord(
   }
 
   // `request`: all five domains must be objects, or nothing may be reused.
+  // D-195: a request that fails this check is NOT a legacy request-less record.
+  // Keeping `artifacts` would turn it into one at the next boot — the action
+  // layer deliberately fails open for request-less legacy records (D-120), so
+  // an untrusted path from a damaged snapshot could then reach the recycle
+  // bin without any ownership verdict. Drop the paths WITH the unusable
+  // request; the task itself (url / state / history) survives. One `fix()`
+  // keeps `repaired` at 1, matching the D-161 diagnostic contract.
   if (raw.request !== null && raw.request !== undefined) {
     const request = raw.request;
     if (!isObjectRecord(request) || REQUEST_DOMAINS.some((domain) => !isObjectRecord(request[domain]))) {
-      fix((r) => { r.request = null; });
+      fix((r) => { r.request = null; r.artifacts = []; });
     }
   }
 

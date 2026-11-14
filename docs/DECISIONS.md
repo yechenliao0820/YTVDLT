@@ -2101,3 +2101,27 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 抽出导出的纯函数 `isRegValueAbsent(result)`：`code === 1` 且 stderr 正向命中多语言「未找到」词表（`unable to find` / `找不到` / `不存在` / `未找到` / `見つかりません`）。**刻意保持正向且窄**：未知语言仍 fail-closed（抛错/报失败，安全侧），`Access is denied.` 等真错误绝不被误吞。两处调用点统一替换，不再各自写正则。另按铁律 13 / D-181 的收尾规则，把 `README.md`「(now at D-187)」与 `README.zh-CN.md`「（已到 D-187）」两份镜像指针同步到本轮实际最大编号 **D-194**（全仓扫描确认只有这两行是「当前编号」指针，其余 D-xx 均为历史叙述引用；`docs/CHANGELOG.md` 维护方式第 3 条「不回头改历史行」，故审计提到的「未提交/未发版」历史行**不改**）。 |
 | 验证 | `win-startup.test.ts` 新增 4 例：英/简中/繁中/日文案正向识别、`apply(false)` 成功终态、`read()` 返回 false 不再抛错回落、真错误（拒绝访问/未知语言/成功退出）仍 fail-closed；定向 14 文件 265/265；`typecheck` 5/5。 |
 | 未覆盖 | ① 德/法/俄等未列入词表的 locale 仍会抛错回落 config（fail-closed，无错删风险），若需全覆盖应改为「退出码 1 + stdout 空 + 排除已知权限/语法错误」的结构化判定，另行决策；② 未在真实中文 Windows 上跑 `reg.exe` 验证文案逐字形态，词表依据系统本地化文案与注入式测试替身；③ 未覆盖 `reg.exe` 把诊断写到 stdout 而非 stderr 的非标准构建。 |
+
+## D-195 · 2026-11-14 · 损坏快照清洗后不得留下无归属产物路径（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 审计定为「发布前最值得处理的一项」：本地 `tasks.json` 里一条任务带任意文件路径、且 `request` **非空但结构非法** → `TaskStore.sanitizeRecord()`（D-161）把 `request` 置 `null` 却**保留 `artifacts`** → 下次启动后该记录被动作层当成「旧版无 request 记录」，而 `m5-channels.ts` 的 withFiles 删除对 `request === null` 刻意 fail-open（D-120 冻结语义）→ 未经归属验证的路径可以进回收站。触发需本地快照损坏/被改 + 用户勾选删除本地文件，不是远程无条件，审计定 P2 而非 P1。核验结论：**属实，且是 D-193 的遗留边界** —— D-193 只处理「request 存在但无可信根」，没处理「清洗把 request 洗成 null」。 |
+| 根因 | D-161 的清洗把「结构损坏的 request」与「真正的旧版无 request」折叠成同一个运行期状态（`request === null`），却没有同时清掉这个状态携带的危险载荷。动作层无法区分两者，只能按 D-120 一律放行。 |
+| 决策 | ① **在清洗层治本**：`sanitizeRecord()` 判定 request 结构非法时，同一个 `fix()` 里同时 `r.request = null; r.artifacts = []`。覆盖所有读 `record.artifacts` 的消费方（withFiles 回收、open-file、fileStatus、详情页），无需改 shared 类型契约；任务本身（url / state / 历史）保留。一次 `fix()` 让 `repaired` 仍为 1，D-161 诊断计数零变化（既有断言钉住）。② **不动动作层的 fail-open**：`request === null` 的旧版记录确实无法判断归属，D-120 明确要求保持旧行为且有测试钉住；改它会让老用户删不掉历史文件，属于用回归换防御。③ 审计给的第二个选项「加不可信产物状态标记」不做 —— 需改 shared `TaskRecord` 类型并让每个消费方识别，改动面大且容易漏。④ **`subtitleFiles` 不一并清空**：核验 D-131 的字幕清理只在本次下载流程消费本次 yt-dlp 打印的 links（`discardEmbeddedSubtitleArtifacts`），不消费恢复快照里的该字段，不属同一风险面；清空反而会影响详情页字幕链接显示。⑤ 补一条从损坏快照 → `TaskStore.load()` → 动作层 withFiles 的端到端回归，外加 legacy fail-open 对照组。 |
+| 验证 | `typecheck` 5/5；`check-layering` 0 violations；`frozen-gate` PASS；定向 11 文件 **226/226**；全量 **165 文件 / 2675 用例 / 0 failed**，覆盖率 **93.44 / 86.69 / 93.43 / 93.44**；`run-e2e` 31/31 + 5/5 反例全 0 px、零基线重建；`acceptance --milestone M5` **allGreen=true**（56/59 PASS + 3 deferred、10/10 gates）；`handoff-check` 干净。新增/加强用例：清洗后 request 与 artifacts 同时为空且 `repaired===1`、合法 request 的 artifacts 保留、损坏快照端到端零回收、legacy fail-open 不回归。未新增测试文件，`M3_TEST_FILE_MAP` 无需登记。 |
+| 未覆盖 | ① 清洗后 withFiles 会成功移除任务记录但零个本地文件被回收，UI 未单独提示「本地文件未删除」——产物路径已不可归属，判为优于误删；② 端到端用例把恢复结果直接交给动作层，未经过真 `TaskQueue.restore()` 状态机（该处只做 shallow copy + 状态归一，不改 artifacts）；③ **Windows symlink / junction 的真实路径解析未做**：core 的 containment 是零 `node:fs` 的纯字符串比较，`realpath` 只能在 adapter 层做，会引入跨平台差异与额外 stat 开销。审计自己也定性为「后续文件系统安全加固项，不应直接当成已证实的远程漏洞」，本轮只登记不改；④ 未在真机损坏快照场景复验（铁律 9）。 |
+
+## D-196 · 2026-11-14 · 组件更新器 waitForIdle 拒绝时仍恢复队列入口（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `SelfUpdater.update()` 中 `intakeGate?.pause()` 之后、`try/finally` 之前调用 `await waitForIdle(...)`；若该 Promise reject，异常在 try 块外传播，`finally` 里的 `resume()` 不执行，队列入口保持暂停直到重启。审计核验过真实 `createQueueIntakeGate()` 正常轮询返回布尔、队列获取异常也有处理，故属罕见异常路径而非远程漏洞；D-174「未覆盖①」已自认这个理论空洞。上一轮曾以「真实 gate 不会 reject」为由判定不改，本轮按发布前加固重新评估：修法成本极低、零行为回归，故改。 |
+| 根因 | D-171 引入等待、D-174 补了 busy 分支的显式 resume，但只覆盖了「try 块内的退出」与「busy 提前 return」两类；`pause()` 与 `try` 之间新增的第三个可抛点没有对应的 resume。文件头注释宣称「an update can never wedge the queue」，与实际控制流不一致。 |
+| 决策 | 最小修法：把 `waitForIdle` 的求值单独包一层 `try/catch`，catch 中 `intakeGate?.resume()` 后原样 `throw error`。**不按审计建议整体纳入 try/finally**：那会把 D-174 刻意前置到 `logger.error` 之前的 busy 分支 resume 改成「return 前由 finally 统一 resume」，动了既有顺序与测试钉住的不变式，收益不抵回归风险。异常仍向上传播（不改 `update()` 的返回契约），只是不再留下暂停状态。补一条 `waitForIdle()` 返回 rejected Promise 的用例，断言 `gate.calls === ['pause','resume']`、`isPaused()===false`、组件文件一字未动。 |
+| 验证 | `self-updater.test.ts` 定向全绿（含 D-171 既有 busy / idle 两条 `['pause','resume']` 断言零改动）；定向 11 文件 226/226；全量 2675/0；`typecheck` 5/5；M5 allGreen=true。 |
+| 未覆盖 | ① 上层 component-updater 如何把这个 reject 呈现给用户未单独验证（异常传播契约未改）；② 真实 gate 正常不会 reject，本轮属防御性加固；③ 未真机复现（铁律 9）。 |
+
+## 附注 · 本轮全量测试的一次环境抖动（非回归，如实留痕）
+
+首次 `npm test` 有 1 例失败：`probe-output-limit.test.ts:335` 的 `isAlive` 断言（真实子进程终止检测）并伴随 `close timed out after 10000ms`。该文件测的是 bundled `node.exe` 的 kill 时序，与本轮改动文件零交集；同期并行跑了 `check-layering` / `frozen-gate`。单独重跑该文件 **26/26 通过**，随后不并行任何任务重跑全量 **0 failed**。判定为系统负载导致的时序抖动（D-188 已记录同类竞态并加固过 deadline），**未改任何断言、未跳过任何测试、未下调门限**。
