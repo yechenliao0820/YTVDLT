@@ -64,6 +64,19 @@ function gateWithIdleOf(idle: boolean): QueueIntakeGate & {
   };
 }
 
+/** D-196 variant: `waitForIdle` rejects BEFORE the swap's try/finally. */
+function gateWithIdleReject(): QueueIntakeGate & { readonly calls: string[] } {
+  const calls: string[] = [];
+  let paused = false;
+  return {
+    calls,
+    pause() { paused = true; calls.push('pause'); },
+    resume() { paused = false; calls.push('resume'); },
+    isPaused() { return paused; },
+    async waitForIdle() { throw new Error('idle probe failed'); },
+  };
+}
+
 async function setup(options: {
   checksums?: string;
   bytes?: Uint8Array;
@@ -263,5 +276,17 @@ describe('D-171 · queue idle gate (waitForIdle)', () => {
     expect(gate.calls).toEqual(['pause', 'resume']);
     expect(gate.isPaused()).toBe(false);
     expect(gate.timeouts).toEqual([QUEUE_IDLE_TIMEOUT_MS]);
+  });
+
+  it('D-196 · waitForIdle 拒绝时仍恢复队列入口，且组件文件一字未动', async () => {
+    // 修前异常在进入 try/finally 之前传播，resume() 不执行 → 队列永久暂停。
+    const gate = gateWithIdleReject();
+    const { mem, updater } = await setup({ intakeGate: gate });
+    await expect(updater.update()).rejects.toThrow(/idle probe failed/);
+    expect(gate.calls).toEqual(['pause', 'resume']);
+    expect(gate.isPaused()).toBe(false);
+    expect(textOf(mem, ENGINE)).toBe('old-engine');
+    expect(mem.state.bytes.has(`${ENGINE}.new`)).toBe(false);
+    expect(mem.state.bytes.has(`${ENGINE}.bak`)).toBe(false);
   });
 });

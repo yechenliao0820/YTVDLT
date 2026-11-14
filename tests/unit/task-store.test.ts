@@ -742,18 +742,25 @@ describe('D-161 · key nested fields are validated at load time', () => {
     expect(second.store.lastLoadRepairedCount).toBe(3);
   });
 
-  it('request: one broken domain nulls the whole request; a sound one is untouched', async () => {
+  it('D-195 · request 结构非法 → 置 null 且产物路径一并清除；合法 request 的 artifacts 保留', async () => {
     const { mem, store } = setup();
     writeRawTasks(mem, [damagedRecord({
       request: { format: {}, subtitle: {}, paths: {}, network: {}, advanced: 'bad' },
+      artifacts: ['C:/Windows/evil.mp4'],
     })]);
-    expect((await store.load()).tasks[0]?.request).toBeNull();
-    expect(store.lastLoadRepairedCount).toBe(1);
+    const loaded = await store.load();
+    expect(loaded.tasks[0]?.request).toBeNull();
+    // 在线审计 P2：清洗后不能留下无归属路径，否则动作层会按 legacy 放行。
+    expect(loaded.tasks[0]?.artifacts).toEqual([]);
+    expect(loaded.tasks[0]?.id).toBe('t1'); // 任务本身保留
+    expect(store.lastLoadRepairedCount).toBe(1); // 一次 fix，D-161 诊断契约不变
 
     const sound = { format: {}, subtitle: {}, paths: {}, network: {}, advanced: {} };
     const second = setup();
-    writeRawTasks(second.mem, [damagedRecord({ request: sound })]);
-    expect((await second.store.load()).tasks[0]?.request).toBeTruthy();
+    writeRawTasks(second.mem, [damagedRecord({ request: sound, artifacts: ['C:/Videos/a.mp4'] })]);
+    const soundLoaded = await second.store.load();
+    expect(soundLoaded.tasks[0]?.request).toBeTruthy();
+    expect(soundLoaded.tasks[0]?.artifacts).toEqual(['C:/Videos/a.mp4']);
     expect(second.store.lastLoadRepairedCount).toBe(0);
   });
 

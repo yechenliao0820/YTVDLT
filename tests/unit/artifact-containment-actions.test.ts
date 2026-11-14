@@ -14,7 +14,8 @@ import { describe, it, expect } from 'vitest';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
 import type { DownloadRequest, TaskRecord } from '@ytvdlt/shared';
 import {
-  CommandTemplateStore, ConfigStore, TaskDetailService, buildErrorReport, formatErrorReport,
+  CommandTemplateStore, ConfigStore, TaskDetailService, TaskStore,
+  buildErrorReport, formatErrorReport,
 } from '@ytvdlt/core';
 import type { TaskDetailAction, TaskDetailResult } from '@ytvdlt/core';
 import type { IShellPort } from '@ytvdlt/shared';
@@ -264,5 +265,55 @@ describe('D-193 · damaged/restored snapshots cannot bypass the action gate', ()
     expect(result['ok']).toBe(true);
     expect(h.trashCalls).toEqual([['C:/Windows/evil.mp4']]);
     expect(h.recordGone()).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-195 · 在线审计 P2：损坏快照 → 恢复 → 文件删除的完整链路
+// 修前：sanitizeRecord 把结构非法的 request 置 null，却留下 artifacts；
+// 动作层把 request===null 当旧版兼容记录 fail-open → 任意路径进回收站。
+// ---------------------------------------------------------------------------
+describe('D-195 · damaged snapshot → recovery → withFiles (end to end)', () => {
+  it('被清洗为 request=null 的记录，其产物路径不会到达回收站', async () => {
+    const mem = createInMemoryPorts();
+    const store = new TaskStore({ ports: mem.ports });
+    const damaged = {
+      id: 't1', url: 'https://example.org/v', kind: 'video', state: 'Completed',
+      createdAt: '2026-11-14T00:00:00.000Z', updatedAt: '2026-11-14T00:00:00.000Z',
+      mediaInfo: null,
+      // 非空但结构非法：advanced 不是对象 → D-161 把整个 request 置 null。
+      request: { format: {}, subtitle: {}, paths: {}, network: {}, advanced: 'bad' },
+      artifacts: ['C:/Windows/evil.mp4'],
+      lastPercent: 100, error: null, privateMode: false, postprocessed: false,
+    };
+    mem.state.files.set(
+      `${mem.state.env.configDir}/tasks.json`,
+      JSON.stringify({ schemaVersion: 1, savedAt: '2026-11-14T00:00:00.000Z', tasks: [damaged] }),
+    );
+
+    const snapshot = await store.load();
+    const recovered = snapshot.tasks[0];
+    expect(recovered?.request).toBeNull();
+    expect(recovered?.artifacts).toEqual([]);
+    expect(recovered?.id).toBe('t1'); // 任务历史仍在
+
+    // TaskQueue.restore() 只做 shallow copy + 状态归一，不改 artifacts；把
+    // 恢复结果直接交给动作层，即该链路的终点。
+    const h = await harness(recovered as TaskRecord);
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
+      taskId: 't1', action: 'remove', withFiles: true,
+    });
+    expect(result['ok']).toBe(true);        // 记录照常删除，不破坏 D-120
+    expect(h.trashCalls.flat()).toEqual([]); // 零个本地文件被回收
+    expect(h.recordGone()).toBe(true);
+  });
+
+  it('对照组：真正的旧版无 request 记录仍保持 D-120 fail-open', async () => {
+    const h = await harness(record(['C:/Windows/evil.mp4'], false));
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
+      taskId: 't1', action: 'remove', withFiles: true,
+    });
+    expect(result['ok']).toBe(true);
+    expect(h.trashCalls).toEqual([['C:/Windows/evil.mp4']]);
   });
 });

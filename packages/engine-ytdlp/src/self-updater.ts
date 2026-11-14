@@ -202,9 +202,20 @@ export class SelfUpdater {
     // D-171: `pause()` stops new work only; a transfer that is already running
     // keeps `yt-dlp.exe` open and the rename below fails. Wait for the queue to
     // go idle, and refuse to swap at all when it does not.
-    const idle = intakeGate?.waitForIdle === undefined
-      ? true
-      : await intakeGate.waitForIdle(QUEUE_IDLE_TIMEOUT_MS);
+    // D-196: `pause()` has already happened. A rejected `waitForIdle()`
+    // propagates BEFORE the swap's try/finally below, so release the gate here
+    // or the queue stays parked until a restart. D-174's busy-branch resume
+    // (and its ordering before logger.error) is deliberately left untouched —
+    // this closes the ONE missing exit path rather than rewriting the block.
+    let idle: boolean;
+    try {
+      idle = intakeGate?.waitForIdle === undefined
+        ? true
+        : await intakeGate.waitForIdle(QUEUE_IDLE_TIMEOUT_MS);
+    } catch (error) {
+      intakeGate?.resume();
+      throw error;
+    }
     if (!idle) {
       // This return sits before the try/finally below, so it must release the
       // gate itself — resume before anything that can throw, or a busy queue

@@ -295,7 +295,7 @@ download output (D-144), truly atomic config writes (D-145), and a
 detail-page cancel button aligned with what the queue can actually do
 (D-146) — is described in
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-194).
+[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-196).
 
 ## Engineering and verification
 
