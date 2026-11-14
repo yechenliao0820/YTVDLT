@@ -40,6 +40,7 @@
 | 2026-11-14 审计存量项修复轮（二） | 下载取消的 pre-spawn 竞态真正生效（spawn 前取消不再谎报失败、不再照常跑完，P2-1）；历史记录 sizeBytes 改为引擎实测成片大小、0=未知（P2-7）；artifact 路径封链（入库主门 + 回收/打开副门，产物只认任务自己的输出根）；CI 的 4 个 action（7 处引用）全部钉 commit SHA（含审计漏数的 desktop-pack.yml `upload-artifact`）；`DOWNLOAD_START`/`URL_SUPPORT_CHECK` 统一 URL 上限 4096 字符。**本地完成，未提交、未发版、未打包** | D-182…D-186 |
 | 2026-11-14 UI 覆盖率纳入统计 | 共享 import 装载架（假浏览器全局 + 真实 import，runInNewContext 沙箱对 v8 不可见是盲区根因）+ 24 模块装载冒烟 + 16 个行为测试文件约 470 用例（UI 语句覆盖 99.21%）；`vitest.config.ts` 把 packages/ui 纳入覆盖率统计，四维 93.42/86.61/93.55/93.42，**门限 70 未动**；既有 runInNewContext 语义测试全部保留。**本地完成，未提交、未发版、未打包** | D-187 |
 | 2026-11-14 验收登记补齐与哨兵竞态加固 | 重跑 M5 验收暴露 26 个测试文件未登记 `M3_TEST_FILE_MAP`（过期报告掩盖缺口）→ 补 13 条真断言全部入表，`allGreen` 恢复 true；`probe-output-limit` 三例的哨兵/kill 负载竞态加固（哨兵 1.5s→5s，幸存检测更强，断言未动） | D-188 |
+| 2026-11-14 CI 首红修复 | `settings-autostart-repaint` 的跨行切片标记在 CI CRLF 检出下失配（坑 33 / D-158 同族，本机 LF 看不见），测试输入边界归一化行尾，断言零改动；扫描确认无第二个同款切片器 | D-189 |
 
 > 仓库版本基准为 **`0.3.0`**（最后已发布版本）；下一候选版本号按 §7 十进制规则为 `0.3.1`。
 > 实际发版时才同时改根与 `apps/desktop/package.json` 两处 `version`，并把正式版本行补进上表；本小节届时删除。

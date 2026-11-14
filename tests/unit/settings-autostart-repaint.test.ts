@@ -11,7 +11,12 @@ import { describe, expect, it } from 'vitest';
  * the snapshot. Live-only by construction: without a bridge the callback never
  * runs, so the frozen static baselines are untouched.
  */
-const source = readFileSync('packages/ui/src/pages/settings/settings.js', 'utf8');
+// Handbook pit 33 / D-158: windows-latest checks sources out with CRLF
+// (.gitattributes pins *.mjs only), and the multi-line endMarker below spans
+// lines — a `\n` marker never matches a `\r\n` file, so the slice collapses
+// and every case in this file would fail on CI only. Normalize at the input
+// boundary; the assertions themselves are untouched.
+const source = readFileSync('packages/ui/src/pages/settings/settings.js', 'utf8').replace(/\r\n/g, '\n');
 
 function harness(snapshot: unknown, initial: { autostart: boolean; appAuto: boolean; engineAuto: boolean }) {
   const autostart = { checked: initial.autostart };

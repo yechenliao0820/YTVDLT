@@ -2041,3 +2041,13 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① 补 13 条真断言（A-D173/174/175/176/177/178/179/181/182/183/184/186/187，每条对齐其决策的测试文件与证据源），26 个测试文件全部登记进 `M3_TEST_FILE_MAP`（UI 17 个统一挂 A-D187，其余按各自决策）；D-180/D-185 属无测试文件的流程性决策（README 对齐 / CI action 钉 SHA），按 D-172 先例不设断言；② 哨兵 deadline 1.5 s→5 s、三处 post-kill 等待统一 6.5 s——幸存检测**严格更强**（真幸存的子进程有 5 s 暴露窗口），断言语义与判定方向一字未动。 |
 | 验证 | acceptance M5 重跑 **allGreen=true**（56/59 断言 PASS + 3 SKIPPED，10/10 门禁，fresh）；probe-output-limit 26/26；全量 2649/0 不受影响；handoff-check 干净。 |
 | 未覆盖 | ① 未来新增测试文件仍需手工登记断言与 map（手册 §7 步骤 8 已写明纪律）；② `taskkill` 极端延迟超过 4.6 s 余量理论上仍可假红，概率已压到可忽略；③ CI（windows-latest）下 1.5 s 旧余量从未触发过该竞态（run #1 起全绿），本加固只影响本机高负载场景。 |
+
+## D-189 · 2026-11-14 · CI 首红修复：切片测试在 CRLF 检出下归一化行尾（坑 33 / D-158 同族）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | PR CI（windows-latest，run 43557179835）在 Tests 步 4 个用例全红——`settings-autostart-repaint.test.ts` 的源码切片断言 `expected 55 to be greater than 39538`；本机（LF 工作树）同文件全绿。Checkout / pnpm / setup-node / typecheck / fetch-runtime 全部 PASS（SHA 钉定无恙）。 |
+| 根因 | 该测试按字符串标记把 settings.js 源码切片后 `runInNewContext`，而 `endMarker` 是跨行模板串（以 `\n    }` 结尾）；CI 检出 CRLF（`.gitattributes` 只钉 `*.mjs`，坑 33 同族），`\n` 标记永不匹配 → `indexOf` 返回 -1 → `end = -1 + 56 = 55`。本机看不见它，是因为本地检出恰好是 LF。 |
+| 决策 | 按坑 33 / D-158 既定修法在**测试输入边界归一化行尾**（`readFileSync(...)` 后 `.replace(/\r\n/g, '\n')`，注明缘由），断言零改动；全测试目录扫描确认无第二个同款切片器（源码读取 + indexOf 组合仅此一处）。 |
+| 验证 | 本机该文件 4/4；CRLF 复现实验（LF 下标记匹配 true / CRLF 未归一 false）；全量 2649/0；CI 重跑通过（同 PR）。 |
+| 未覆盖 | ① 未来新增源码切片测试必须同样在输入边界归一化（坑 33 已载明）；② 仓库级 `*.js/*.ts eol=lf` 全量钉定未做（影响面大，另行决策）。 |
