@@ -220,4 +220,39 @@ describe('D-116 delete confirmation', () => {
     change(dialog.check);
     expect(dialog.confirm.textContent).toBe('Delete and recycle files');
   });
+
+  // D-203: when the main process refuses the whole withFiles batch
+  // (request-less record), the page must show the real refusal — never a
+  // success, and never a silent fallback that deletes the history anyway.
+  it('a FILE_DELETE_FAILED refusal is reported and the record stays listed', async () => {
+    const dialog = makeDialog();
+    const status = new FakeNode('p');
+    const reason = '无法验证产物文件归属（任务缺少可用的下载请求信息），为防止误删已拒绝回收本地文件';
+    const h = harness({
+      items: [dto({ id: 'c1', state: 'Completed', percent: 100 })],
+      live: true, lang: 'zh-CN',
+      elements: { ...elementsOf(dialog), 'queue-status': status },
+      onInvoke: (channel, payload) => {
+        if (channel === 'ytvdlt:task:action' && (payload as { withFiles?: unknown }).withFiles === true) {
+          return { ok: false, code: 'FILE_DELETE_FAILED', failureKind: 'file-cleanup', reason };
+        }
+        return undefined;
+      },
+    });
+    await h.settle();
+    await h.setItems([dto({ id: 'c1', state: 'Completed', percent: 100 })]);
+    click(removeButtonOf(h, 'c1'));
+    dialog.check.checked = true;
+    change(dialog.check);
+    click(dialog.confirm);
+    await flush();
+
+    const actions = h.calls.filter((call) => call.channel === 'ytvdlt:task:action');
+    expect(actions).toHaveLength(1); // exactly the refused withFiles call
+    expect(actions[0]?.payload).toMatchObject({ taskId: 'c1', action: 'remove', withFiles: true });
+    // The shipped failure copy names the real reason and the kept record.
+    expect(status.textContent).toContain('本地文件清理失败');
+    expect(status.textContent).toContain(reason);
+    expect(status.textContent).toContain('任务记录已保留');
+  });
 });

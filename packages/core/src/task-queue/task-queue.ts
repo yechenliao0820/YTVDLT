@@ -119,6 +119,16 @@ export class TaskQueue implements ITaskQueue {
   private readonly pending: string[] = [];
   /** Ids currently occupying a slot (probe or transfer in flight). */
   private readonly running = new Set<string>();
+  /**
+   * D-200: ids whose cancel arrived while NO handle existed — the window
+   * between the probe's `finally` (probe handle removed) and `executeDownload`'s
+   * engine handle registration. `cancel()` records the request here and
+   * transitions the record to `Canceled` itself; the run consumes the id right
+   * before it would start the transfer, so a download the user killed is never
+   * spawned. `restart()` / `remove()` / `enqueue()` clear stale entries so a
+   * recorded request can never kill a later run of the same id.
+   */
+  private readonly cancelRequested = new Set<string>();
   private limit: number;
   /** M5: intake switch; only `pump()` reads it. */
   private intakePausedFlag = false;
@@ -248,8 +258,10 @@ export class TaskQueue implements ITaskQueue {
       lastPercent: record.lastPercent ?? null,
       error: null,
     };
-    // Re-enqueueing an id must not leave a stale FIFO entry behind.
+    // Re-enqueueing an id must not leave a stale FIFO entry behind — nor a
+    // stale cancel request that would abort the fresh run (D-200).
     this.dropFromPending(stored.id);
+    this.cancelRequested.delete(stored.id);
     this.records.set(stored.id, stored);
     this.pending.push(stored.id);
     this.pump();
@@ -372,6 +384,12 @@ export class TaskQueue implements ITaskQueue {
       // Give this attempt its own ` (n)` name first — the user asked for another
       // copy, not for an error.
       const effectiveRequest = await this.withCopySuffix(record, request);
+      // D-200: consume a cancel that landed while no handle existed (the probe
+      // → engine-handle window). The record is already `Canceled`; spawning the
+      // download now would run what the user killed. Do NOT re-transition to
+      // `Running` and do not pin an error — the same clean-cancel contract as
+      // the D-142 / D-162 windows.
+      if (this.cancelRequested.delete(record.id)) return;
       this.transition(record, 'Running');
       // D-115: every run starts by moving bytes. `merging` / `postprocess` can
       // only arrive later, from a marker the engine actually printed.
@@ -759,7 +777,22 @@ export class TaskQueue implements ITaskQueue {
       return true;
     }
     const handle = this.handles.get(taskId);
-    if (handle === undefined) return false;
+    if (handle === undefined) {
+      // D-200: between the probe handle's removal and the engine handle's
+      // registration the run passes through awaited steps (`withCopySuffix`),
+      // so a cancel used to find no handle, return `false`, and the download
+      // went on. Both states observable here have a legal edge to `Canceled`;
+      // the run picks the recorded request up before it spawns the engine.
+      if (record.state === 'ReadyWithInfo' || record.state === 'Running') {
+        this.cancelRequested.add(taskId);
+        this.transition(record, 'Canceled');
+        // A run is not guaranteed to be in flight to persist for us (a restored
+        // record sits here without a slot) — mirror the pending-branch behaviour.
+        await this.persistSnapshot();
+        return true;
+      }
+      return false;
+    }
     const killed = await handle.cancel();
     if (!killed) {
       // D-142: the process tree SURVIVED taskkill. The task is still genuinely
@@ -798,7 +831,26 @@ export class TaskQueue implements ITaskQueue {
       throw new Error(`task still running, retry refused: ${taskId}`);
     }
     const target: TaskState = record.mediaInfo !== null ? 'ReadyWithInfo' : 'Idle';
-    this.transition(record, target);
+    // D-199: a restored `Idle` / `ReadyWithInfo` record already sits ON the
+    // target state and the machine has no self-loop edges, so the unconditional
+    // transition threw `IllegalTaskTransitionError` and made a queued-but-
+    // never-started task unrestartable (the UI gate only covers Error/Canceled;
+    // the IPC `TASK_ACTION restart` path reaches this directly). A restored
+    // `Idle` record means "queued, not started" — restarting it simply starts
+    // the download. Skip the transition when it would be a self-loop; the field
+    // resets below are no-ops for a fresh record, and the re-queue + pump()
+    // start it as usual.
+    if (record.state !== target) {
+      if (record.state === 'Idle' && target === 'ReadyWithInfo') {
+        // A never-started task can also carry a pre-probed mediaInfo; the
+        // machine has no `Idle -> ReadyWithInfo` edge, so walk the same two
+        // legal edges `run()` walks for that case.
+        this.transition(record, 'FetchingInfo');
+        this.transition(record, 'ReadyWithInfo');
+      } else {
+        this.transition(record, target);
+      }
+    }
     record.error = null;
     record.artifacts = [];
     // Stage 4: a retry is a NEW run. Keeping the previous attempt's subtitle
@@ -819,6 +871,8 @@ export class TaskQueue implements ITaskQueue {
     // make the fresh attempt claim it is already finishing.
     record.lastStage = null;
     this.dropFromPending(taskId);
+    // D-200: a cancel recorded for the OLD run must not kill the fresh one.
+    this.cancelRequested.delete(taskId);
     this.pending.push(record.id);
     this.pump();
   }
@@ -831,6 +885,8 @@ export class TaskQueue implements ITaskQueue {
     if (this.running.has(taskId)) return false;
     if (!this.records.has(taskId)) return false;
     this.dropFromPending(taskId);
+    // D-200: the id leaves the queue; drop any cancel recorded for it.
+    this.cancelRequested.delete(taskId);
     this.records.delete(taskId);
     await this.persistSnapshot();
     return true;

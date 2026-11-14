@@ -2125,3 +2125,130 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 ## 附注 · 本轮全量测试的一次环境抖动（非回归，如实留痕）
 
 首次 `npm test` 有 1 例失败：`probe-output-limit.test.ts:335` 的 `isAlive` 断言（真实子进程终止检测）并伴随 `close timed out after 10000ms`。该文件测的是 bundled `node.exe` 的 kill 时序，与本轮改动文件零交集；同期并行跑了 `check-layering` / `frozen-gate`。单独重跑该文件 **26/26 通过**，随后不并行任何任务重跑全量 **0 failed**。判定为系统负载导致的时序抖动（D-188 已记录同类竞态并加固过 deadline），**未改任何断言、未跳过任何测试、未下调门限**。
+
+## D-197 · 2026-11-14 · 关闭到托盘补 preventDefault（真实 Electron 才生效；外部在线审计 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 外部审计指出：真机点 X / Ctrl+W 后窗口直接销毁 → `window-all-closed` → `app.quit()`，下载中任务被中断；单测一路绿。核验属实：`bootstrap.ts` 的 close 监听器忽略 event 参数、从未调用 `preventDefault()`；`shouldHideToTray(intent) && !quitting` 成立时只 `window.hide()`。真实 Electron 在 close 事件未被 preventDefault 时**仍会销毁窗口**，hide 挡不住销毁。单测假 Electron 不模拟「未拦就销毁」，且旧用例直接手动调用 listener（坑 4「真实输入事件」的主进程变体）。 |
+| 根因 | 「想 hide」和「真不销毁」是两件事——Electron 只认 `preventDefault()`；`hide()` 只藏窗口，close 的默认销毁照常发生。 |
+| 决策 | close 监听器接收 event（形状 `{ preventDefault(): void }`；`BrowserWindowLike.on` 签名不动，按 will-navigate 既有 cast 模式携带）；`shouldHideToTray(intent) && !quitting` 时**先** `event.preventDefault()` **再** `window.hide()`。托盘不存在（trayReady=false，D-60 ③ 兜底：托盘创建失败窗口仍可正常关）或 quitting=true（菜单「退出」/ 托盘退出 / `dispose()`）时不拦截，真实关窗与退出路径原样保留。D-88 私密清理 `onWindowClose` 语义不变（每次 close 尝试都触发，含隐藏到托盘；真正退出另有 before-quit 兜底）。 |
+| 验证 | `bootstrap.test.ts` 新增 `emitClose` 辅助复刻真实语义（close 未被拦 → 视同销毁窗口 → 触发 `window-all-closed` → `app.quit()`），新增 3 用例：有托盘 → preventDefault+hide、零销毁零退出；无托盘 → 照常销毁退出（兜底路径）；quitting → 照常退出。修复前还原代码跑同一测试 2 例红（缺陷复现），修复后 23/23 绿。全量 166 文件 / 2693 用例 / 0 failed；e2e 31/31 + 5/5 反例全 0 px；`acceptance --milestone M5` allGreen=true。 |
+| 未覆盖 | 真机窗口手点（打包后按铁律 9，与 D-198 合并验收）。 |
+
+## D-198 · 2026-11-14 · D-170 session 权限门生产接线（electronSurface 暴露 session；外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-170 的「session 权限一律拒绝」在生产构建从未安装——真机上渲染层可以成功发起 permission 请求。核验属实：`bootstrap.ts` 两个处理器挂在 `electron.session?.defaultSession` 双层可选链上，而 `ElectronLike.session` 是可选键、生产唯一 surface `electron-entry.ts::electronSurface()` 没有返回 `session` → 可选链静默短路。D-173 曾以「渲染层剪贴板会被 permission handler 拒绝」为前提做设计——该前提在真机不成立（D-178 已把剪贴板挪到主进程 `CLIPBOARD_WRITE` 通道，故无功能回归，属「加固声明 ≠ 实际接线」）。 |
+| 根因 | 类型上 session 可选（为了让旧单测假对象合法），但生产 surface 从未补上这一键；两个门只有声明、没有接线。 |
+| 决策 | `electronSurface()` 从 `'electron'` import `session` 并在返回对象补 `session` 键（真实 Electron 模块的 `session.defaultSession` 必然存在；`exactOptionalPropertyTypes` 下用 `NonNullable` cast）。bootstrap 两个处理器逻辑一字不动（session 存在时可选链自然生效），只补注释说明「surface 无 session 时静默跳过，仅单测假对象如此」。deny-all 语义由新增 `tests/unit/session-permission-gate.test.ts` 钉住：注册后对 11 个权限（含未来未知 permission）一律 `callback(false)`、check 一律返回 false、无 session 的旧形状假对象静默兼容且 bootstrap 照常走完。新文件按 D-188 流程登记 `M3_TEST_FILE_MAP` 并补 A-D198 真断言（计数取自真实 vitest 结果，非写死 PASS）。 |
+| 验证 | 新测试 3 例 + bootstrap 23 例全绿；全量 2693/0；M5-GATE-file-coverage PASS、A-D198 PASS；typecheck 5/5。 |
+| 未覆盖 | 真机验证与 D-197 合并进下一次打包验收（铁律 9）。 |
+
+## D-199 · 2026-11-14 · restart() 自态放行（恢复出的 Idle/ReadyWithInfo 可重启；外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | IPC 直达的 restart 对恢复出的 `Idle` / `ReadyWithInfo` 任务抛 `IllegalTaskTransitionError`——UI 有门控（`isRestartable` 只认 Error/Canceled）但 IPC 层没有，`TASK_ACTION restart` 直达 `TaskQueue.restart()`。核验属实。 |
+| 根因 | `restart()` 无条件 `transition(record, target)`，target 由 `mediaInfo` 推导（`'ReadyWithInfo'` 或 `'Idle'`）；恢复出的记录已处于同一状态，而状态机明确「含自环在内的一切非 13 条边都非法」（A-M2-01）。 |
+| 决策 | `record.state !== target` 才 transition（自态跳过），重置逻辑照旧（对全新 Idle/ReadyWithInfo 本来就是 no-op），重启后照常 re-queue + `pump()` 启动。交叉情形：恢复的 `Idle` 记录携带预探测 mediaInfo（无 `Idle → ReadyWithInfo` 边）按 `run()` Stage 3 既有模式走 `Idle→FetchingInfo→ReadyWithInfo` 两条合法边。`isRestartable` 与 UI 门控不动；`Completed` 无出边、restart 仍拒（不变）。 |
+| 验证 | `task-queue.test.ts` +3 例（恢复 Idle restart 完整跑完到 Completed；恢复 ReadyWithInfo restart 不重探（probe 调用数不变）；Idle+mediaInfo 走两段边）。修复前 3 例必红。全量 2693/0。 |
+| 未覆盖 | IPC 层不加白名单——core 已不抛，单一事实源维持在 core；「Completed 再下一份」语义属 D-101 `withCopySuffix()` 范畴，本轮不动。 |
+
+## D-200 · 2026-11-14 · cancel 空窗登记（probe 结束 → 下载句柄注册之间不再丢取消；外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | probe 的 `finally` 删除句柄后、`executeDownload` 注册引擎句柄之前（中间有 `await withCopySuffix()` 等异步点），`cancel(taskId)` 走 `handle === undefined → return false`——取消丢失、下载照跑，UI 会显示「取消失败」。核验属实。 |
+| 根因 | `cancel()` 只认已注册句柄；probe 句柄删除到引擎句柄注册之间存在真实异步窗口，窗口内的取消请求无处落地。 |
+| 决策 | 新增 `cancelRequested` 集合。`cancel()` 在无句柄且 state 为 `ReadyWithInfo` / `Running`（两态到 `Canceled` 的边均合法）时：登记请求 + `transition('Canceled')` + `persistSnapshot`（对齐 pending 分支，恢复态无 run 在飞也要落盘）+ 返回 true；`run()` 在 `transition('Running')` 之前消费（`delete` 返回 true 即直接 return）——不再 transition Running、不钉 UNKNOWN 错（对齐 D-142 / D-162 干净取消契约）。`enqueue` / `restart` / `remove` 清理陈旧条目，防止旧请求污染新运行。`transition('Running')` 到引擎句柄注册之间是同一同步块（`executeDownload` 的 Promise executor 同步完成 `engine.download()` + `handles.set`，无可插队 await），无需二次检查。 |
+| 验证 | `task-queue-cancel-failure.test.ts` +2 例（readdir 闩锁精确钉住窗口：cancel 返回 true、落 Canceled、引擎 0 次 spawn、无 ReadyWithInfo→Running 事件、error=null；restore 场景 cancel 后 restart 清理陈旧请求，新 run 正常 spawn）。修复前必红。全量 2693/0。 |
+| 未覆盖 | 引擎内部 pre-spawn cancel 语义（D-182 / D-156）兜底句柄注册之后的窗口，本轮未重复测试。 |
+
+## D-201 · 2026-11-14 · ConfigStore.load() 首载竞态（loaded 置位过早；外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `load()` 在任何 await 之前置位 `loaded = true`；两个并发调用方中第二个立即返回、拿到构造函数默认值——后续 `set()` 可能用默认值覆盖真实配置文件。核验属实。 |
+| 根因 | 幂等语义建立在 `loaded` 标志上，但置位先于实际读取完成。 |
+| 决策 | memoize `loadPromise`（并发共享同一 Promise；失败时所有并发方拿到同一拒绝，不再静默默认值）；原载入体移入 `performLoad()`；`loaded` 于 `.finally` 置位（失败也算已尝试，事后 `load()` 保持 no-op 不重试 I/O——与既有失败语义一致）。corrupt 路径 `handleCorrupt` 不抛、mkdir/exists 等失败仍向上传播的语义不变。 |
+| 验证 | `config-store.test.ts` +3 例（readText 延迟 20ms：第二并发方只在真实载入完成后 resolve、单次读取；并发 set 基于已载入文件持久化、不被默认值覆盖；失败路径双方同一拒绝且事后不重试 I/O）。全量 2693/0。 |
+| 未覆盖 | 无。 |
+
+## D-202 · 2026-11-14 · argv 禁选项扫描豁免 http(s) URL token（子串误杀；外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `assertNoForbiddenOptions()` 对整个 token 做子串匹配（`lower.includes(forbidden)` + `PO_TOKEN_RE`），URL（含 query/fragment）中出现 `--exec`、`po_token`、`po-token` 字样被误判为禁选项抛错。核验属实。 |
+| 根因 | 禁选项与 PO-Token 检查按子串扫描所有 token，没有区分「option 形态的 token」与「URL 形态的值」。spawn 不经过 shell，URL 是单个 argv 元素，嵌入内容不可能被 yt-dlp 解析为选项。 |
+| 决策 | 仅对整 token 锚定的 URL 形态（`URL_TOKEN_RE = /^https?:\/\/\S+$/i`）豁免**子串扫描与 PO_TOKEN_RE** 两项；非 URL token（含 `--extractor-args` 的 value `youtube:po_token=…` 这类真实注入向量）照旧全扫；`M3_FORBIDDEN_OPTIONS`、`OPTION_LIKE_RE` 白名单校验一字未动。豁免是安全的：URL 是一个 argv 元素，子串扫描对它本就没有语义。 |
+| 验证 | `argv-compliance.test.ts` +4 例（URL 含 --exec 通过；URL 含 po_token/po-token 通过；独立 `--exec` 与 `--exec=…` 仍拒；`--extractor-args` 两参及连写 + po_token 值仍拒——防御不放松）。全量 2693/0。 |
+| 未覆盖 | 无。 |
+
+## 附注 · 本轮（D-197…D-202）验收环境抖动（非回归，如实留痕）
+
+`acceptance.mjs` 首跑在 `tests/unit/termination-confirmation.test.ts:81`（D-137 终止确认，「杀进程 1.8s 后哨兵文件必须不存在」）撞 1 例负载型时序 flake；隔离复跑 3/3 绿、acceptance 重跑 allGreen。该文件与本次 6 项改动零交集；**未改断言、未跳过测试、未下调门限**。D-188 已记录过同族竞态，后续如复现可独立加固（抖动容忍）。
+
+## D-203 · 2026-11-14 · 本地文件删除：request 缺失记录 fail-closed（业主授权推翻 D-120 旧版宽容；安全加固轮）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主以「无正式用户、处于破坏性变更阶段」定规：不再为兼容保留 fail-open。核验属实：withFiles 删除对 `request===null` 旧记录放行——`trustedArtifactRoots({})` 返回 null → 旧代码跳过拒绝门 → `isPathInsideRoots(path, [])` 按空根语义放行 → 任意路径可进回收站；`artifact-containment-actions.test.ts:260` 有专门用例钉住该危险行为。D-195 只在 store 清洗层清了危险路径，动作层仍保留放行通道。 |
+| 根因 | 「无法判定归属 → 放行」是 D-120 为假想的「真旧版记录」保留的兼容宽容；在新前提（无历史用户）下它的收益为零、风险为误删任意文件。 |
+| 决策 | ① withFiles 分支去掉 `hasRequest` 豁免：`trustedArtifactRoots(...)` 为 null（request===null / 结构损坏被清洗 / 输出目录不可判定 / 可信根为空）一律整批拒绝，复用既有稳定码 `FILE_DELETE_FAILED` + `failureKind:'file-cleanup'`（不发明新码），reason/message 中文说明「无法验证产物文件归属…已拒绝回收本地文件；任务记录已保留」；拒绝分支不调 `perform('remove')`，记录与历史保留。② 删除侧符号链接守卫：trash adapter 在 `trashItem` 前对每路径 `lstat`，`isSymbolicLink()`（Windows junction 同样表现为 symlink）→ `error`「符号链接/联接无法验证归属」，经既有 failed>0 整批保留契约，自动覆盖 D-131 字幕回收等全部 TrashFilesPort 消费方；**ENOENT 幂等（missing → 继续删记录）语义一字未动**（坑 22）。③ 破坏性变更按业主授权记录于本条；D-120 ③ 与 D-195 决策②的 fail-open 保留意见作废。 |
+| 验证 | 反转的 fail-open 钉子全部等强度换成 fail-closed 钉子（拒绝、回收站零调用、记录保留）；新增真实文件系统用例（request===null 拒绝、合法 request 正常回收不回归、真实 junction 拒绝且计数如实）；全量 2755/0 failed、e2e 31/31、M1/M5 allGreen（D-206/D-207 套件佐证）。 |
+| 未覆盖 | Electron 真进程 `shell.trashItem` 副作用未端到端实测；TOCTOU 见 D-206/D-207 登记。 |
+
+## D-204 · 2026-11-14 · 打开门 fail-closed + realpath 真实路径校验（安全加固轮）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | open 门对 `request===null` 旧记录同样 fail-open（打开指向哪就开哪）；且校验是纯字符串包含——Windows reparse point（symlink/junction）可让「字符串上在可信目录内」的路径实际指向任意位置（父目录是外指 junction 时，产物文件本身是普通文件，末段检查看不见）。 |
+| 根因 | core 是零 `node:*` 纯层，此前没有真实路径解析能力（D-195「未覆盖③」登记的遗留）；字符串门是唯一防线。 |
+| 决策 | ① open 门去掉 `hasRequest` 豁免：roots 为 null 一律 `REFUSED`「无法验证产物路径归属」。② `CorePorts.fs` append-only 追加可选 `realpath?`；`node-ports.ts` 以 `node:fs/promises.realpath` 实现（junction/symlink 解析到最终目标，UNC/长路径前缀交 containment 归一化）。③ open 流程：realpath 解析**最终目标**（open-file 解析文件；open-folder 文件缺失回退时解析**目录**）后重过 `isPathInsideRoots`，根外 → REFUSED「产物真实路径指向任务输出目录之外（符号链接/联接）」；shell 仍打开用户可见的原始路径（跟随意图）。④ 失败语义：ENOENT/ENOTDIR → 既有缺失流程（FILE_MISSING / 目录回退，回退目录=可信根本身放行——`isPathInsideRoots` 严格内含，目录分支用 inside-or-equal）；EACCES/EPERM/ELOOP 等 → fail-closed REFUSED 带真实 errno。⑤ 无 `realpath` 的旧测试假对象退化为字符串门（production node-ports 恒提供；注释明示强度下降）。打开跟随用户意图、删除拒绝链接本身——两面对同一能力做方向相反的判定，不共用守卫。 |
+| 验证 | task-detail/folder/path-containment 新增 19 用例；真实 junction 手动证据（外指 junction → REFUSED、根内 junction → OK、悬空 → FILE_MISSING、回退目录=根 → OK）；全量 0 failed。 |
+| 未覆盖 | 真机手点；`.lnk` shell 快捷方式对 fs 层是普通文件（与 shell 行为一致，不解析）。 |
+
+## D-205 · 2026-11-14 · 注册表「值不存在」识别扩展 7 语种 + fail-closed 负例（D-194 后续）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-194 的 `REG_NOT_FOUND_RE` 只覆盖英/简中/繁中/日；德/法/俄/意/西/韩/葡 Windows 上 reg.exe 的合法「值不存在」被当未知错误 → read 误抛、delete 误报失败（识别能力不足，非放行漏洞——未知错误本就 fail-closed）。 |
+| 根因 | 正则按当初实测语种手写，未覆盖主流 Windows 本地化。 |
+| 决策 | 正则只做**短语级**扩展（`nicht finden` / `pas pu trouver` / `не удалось найти` / `impossibile trovare`+文档变体 / `no puede encontrar`+变体 / `찾을 수 없` / `não pôde encontrar`），每条注释标语言 + 完整官方句式 + 来源等级（real-run vs documented，未把 documented 标成 real-run）；拒绝裸动词（裸 finden/trouver/найти 命中无关散文）。`isRegValueAbsent`/`read`/`apply` 行为逻辑一字未动（diff 仅注释+正则）；exit-code 门槛保持在正则之前。负例钉死：8 语种 Access-Denied 变体绝不判缺席、未知语种/乱码/纯错误码 fail-closed、成功输出不被误吞、delete 三态。 |
+| 验证 | win-startup.test.ts 21/21（新增 6 用例）；zh-CN 真实 reg.exe 证据（not-found/成功行/拒绝访问，OEM 936，测试键已清理）；typecheck 5/5。 |
+| 未覆盖 | 其它语种句式为 documented（Microsoft Learn / 社区复现），未在本机逐一复现；语种清单继续按真实反馈扩充。 |
+
+## D-206 · 2026-11-14 · Windows 真实文件系统链接安全证据套件（A-D206）与 skip 计数语义
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 任务要求对符号链接/junction/悬空/循环/大小写/UNC/竞态给出专门测试，且**不许静默跳过**。 |
+| 决策 | 新增 `tests/unit/win-fs-link-security.test.ts`（27 用例）+ acceptance 登记 A-D206：真实 os.tmpdir() fixture + 真实 adapter/realpath；junction 无需权限**永远执行**；文件符号链接（Windows 需 SeCreateSymbolicLinkPrivilege）与 UNC `\\localhost\<盘符>$`（本机 SMB 抖动）按能力探测 `ctx.skip`（带 reason、输出可数），每个 describe 保留永远执行的能力探测用例（C-1 白名单钉死跳过面，防未来静默跳过）；CI（windows-latest 管理员 runner）由 `check-security-suite-results.mjs` 守卫强制 skipped=0。**测试套件实测发现真实逃逸缺口（中间 junction），另立 D-207 修复**——本条同时把 `findTestCount()` 语义改为 skipped/pending/todo 不计入 failed（单独显式展示；CI 由守卫强制为 0），使本地能力门跳过不虚报为失败。 |
+| 验证 | 本机 22 passed + 5 skipped（EPERM×3、UNC×2，reason 全文可见）；全量 2755/0；M5 allGreen。 |
+| 未覆盖 | 真实文件符号链接 3 例、UNC 2 例留 CI/真机；TOCTOU（stat→trashItem 竞态）登记为不测边界——写抖动测试只会制造假覆盖。 |
+
+## D-207 · 2026-11-14 · 删除侧「中间 junction」逃逸预检整批拒绝（安全加固轮收口）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-206 套件实测发现：D-203 的末段 lstat 守卫挡不住**中间组件 junction**——产物路径 `<videoDir>/link/escape.mp4`（link 为外指 junction）字符串门放行、末段 lstat 报普通文件 → `trashItem` 实际收到越界路径（实测 `trashed`）；悬空变体误入幂等 `missing` 分支致记录被移除。另审计发现批内混合（合法文件+链接）时合法文件先进回收站才整批拒绝，拒绝结果不含 `filesTrashed`，计数不诚实。 |
+| 根因 | 字符串 containment 对 reparse point 无感知；末段 lstat 只看最后一个组件；逐路径守卫发生在 trash 循环内部，先到先删。 |
+| 决策 | withFiles 在调用 trash **之前**对整个 eligible 批做预检（`TrashFilesPort.preflight?` 可选方法，adapter 层 `preflightTrashPaths(paths,{roots,realpath,lstat})` 实现，生产装配零改动自动生效，无 preflight 的旧 fake 行为不变）：① realpath 解析成功 → 重过 containment，根外 → 整批拒绝；② realpath ENOENT → 解析**父目录**区分「文件确实被外部删（父目录可解析且在根内或等于根 → missing，D-120 幂等不变）」与「上下文不可判定（父目录也不可解析/在根外 → 整批拒绝带真实 errno）」——missing 不再是缺省结论；③ 其它 errno（EACCES/ELOOP 等）→ 整批拒绝带真实 errno。任一路径不通过 → 整批拒绝、**回收站零调用**、记录保留、不调 perform('remove')、failedCount 全扫如实。适配器 trash() 本体与末段 lstat 守卫原样保留（预检后 TOCTOU 第二道防线）。预检同时关闭审计①：拒绝发生在任何 trashItem 之前，不存在「部分先进回收站」。 |
+| 验证 | A-2b/A-2c 从 it.fails 升级为严格拒绝断言并新增 A-2d（父目录可解析但越界）；混合批用例钉「回收站零调用」；真实 junction 手动证据修复前后对照（修复前 trashItem 收到越界路径、修复后 0 次调用+拒绝+目标文件完好）；定向 9 套件 201 passed / 5 skipped（能力门）全绿；全量 2755/0、M1/M5 allGreen。 |
+| 未覆盖 | lstat→realpath→trashItem 之间的残余 TOCTOU 窗口（适配器末段守卫为第二道防线，完全关闭需 open-by-handle，未实现）；Electron 真进程回收站副作用未实测。 |
+
+## 附注 · 本轮（D-203…D-207）审计遗留（建议未动，留决策）
+
+审计 8 项全部通过、零代码缺口；以下低危项**建议但未动**，留业主决策：① `m5-channels.ts` 失败兜底 `failed[0]?.reason ?? '未知错误'` 仅在注入端口违约时可达（生产适配器恒带 errno），可附带 path 定位；② D-204/D-203 拒绝文案为主进程中文句，英文 UI 经 `result.message` 原样显示（既有 7 码映射架构未覆盖新文案），可在 messages.js 双语补键并映射 REFUSED 进打开码表（遵循 D-100）；③ withFiles 对不存在 taskId 返回 `FILE_DELETE_FAILED(failedCount:0)` 而非 `TASK_MISSING`（语义标签不精确，ok:false 如实）；④ `node-ports exists()` 把 EACCES 视为 false，仅影响无 realpath 的降级路径（生产恒提供 realpath）。
+
+## D-208 · 2026-11-14 · realpath 判定的 canonical 根形态（8.3 短名误拒收口）+ UNC 跳过 allowlist（PR CI run#14 首红修复）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | PR CI（windows-latest，run#14）Tests 步骤红：7 例失败，全部集中在真实文件系统安全套件——`expected 'C:/Users/runneradmin/…' to be 'C:/Users/RUNNER~1/…'`。runner 的 `TEMP` 带 **8.3 短名**（`RUNNER~1`），`realpath` 报**长名**（`runneradmin`）；D-207 预检 / D-204 判定把 realpath 结果只与**字符串形态的可信根**比较 → 形态不一致 → 合法文件被整批误拒（D-203 真实 fs 用例全拒、混合批 failedCount=2、外部删除误判拒绝、B-13 大小写变体拒绝）。本地 TEMP 无 8.3 别名所以全绿——真实用户配置目录含短名/别名时同样会被误拒，**属产品缺陷非 CI 环境问题**。 |
+| 根因 | 「同名目录、两种合法路径形态」：`realpath` 永远报 canonical（长）形态，而可信根字符串可能含 8.3 短名或 reparse point 别名；containment 是纯字符串比较，形态不归一必假阳。 |
+| 决策 | ① `containment.ts` 新增 `canonicalContainmentRoots(roots, realpath)`（core 纯函数，realpath 注入）：返回字符串根 + 每根 best-effort realpath 别名（按归一化形态去重；根不可解析时保留字符串形态）。canonical 别名是**同一个可信目录**，不扩权。② D-207 预检（`preflightTrashPaths`）与 D-204 打开判定（`resolveRealPath`）改为对 canonical 根列表判定；字符串门保持不变。③ B-10/B-14 测试断言两侧都取 canonical 形态。④ 新增回归测试（注入 fake realpath 模拟短名根形态，修复前必红）：preflight 3 例（ok / missing / 拒绝不放宽）+ open 门 1 例。⑤ UNC 探测依次尝试 `\\localhost\X$` 与 `\\127.0.0.1\X$`（`capabilities.uncHost` 记录可用形态，A-8a/A-8b 随动）；CI 守卫改为「符号链接权限跳过零容忍 + UNC 跳过显式 allowlist 大声报告」——run#14 实测 runner `fileSymlink=true`（符号链接用例实跑全过）、UNC SMB 回环不可达属环境属性，覆盖缺口按 D-206/D-208 登记留真机。 |
+| 验证 | 本机定向 9 套件全绿（210 用例）；全量 2764 / 0 failed（覆盖最低 86.95%）；M1 17/17、M5 10/10 gates allGreen；安全套件按 CI 口径实跑 134 passed / 5 skipped，守卫本地正确 exit 1（3 个符号链接跳过非 allowlist——本机无符号链接权限属预期），CI 预期仅剩 2 个 UNC allowlist 跳过 → exit 0。 |
+| 未覆盖 | UNC 真实共享场景在 runner 上仍 skip（allowlist 登记的覆盖缺口，留真机）；TOCTOU 依旧不测（D-206/D-207 边界）。 |

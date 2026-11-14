@@ -58,6 +58,15 @@ const OPTION_LIKE_RE = /^(?:--[a-z0-9][a-z0-9-]*|-[a-zA-Z0-9])$/;
 const PO_TOKEN_RE = /po[_-]?token/i;
 
 /**
+ * D-202: a bare http(s) URL is ONE argv element handed to the child process
+ * directly (spawn without a shell), so `--exec` / `po_token` embedded in a URL
+ * (query parameter, fragment, …) can never be parsed as an option by yt-dlp.
+ * Only the forbidden-substring scan is exempted for such tokens — every other
+ * check below applies unchanged.
+ */
+const URL_TOKEN_RE = /^https?:\/\/\S+$/i;
+
+/**
  * Reject a non-compliant argv[].
  *
  * @throws Error when a forbidden token, a PO-Token injection, or an
@@ -74,13 +83,18 @@ export function assertNoForbiddenOptions(argv: readonly string[]): void {
     const optionName = eq === -1 ? token : token.slice(0, eq);
     const lower = token.toLowerCase();
 
-    for (const forbidden of M3_FORBIDDEN_OPTIONS) {
-      if (optionName.toLowerCase() === forbidden || lower.includes(forbidden)) {
-        throw new Error(`[ytvdlt] forbidden option rejected: ${forbidden}`);
+    // D-202: exempt ONLY URL-shaped tokens from the substring scan (see
+    // URL_TOKEN_RE). Real injection vectors — e.g. an `--extractor-args` value
+    // like `youtube:po_token=...` — are NOT URL-shaped and stay fully scanned.
+    if (!URL_TOKEN_RE.test(token)) {
+      for (const forbidden of M3_FORBIDDEN_OPTIONS) {
+        if (optionName.toLowerCase() === forbidden || lower.includes(forbidden)) {
+          throw new Error(`[ytvdlt] forbidden option rejected: ${forbidden}`);
+        }
       }
-    }
-    if (PO_TOKEN_RE.test(token)) {
-      throw new Error('[ytvdlt] forbidden option rejected: PO Token injection');
+      if (PO_TOKEN_RE.test(token)) {
+        throw new Error('[ytvdlt] forbidden option rejected: PO Token injection');
+      }
     }
     if (token === '--') continue;
     if (OPTION_LIKE_RE.test(token) && !allowed.has(optionName)) {

@@ -33,6 +33,30 @@ export interface FileSystemPort {
    * 30 MB binary — UTF-8 decoding would corrupt it.
    */
   readBytes(path: string): Promise<Uint8Array>;
+  /**
+   * D-204 (append-only, OPTIONAL): resolve `path` through every symlink /
+   * NTFS junction to its FINAL real location. This is the symlink/junction
+   * guard point for "open file / open folder" (D-204): a manifest path that
+   * only LOOKS inside the trusted roots on the string level may actually
+   * point anywhere, so the caller re-runs containment on the resolved path
+   * before handing it to the shell.
+   *
+   * OPTIONAL for compatibility: the production adapter
+   * (apps/desktop/src/main/adapters/node-ports.ts) ALWAYS provides it; its
+   * absence exists only in legacy test fakes, where the gate degrades to the
+   * string-level containment check (security strength drops accordingly).
+   *
+   * Windows notes: `realpath` resolves junctions/symlinks to their final
+   * TARGET (a junction pointing at a FILE is treated as broken by the OS
+   * itself — stat/realpath both fail with ENOENT, so nothing can be opened
+   * through it). Depending on the Node/libuv version the result may be the
+   * plain absolute path or the extended-length form (`\\?\C:\...`,
+   * `\\?\UNC\srv\share\...`) for UNC targets; the containment normalization
+   * unwraps both prefixes, so the raw result can be fed straight into
+   * containment checks. Fails with ENOENT/ENOTDIR when the path does not
+   * exist.
+   */
+  realpath?(path: string): Promise<string>;
 }
 
 export interface HashPort {

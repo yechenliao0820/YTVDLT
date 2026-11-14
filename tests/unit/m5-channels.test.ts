@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
 import type {
-  AppError, ErrorCode, ISystemStartupPort, TaskRecord, UrlSupportResult, UrlSupportState,
+  AppError, DownloadRequest, ErrorCode, ISystemStartupPort, TaskRecord, UrlSupportResult, UrlSupportState,
 } from '@ytvdlt/shared';
 import { CommandTemplateStore, ConfigStore, maskUrlSecrets } from '@ytvdlt/core';
 import type { ClipboardPort } from '@ytvdlt/core';
@@ -23,6 +23,19 @@ import {
 import { createInMemoryPorts, type InMemoryPorts } from './helpers/in-memory-ports.js';
 
 const SIGNED_URL = 'https://example.org/watch?v=abc&token=SUPERSECRET&sig=deadbeef';
+
+/**
+ * D-203: a withFiles removal is only judgeable when the record carries a
+ * usable request — these roots make the artifacts below contained.
+ */
+const REQUEST: DownloadRequest = {
+  taskId: 't1', url: SIGNED_URL,
+  format: { quality: 'best', videoCodecPref: 'auto', formatId: null, sortingFields: null, extractAudio: false, audioQuality: 'best', audioCodecPref: 'auto', audioFormat: null, audioMultistreams: false },
+  subtitle: { enabled: false, languages: 'en.*', autoCaptions: false, skipTranslated: true, convertTo: 'none', embed: false, keepSubtitleFile: false },
+  paths: { videoDir: 'C:/V', audioDir: 'C:/V', commandDir: 'C:/cmd', privateMode: false, subdirByExtractor: false, subdirByPlaylist: false, outputTemplate: '%(title)s.%(ext)s', tempDir: 'C:/temp/t1' },
+  network: { rateLimit: null, proxy: null, cookiesFile: null, userAgent: null, ipv4Only: false, concurrentFragments: null, aria2cPath: null },
+  advanced: { sponsorblockRemove: null, downloadSections: null, splitChapters: false, customTitle: null, debug: false, downloadArchive: null, customCommand: null },
+};
 
 function record(id: string, overrides: Partial<TaskRecord> = {}): TaskRecord {
   return {
@@ -530,7 +543,9 @@ describe('m5 ipc · removing a task together with its local files (D-87)', () =>
   it('recycles exactly this task artifacts, then removes the record', async () => {
     const seen: string[][] = [];
     const records = [
-      record('t1', { state: 'Completed', artifacts: ['C:/V/a.mp4', 'C:/V/a.vtt'] }),
+      // D-203: a withFiles removal is only judgeable with a usable request —
+      // the roots (C:/V) make the recorded artifacts contained.
+      record('t1', { state: 'Completed', artifacts: ['C:/V/a.mp4', 'C:/V/a.vtt'], request: REQUEST }),
       record('t2', { state: 'Completed' }),
     ];
     const { handlers, calls } = await harness(records, {
@@ -545,7 +560,7 @@ describe('m5 ipc · removing a task together with its local files (D-87)', () =>
   });
 
   it('keeps the record when the recycle bin handled only part of the files', async () => {
-    const records = [record('t1', { state: 'Completed', artifacts: ['a.mp4', 'b.vtt'] })];
+    const records = [record('t1', { state: 'Completed', artifacts: ['C:/V/a.mp4', 'C:/V/b.vtt'], request: REQUEST })];
     const { handlers, calls } = await harness(records, {
       trashFiles: { trash: async (paths) => paths.slice(0, 1) },
     });
@@ -555,6 +570,23 @@ describe('m5 ipc · removing a task together with its local files (D-87)', () =>
     expect(result.ok).toBe(false);
     expect(result.code).toBe('ERROR');
     expect(calls).toHaveLength(0);
+  });
+
+  it('D-203 · request-less record: the whole withFiles batch is refused, record kept', async () => {
+    const seen: string[][] = [];
+    const records = [record('t1', { state: 'Completed', artifacts: ['C:/V/a.mp4'] })];
+    const { handlers, calls } = await harness(records, {
+      trashFiles: { trash: async (paths) => { seen.push([...paths]); return [...paths]; } },
+    });
+    const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({
+      taskId: 't1', action: 'remove', withFiles: true,
+    }) as Record<string, unknown>;
+    expect(result['ok']).toBe(false);
+    expect(result['code']).toBe('FILE_DELETE_FAILED');
+    expect(result['failureKind']).toBe('file-cleanup');
+    expect(String(result['reason'])).toContain('无法验证产物文件归属');
+    expect(seen).toEqual([]);          // the recycle port is never reached
+    expect(calls).toHaveLength(0);     // the record is NOT removed
   });
 
   it('refuses withFiles for other actions and rejects non-boolean values', async () => {

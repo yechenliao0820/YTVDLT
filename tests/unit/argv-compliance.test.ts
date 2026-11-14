@@ -98,3 +98,37 @@ describe('B3 · benign values are never mistaken for options', () => {
     ])).not.toThrow();
   });
 });
+
+// D-202: a bare http(s) URL is ONE argv element handed to the child process
+// without a shell, so `--exec` / `po_token` embedded in a URL (query parameter,
+// …) can never be parsed as an option by yt-dlp — the forbidden-substring scan
+// must not fire on URL-shaped tokens. Everything else stays fully scanned.
+describe('D-202 · URL-shaped tokens are exempt from the substring scan only', () => {
+  it('accepts a URL that carries --exec in its query', () => {
+    expect(() => assertNoForbiddenOptions([
+      '--no-playlist', '--', 'https://example.org/watch?v=1&next=--exec&x=1',
+    ])).not.toThrow();
+  });
+
+  it('accepts a URL that carries po_token / po-token spellings', () => {
+    expect(() => assertNoForbiddenOptions([
+      '--no-playlist', '--', 'https://example.org/watch?po_token=ABC&po-token=DEF',
+    ])).not.toThrow();
+  });
+
+  it('still rejects a standalone --exec and --exec=value', () => {
+    expect(() => assertNoForbiddenOptions(['--', '--exec']))
+      .toThrow(/forbidden option rejected/);
+    expect(() => assertNoForbiddenOptions(['--exec=calc.exe']))
+      .toThrow(/forbidden option rejected/);
+  });
+
+  it('still rejects an --extractor-args PO-token injection (non-URL value stays scanned)', () => {
+    expect(() => assertNoForbiddenOptions([
+      '--no-playlist', '--extractor-args', 'youtube:po_token=XYZ',
+    ])).toThrow(/forbidden option rejected/);
+    expect(() => assertNoForbiddenOptions([
+      '--no-playlist', '--extractor-args=youtube:po_token=XYZ',
+    ])).toThrow(/forbidden option rejected/);
+  });
+});

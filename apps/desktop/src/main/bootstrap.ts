@@ -469,6 +469,9 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
   // geolocation, clipboard-read or OS notifications, and `YTVDLT` never calls
   // `Notification` from the renderer (notifications are native, main-side).
   // Denying at the session level is the only place that covers every frame.
+  // D-198: when the surface provides no session these gates are silently
+  // skipped (only unit-test fakes do that); the production surface wires the
+  // real `session.defaultSession` in electron-entry.ts.
   const defaultSession = electron.session?.defaultSession;
   defaultSession?.setPermissionRequestHandler?.((_contents, _permission, callback) => { callback(false); });
   defaultSession?.setPermissionCheckHandler?.(() => false);
@@ -526,16 +529,25 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
   let quitting = false;
 
   // 4. Close-to-tray: only when a tray really exists. Without this guard a
-  //    failed tray creation would hide the window with no way to bring it back.
+  //    failed tray creation would hide the window with no way to bring it back
+  //    (D-60 fallback). When hiding, the `close` event MUST be prevented:
+  //    real Electron DESTROYS the window unless preventDefault() runs, which
+  //    fires `window-all-closed` -> `app.quit()` and kills running downloads
+  //    instead of minimizing to the tray (D-197). While quitting — menu quit,
+  //    tray quit or `dispose()` — the event is left untouched so the real
+  //    quit path stays intact.
   let trayReady = false;
-  window.on('close', () => {
+  window.on('close', ((event: { preventDefault(): void }) => {
     const intent = { action: 'close' as const, minimizeToTray: trayReady, active: stats().active };
-    if (shouldHideToTray(intent) && !quitting) window.hide();
+    if (shouldHideToTray(intent) && !quitting) {
+      event.preventDefault();
+      window.hide();
+    }
     // D-88: private mode clears the history on every window close (hiding to
     // the tray included). The desktop entry also guards before-quit for the
     // case where the process really exits.
     void Promise.resolve(options.onWindowClose?.()).catch(() => { /* best effort */ });
-  });
+  }) as () => void);
 
   // 4.5 应用菜单（D-82 中文化 / D-85 跟随语言）。没有这一步 Electron 会自带
   //     英文默认菜单（File / Edit / View / Window）。语言切换会让渲染层重载

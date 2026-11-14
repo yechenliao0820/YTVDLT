@@ -28,6 +28,8 @@ interface Harness {
     windowEvents: Map<string, () => void>;
     shown: number;
     focused: number;
+    /** D-197: close-to-tray hides the window instead of destroying it. */
+    hidden: number;
     destroyed: number;
     trayDestroyed: number;
     appMenu: unknown;
@@ -45,10 +47,12 @@ function fakeElectron(options: {
   locale?: string;
   /** D-147: shared timeline so tests can prove write-back happens before loadURL. */
   trace?: string[];
+  /** D-197: make `new Tray(...)` throw so `trayReady` stays false (D-60 fallback). */
+  trayFails?: boolean;
 } = {}): Harness {
   const log: Harness['log'] = {
     quit: 0, handlers: [], windows: [], urls: [], trayToolTip: [], trayMenus: [],
-    appEvents: new Map(), windowEvents: new Map(), shown: 0, focused: 0, destroyed: 0, trayDestroyed: 0,
+    appEvents: new Map(), windowEvents: new Map(), shown: 0, focused: 0, hidden: 0, destroyed: 0, trayDestroyed: 0,
     appMenu: null, contextMenus: [], ipcListeners: new Map(), windowOpenHandler: null,
   };
 
@@ -74,7 +78,7 @@ function fakeElectron(options: {
     focus(): void { log.focused += 1; }
     isMinimized(): boolean { return false; }
     restore(): void { /* no-op */ }
-    hide(): void { /* no-op */ }
+    hide(): void { log.hidden += 1; }
     destroy(): void { log.destroyed += 1; }
   }
 
@@ -107,7 +111,9 @@ function fakeElectron(options: {
       shouldUseDarkColors: options.theme === 'dark',
       on: () => { /* no-op */ },
     },
-    Tray: FakeTray as unknown as ElectronLike['Tray'],
+    Tray: (options.trayFails === true
+      ? function FailingTray(): never { throw new Error('tray unavailable'); }
+      : FakeTray) as unknown as ElectronLike['Tray'],
     Menu: {
       buildFromTemplate: (template: readonly MenuItemLike[]) => Object.assign([...template], {
         popup: () => { log.contextMenus.push([...template]); },
@@ -117,6 +123,30 @@ function fakeElectron(options: {
     clipboard: { readText: () => '' },
   };
   return { electron, log };
+}
+
+/**
+ * D-197: real-Electron close semantics the fake window must mirror. A `close`
+ * event that is NOT prevented DESTROYS the window once the listener returns,
+ * which fires `window-all-closed` -> `app.quit()` (win32). Returns whether the
+ * close was prevented. With the pre-D-197 listener (which ignored the event)
+ * every close took the destroy path and quit the app — the assertions below
+ * would catch that regression.
+ */
+function emitClose(log: Harness['log']): boolean {
+  const listener = log.windowEvents.get('close') as unknown as
+    | ((event: { preventDefault(): void }) => void)
+    | undefined;
+  if (listener === undefined) throw new Error('no close listener registered');
+  let prevented = false;
+  listener({ preventDefault: () => { prevented = true; } });
+  if (!prevented) {
+    // Real Electron: an unprevented close destroys the window, which fires
+    // `window-all-closed` and (on the default win32 platform) `app.quit()`.
+    log.destroyed += 1;
+    log.appEvents.get('window-all-closed')?.();
+  }
+  return prevented;
 }
 
 function fakeHost(): { host: M5Host; dispose: ReturnType<typeof vi.fn> } {
@@ -300,8 +330,10 @@ describe('bootstrap · deep link + tray + lifecycle', () => {
     const { electron, log } = fakeElectron();
     const { host } = fakeHost();
     const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
-    // close -> hide (close-to-tray), not destroy
-    log.windowEvents.get('close')?.();
+    // close -> preventDefault + hide (close-to-tray, D-197), not destroy. The
+    // listener now receives the close event; emitClose mirrors real Electron.
+    expect(emitClose(log)).toBe(true);
+    expect(log.hidden).toBe(1);
     expect(log.destroyed).toBe(0);
 
     const secondInstance = log.appEvents.get('second-instance');
@@ -317,6 +349,56 @@ describe('bootstrap · deep link + tray + lifecycle', () => {
     handle?.dispose();
     expect(log.destroyed).toBe(1);
     expect(log.trayDestroyed).toBe(1);
+  });
+});
+
+describe('bootstrap · close-to-tray real semantics (D-197)', () => {
+  it('with a tray: close is prevented and hidden, the app keeps running', async () => {
+    const { electron, log } = fakeElectron();
+    const { host } = fakeHost();
+    const onWindowClose = vi.fn();
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host, onWindowClose });
+    // Tray creation succeeded -> trayReady. The close MUST be prevented: with
+    // the fake's real semantics an unprevented close destroys the window and
+    // quits the app (the pre-D-197 behaviour), so these assertions pin the fix.
+    expect(emitClose(log)).toBe(true);
+    expect(log.hidden).toBe(1);
+    expect(log.destroyed).toBe(0);
+    expect(log.quit).toBe(0);
+    // D-88: the private cleanup still fires on every close attempt.
+    expect(onWindowClose).toHaveBeenCalledTimes(1);
+    handle?.dispose();
+    expect(log.destroyed).toBe(1);
+  });
+
+  it('without a tray (D-60 fallback): close is NOT prevented, the real close quits', async () => {
+    const { electron, log } = fakeElectron({ trayFails: true });
+    const { host } = fakeHost();
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
+    expect(handle?.tray).toBeNull();
+    // Hiding would orphan the window, so the close stays unprevented: real
+    // Electron destroys the window and the normal quit path completes.
+    expect(emitClose(log)).toBe(false);
+    expect(log.hidden).toBe(0);
+    expect(log.destroyed).toBe(1);
+    expect(log.quit).toBe(1); // window-all-closed -> app.quit()
+    handle?.dispose();
+  });
+
+  it('while quitting: close is NOT prevented, quit still completes', async () => {
+    const { electron, log } = fakeElectron();
+    const { host } = fakeHost();
+    const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
+    // Tray quit (idle) sets `quitting = true` and starts the quit; the closing
+    // window must not be prevented from dying.
+    const menu = log.trayMenus[0] as MenuItemLike[];
+    (menu.find((item) => item.id === 'quit')?.click as () => void)();
+    expect(log.quit).toBe(1);
+    expect(emitClose(log)).toBe(false);
+    expect(log.hidden).toBe(0);
+    expect(log.destroyed).toBe(1);
+    expect(log.quit).toBe(2); // the close finishes -> window-all-closed -> quit
+    handle?.dispose();
   });
 });
 

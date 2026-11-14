@@ -232,6 +232,32 @@ function fileSystemPort(): FileSystemPort {
       const buffer = await fs.readFile(path);
       return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
     },
+    /**
+     * D-204 (append-only): resolve a path through every symlink / NTFS
+     * junction to its FINAL real location — the guard point the open-file /
+     * open-folder gate re-runs containment on. On Windows libuv implements
+     * this via the final-path API, so a junction or symlink is reported as
+     * its TARGET; a junction pointing at a FILE is treated as broken by the
+     * OS itself (stat/realpath both fail with ENOENT, so nothing can be
+     * opened through it). A `.lnk` shell link is NOT followed — it is a
+     * regular file to the fs layer, matching the shell's own behaviour.
+     *
+     * UNC / long-path notes: depending on the Node/libuv version the result
+     * may be the plain absolute path or the extended-length form
+     * (`\\?\C:\...` for drives, `\\?\UNC\srv\share\...` for network shares)
+     * regardless of how the input was spelled. That is fine: the containment
+     * normalization (normalizedForContainment) unwraps both prefixes before
+     * comparing, so the RAW result is handed to the caller untouched and
+     * containment judges it as an ordinary path.
+     *
+     * Rejections keep the raw errno of the underlying call: ENOENT / ENOTDIR
+     * mean "not there" (callers treat that as artifact-missing), while
+     * EACCES / EPERM / ELOOP mean "cannot prove where this points" (callers
+     * fail closed).
+     */
+    async realpath(path: string): Promise<string> {
+      return fs.realpath(path);
+    },
   };
 }
 

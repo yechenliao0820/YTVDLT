@@ -8,7 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
-import type { TaskRecord } from '@ytvdlt/shared';
+import type { DownloadRequest, TaskRecord } from '@ytvdlt/shared';
 import { CommandTemplateStore, ConfigStore } from '@ytvdlt/core';
 import type { TaskDetailAction, TaskDetailResult } from '@ytvdlt/core';
 import {
@@ -22,11 +22,26 @@ const FILE_A = 'C:/Videos/a.mp4';
 const FILE_B = 'C:/Videos/b.mp4';
 const SHARED = 'C:/Videos/same.mp4';
 
+/**
+ * D-203: the acceptance matrix below exercises the TRASH-OUTCOME contract
+ * (trashed / missing / error -> record kept or removed), so its fixtures carry
+ * a usable request whose roots (C:/Videos) contain every artifact. The
+ * request-less refusal itself is pinned in its own test at the bottom.
+ */
+const REQUEST: DownloadRequest = {
+  taskId: 't1', url: SIGNED,
+  format: { quality: 'best', videoCodecPref: 'auto', formatId: null, sortingFields: null, extractAudio: false, audioQuality: 'best', audioCodecPref: 'auto', audioFormat: null, audioMultistreams: false },
+  subtitle: { enabled: false, languages: 'en.*', autoCaptions: false, skipTranslated: true, convertTo: 'none', embed: false, keepSubtitleFile: false },
+  paths: { videoDir: 'C:/Videos', audioDir: 'C:/Videos', commandDir: 'C:/cmd', privateMode: false, subdirByExtractor: false, subdirByPlaylist: false, outputTemplate: '%(title)s.%(ext)s', tempDir: 'C:/temp/t1' },
+  network: { rateLimit: null, proxy: null, cookiesFile: null, userAgent: null, ipv4Only: false, concurrentFragments: null, aria2cPath: null },
+  advanced: { sponsorblockRemove: null, downloadSections: null, splitChapters: false, customTitle: null, debug: false, downloadArchive: null, customCommand: null },
+};
+
 function record(id: string, artifacts: readonly string[]): TaskRecord {
   return {
     id, url: SIGNED, kind: 'video', state: 'Completed',
     createdAt: '2026-11-10T00:00:00.000Z', updatedAt: '2026-11-10T00:00:00.000Z',
-    mediaInfo: null, request: null, artifacts: [...artifacts], lastPercent: 100, error: null,
+    mediaInfo: null, request: REQUEST, artifacts: [...artifacts], lastPercent: 100, error: null,
     privateMode: false, postprocessed: false,
   };
 }
@@ -201,5 +216,37 @@ describe('D-120 · legacy D-87 adapter contract still holds', () => {
     });
     const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({ taskId: 't1', action: 'remove', withFiles: true }) as Record<string, unknown>;
     expect(result['code']).toBe('SHELL_UNAVAILABLE');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-203 · request-less records fail CLOSED: without a usable request the
+// ownership of every artifact is unverifiable, so the whole withFiles batch is
+// refused, the recycle port is never called and the record is kept.
+// ---------------------------------------------------------------------------
+describe('D-203 · request-less record refuses the whole batch (record kept)', () => {
+  it('request===null: refused before the recycle port, record NOT removed', async () => {
+    const legacy: TaskRecord = { ...record('t1', [FILE_A]), request: null };
+    const h = await harness([legacy], () => {
+      throw new Error('trash port must not be reached for an unverifiable record');
+    });
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, { taskId: 't1', action: 'remove', withFiles: true });
+    expect(result['ok']).toBe(false);
+    expect(result['code']).toBe('FILE_DELETE_FAILED');
+    expect(result['failureKind']).toBe('file-cleanup');
+    expect(String(result['reason'])).toContain('无法验证产物文件归属');
+    expect(String(result['message'])).toContain('任务记录已保留');
+    expect(result['failedCount']).toBe(1);
+    expect(h.trashedRequests).toEqual([]);
+    expect(h.calls).toEqual([]);
+  });
+
+  it('the kept record can still be removed WITHOUT files (fallback intact)', async () => {
+    const legacy: TaskRecord = { ...record('t1', [FILE_A]), request: null };
+    const h = await harness([legacy], (paths) => paths.map(STATUS('trashed')));
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, { taskId: 't1', action: 'remove' });
+    expect(result['ok']).toBe(true);
+    expect(h.calls).toEqual(['t1:remove']);
+    expect(h.trashedRequests).toEqual([]); // no file was ever touched
   });
 });

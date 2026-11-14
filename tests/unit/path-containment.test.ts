@@ -204,3 +204,30 @@ describe('D-193 · isSpecificRoot / trustedArtifactRoots', () => {
     })).toEqual(['c:/videos', 'c:/music', 'c:/v/.ytvdlt-incomplete/t1']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// D-204 · 适配器 realpath 的返回形态直接交给纯函数判定
+// （node-ports 的 realpath 在 Windows 走 GetFinalPathNameByHandleW，返回
+//   `\\?\C:\...` / `\\?\UNC\srv\share\...` 扩展形态；这里钉住 containment
+//   对这些形态的判定不变，真实路径无需二次清洗即可复核归属。纯函数行为
+//   与 D-204 之前完全一致 —— 只是把判定面钉进回归网。）
+// ---------------------------------------------------------------------------
+describe('D-204 · realpath result forms are judged by the pure gate', () => {
+  it('盘符 realpath（\\?\C:\...）形态：根内 / 根外判定一致', () => {
+    expect(isPathInsideRoots('\\\\?\\C:\\Videos\\Title [id].mp4', ['C:/Videos'])).toBe(true);
+    expect(isPathInsideRoots('\\\\?\\C:\\Windows\\evil.mp4', ['C:/Videos'])).toBe(false);
+  });
+
+  it('UNC realpath（\\?\UNC\srv\share\...）形态', () => {
+    const roots = ['//srv/share/Videos'];
+    expect(isPathInsideRoots('\\\\?\\UNC\\srv\\share\\Videos\\a.mp4', roots)).toBe(true);
+    expect(isPathInsideRoots('\\\\?\\UNC\\srv\\share\\Elsewhere\\a.mp4', roots)).toBe(false);
+    // 拼写不同（UNC vs 盘符）不会让 UNC 真实路径混进盘符根。
+    expect(isPathInsideRoots('\\\\?\\UNC\\srv\\share\\Videos\\a.mp4', ['C:/Videos'])).toBe(false);
+  });
+
+  it('大小写 / 分隔符差异不改变判定（realpath 形态与 manifest 拼写可不同）', () => {
+    expect(isPathInsideRoots('\\\\?\\C:\\VIDEOS\\Sub\\A.MP4', ['c:/videos'])).toBe(true);
+    expect(isPathInsideRoots('\\\\?\\C:\\VideosEvil\\a.mp4', ['c:/videos'])).toBe(false);
+  });
+});

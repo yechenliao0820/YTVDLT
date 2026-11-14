@@ -229,3 +229,96 @@ describe('A-4.1-03 ConfigStore · saved_links 重启保持 + 损坏回退 WARNIN
     expect(restored.get<string[]>('saved_links', 'items')).toEqual(['https://example.org/x']);
   });
 });
+
+// --- D-201 · load() first-load race ------------------------------------------
+
+describe('D-201 · concurrent load() calls share one attempt', () => {
+  /** Config on disk that differs from the defaults in one observable key. */
+  const seededPorts = (): ReturnType<typeof createInMemoryPorts> => {
+    const mem = createInMemoryPorts();
+    const base = createDefaultConfig('2026-11-05T00:00:00.000Z');
+    const onDisk = {
+      ...base,
+      domains: { ...base.domains, network: { ...base.domains['network'], maxRate: 500 } },
+    };
+    mem.state.files.set(CONFIG_PATH, JSON.stringify(onDisk));
+    return mem;
+  };
+
+  it('the second concurrent caller waits for the real load instead of reading defaults', async () => {
+    const { ports } = seededPorts();
+    let readCalls = 0;
+    let readFinished = false;
+    const innerRead = ports.fs.readText.bind(ports.fs);
+    ports.fs.readText = async (path: string): Promise<string> => {
+      readCalls += 1;
+      // Hold the load open long enough that a premature return is observable.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const text = await innerRead(path);
+      readFinished = true;
+      return text;
+    };
+
+    const store = new ConfigStore({ ports });
+    const first = store.load();
+    const second = store.load();
+    await second;
+    // The second caller may only resolve once the real load has finished.
+    expect(readFinished).toBe(true);
+    expect(store.get('network', 'maxRate')).toBe(500);
+    await first;
+    // Both callers shared ONE attempt — the file was not read twice.
+    expect(readCalls).toBe(1);
+  });
+
+  it('a concurrent set() builds on the loaded file and never persists defaults over it', async () => {
+    const { ports, state } = seededPorts();
+    const innerRead = ports.fs.readText.bind(ports.fs);
+    ports.fs.readText = async (path: string): Promise<string> => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return innerRead(path);
+    };
+
+    const store = new ConfigStore({ ports });
+    const loading = store.load();
+    const setting = store.set('saved_links', 'items', ['https://example.org/x']);
+    await Promise.all([loading, setting]);
+
+    const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as {
+      domains: Record<string, Record<string, unknown>>;
+    };
+    expect(persisted.domains.saved_links?.['items']).toEqual(['https://example.org/x']);
+    // The on-disk value survived: the set() did not persist the defaults.
+    expect(persisted.domains.network?.['maxRate']).toBe(500);
+    expect(store.get('network', 'maxRate')).toBe(500);
+  });
+
+  it('a failing load rejects every concurrent caller once and is not retried', async () => {
+    const { ports } = createInMemoryPorts();
+    let fail = true;
+    let mkdirCalls = 0;
+    const innerWrite = ports.fs.writeTextAtomic.bind(ports.fs);
+    ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (fail) throw new Error('simulated disk failure');
+      return innerWrite(path, text);
+    };
+    const innerMkdir = ports.fs.mkdir.bind(ports.fs);
+    ports.fs.mkdir = async (dir: string): Promise<void> => {
+      mkdirCalls += 1;
+      return innerMkdir(dir);
+    };
+
+    const store = new ConfigStore({ ports });
+    const first = store.load();
+    const second = store.load();
+    // No silent default for the concurrent caller: both share the same refusal.
+    await expect(first).rejects.toThrow('simulated disk failure');
+    await expect(second).rejects.toThrow('simulated disk failure');
+
+    // Failure counts as attempted: a later load() stays a no-op and the I/O is
+    // not retried (pre-D-201 failure semantics preserved).
+    fail = false;
+    await expect(store.load()).resolves.toBeUndefined();
+    expect(mkdirCalls).toBe(1);
+  });
+});
