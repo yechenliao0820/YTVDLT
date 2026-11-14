@@ -13,7 +13,7 @@ import type { ITaskQueue } from '../ports.js';
 import type { ErrorReport } from '../error-report/error-report.js';
 import { maskUrlSecrets } from '../error-report/error-report.js';
 import { primaryMediaArtifact } from '../artifact-classify/kinds.js';
-import { artifactRootsOf, isPathInsideRoots } from '../path-resolver/containment.js';
+import { isPathInsideRoots, trustedArtifactRoots } from '../path-resolver/containment.js';
 
 export type TaskDetailAction =
   | 'open-file'
@@ -123,8 +123,16 @@ export class TaskDetailService {
     // snapshot. No request means the gate cannot judge and stays open (same
     // fail-open rule as the intake gate; a real download never produces a
     // request-less record).
-    const roots = artifactRootsOf(task.request?.paths ?? {});
-    if (roots.length > 0 && !isPathInsideRoots(target, roots)) {
+    const hasRequest = task.request !== null && task.request !== undefined;
+    const roots = trustedArtifactRoots(task.request?.paths ?? {});
+    // D-193: a stored request that yields no specific root is a damaged /
+    // restored snapshot, NOT a legacy record. Keep the fail-open tolerance for
+    // request-less records only; otherwise refuse instead of opening whatever
+    // path the snapshot happens to carry.
+    if (hasRequest && roots === null) {
+      return this.result(action, false, 'REFUSED', '任务输出目录不可判定，已拒绝打开');
+    }
+    if (roots !== null && !isPathInsideRoots(target, roots)) {
       return this.result(action, false, 'REFUSED', '产物路径超出任务输出目录，已拒绝打开');
     }
     const shell = this.deps.shell;

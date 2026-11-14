@@ -2081,3 +2081,23 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 两处入口在取 `kind` 前照抄 TXT 守卫：`if (rawKind !== undefined && rawKind !== 'video' && rawKind !== 'audio') throw new Error('[m5-ipc] invalid kind');`，随后用 `rawKind === 'audio' ? 'audio' : 'video'`。**`undefined → 默认 video` 保持不变**（向后兼容既有调用方）；守卫位于票据 `consume()` 之前，越界值不会烧掉预览票据。`PAYLOAD_KEYS` 白名单、`request.ts`、`electron-builder.yml` 均未改。补 4 条用例：两通道的越界拒绝矩阵（含字符串/数字/null）+ kind 缺省落 video、合法 audio 透传。 |
 | 验证 | `m5-channels.test.ts` 与 `playlist-batch-ipc.test.ts` 定向全绿；全量 `npm test` 2660/0；`typecheck` 5/5；M5 acceptance allGreen=true（10/10 gates）。 |
 | 未覆盖 | ① 主进程其它早期通道的枚举是否还有同类宽松兜底未做全量审计（本轮只覆盖审计点名的两处）；② 未做真机窗口对无效 payload 的端到端复现，验证停留在 handler 边界单测。 |
+
+## D-193 · 2026-11-14 · 收紧 D-184 封链的 fail-open 边界（外部在线审计 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 在线审计 P1：D-184「产物只认任务自己的输出根」的**入库主门**（`TaskQueue.acceptContainedArtifacts`）与**动作前副门**（`m5-channels` 的 withFiles 删除、`TaskDetailService.open`）的 roots **都来自同一条 `TaskRecord.request.paths`**。而 `task-store.sanitizeRecord()` 只校验 request 五个域是对象（D-161），`paths: {}`、三个目录字段全空/全无效、甚至 `videoDir: 'C:/'` 都能通过形状校验；`artifactRootsOf()` 返回空数组（或过宽根），`isPathInsideRoots()` 在空 roots 上刻意 fail-open → 两道门同时失效，任意路径（`C:/Windows/...`）可入库、进回收站、被 shell 打开。既有测试 `task-queue-containment.test.ts` 把「degenerate request without any roots fails open」当现状钉住；`artifact-containment-actions.test.ts` 也钉住了 request-less 记录的 fail-open。触发条件是本地快照被改/损坏/恢复异常后再点 remove/open，不是远程无条件，故审计定 P1 而非 P0。D-184 决策「未覆盖③」已预言此形态（「若未来出现 request 存在但三个路径字段全部不可用的形态会静默放行」）。 |
+| 根因 | ① fail-open 容错的**适用对象**被写成了「roots 为空」这一运行期结果，而不是「记录根本没有 request」这一数据事实；② 两道门共享同一信任源，缺一个独立的合理性校验；③ 形状校验只看「五个域是对象」，不看 `paths` 内部是否至少有一个可用且**具体**的目录。 |
+| 决策 | 新增 `path-resolver/containment.ts::isSpecificRoot()` 与 `trustedArtifactRoots()`：过滤掉过宽根（Windows 卷根 `c:`、POSIX `/`、裸 UNC 共享 `//host/share`），无任何可用根返回 `null`。三处消费方统一改为「记录**有** request 但 `roots === null` → fail-closed」：入库层把整批产物判为拒绝并转 `ARTIFACT_INCOMPLETE`/`Error`（沿用既有拒绝日志与文案，不新增错误码）；withFiles 删除整批拒绝（`FILE_DELETE_FAILED` + 「任务输出目录不可判定」真实理由，零回收、记录保留）；open 返回 `REFUSED`、shell 零调用。**`request === null` 的 legacy 记录仍 fail-open**，保持 D-120/D-184 冻结语义（既有两条测试钉住，本轮再补一条显式不回归）。不改 `artifactRootsOf()` / `isPathInsideRoots()` 的纯函数语义（有测试钉住 `[]` fail-open），不改 `sanitizeRecord()`——把坏 request 置 null 反而会触发 fail-open，是错误方向。纠正一条把漏洞钉成现状的既有断言（从「放行」改为「拒绝」，方向更严）。**两处独立判断**：① 审计提到「roots 都来自同一条记录」，根治需引入当前 config 下载目录作独立信任源；但用户改过下载目录后，历史任务会全部被误拒，改动面与回归风险远大于收益，故不做，改用「根必须具体」的合理性校验提高篡改门槛。② 过宽根过滤会让「把下载目录设成盘符根 / UNC 共享根」的极端配置无法打开或删除历史产物——该配置下 D-182 封链本就形同虚设，判为安全侧失败可接受；正常目录（至少一层子目录）零影响。 |
+| 验证 | `typecheck` 5/5；定向 14 个相关测试文件 **265/265**；新增/纠正用例覆盖：纯函数过宽根矩阵、空/全无效/全过宽 paths、混合根保留具体根、入库层整批拒绝转 Error + 不写历史 + WARNING、withFiles 零回收且记录保留、open REFUSED 且 shell 零调用、盘符根绕过被拒、legacy fail-open 不回归。未新增测试文件，`M3_TEST_FILE_MAP` 无需登记。 |
+| 未覆盖 | ① 若攻击者已有本地写权限，可把 `artifacts` 与 `paths` 同时改成一致的具体目录（如都指向 `C:/Windows`），纯软件自校验无法根治——需要外部信任源或签名快照，属独立设计决策；② 未在真机 Electron 窗口复现回收站删除（铁律 9）；③ UNC 共享**根**被判过宽，若用户确实把 NAS 共享根设为下载目录，需改为在配置层拒绝该设置并给出提示，本轮未做。 |
+
+## D-194 · 2026-11-14 · 中文 Windows 开机自启「值不存在」判断（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 在线审计 P2：`win-startup.ts` 的 `apply()` 与 `read()` 都用 `/unable to find/i.test(result.stderr)` 判定「Run 值已不存在」。中文 Windows 的 `reg.exe` 输出本地化文案（简中 `错误: 系统找不到指定的注册表项或值。`、繁中 `錯誤: 系統找不到指定的登錄機碼或值。`，日文亦不同），正则不命中 → `read()` 抛 `autostart read failed`，上层回落 config 镜像，开关可能显示旧值；`apply(false)` 把「值已不存在」这个本已是目标态的结果报成失败。仅中文 Windows + Run 值已不存在时触发，无数据丢失。 |
+| 根因 | 把**英文文案**当成「值不存在」这一结构化事实的代理；退出码 1 与空 stdout 才是与语言无关的信号，但原实现完全没用。 |
+| 决策 | 抽出导出的纯函数 `isRegValueAbsent(result)`：`code === 1` 且 stderr 正向命中多语言「未找到」词表（`unable to find` / `找不到` / `不存在` / `未找到` / `見つかりません`）。**刻意保持正向且窄**：未知语言仍 fail-closed（抛错/报失败，安全侧），`Access is denied.` 等真错误绝不被误吞。两处调用点统一替换，不再各自写正则。另按铁律 13 / D-181 的收尾规则，把 `README.md`「(now at D-187)」与 `README.zh-CN.md`「（已到 D-187）」两份镜像指针同步到本轮实际最大编号 **D-194**（全仓扫描确认只有这两行是「当前编号」指针，其余 D-xx 均为历史叙述引用；`docs/CHANGELOG.md` 维护方式第 3 条「不回头改历史行」，故审计提到的「未提交/未发版」历史行**不改**）。 |
+| 验证 | `win-startup.test.ts` 新增 4 例：英/简中/繁中/日文案正向识别、`apply(false)` 成功终态、`read()` 返回 false 不再抛错回落、真错误（拒绝访问/未知语言/成功退出）仍 fail-closed；定向 14 文件 265/265；`typecheck` 5/5。 |
+| 未覆盖 | ① 德/法/俄等未列入词表的 locale 仍会抛错回落 config（fail-closed，无错删风险），若需全覆盖应改为「退出码 1 + stdout 空 + 排除已知权限/语法错误」的结构化判定，另行决策；② 未在真实中文 Windows 上跑 `reg.exe` 验证文案逐字形态，词表依据系统本地化文案与注入式测试替身；③ 未覆盖 `reg.exe` 把诊断写到 stdout 而非 stderr 的非标准构建。 |
