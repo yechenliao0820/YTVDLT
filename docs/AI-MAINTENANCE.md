@@ -157,7 +157,7 @@ ui（零依赖） ← preload ← apps/desktop
 | **全屏唯一真相（菜单 / 按钮 / 所有页面）** | `apps/desktop/src/main/bootstrap.ts`（`WINDOW_FULLSCREEN` handler + 事件推送）、`main/app-menu.ts`（F11 click）、`ui/src/shell/app-nav.js`（按钮与 Esc） |
 | **主题 / 强调色 / 动效全局状态与持久化** | `packages/ui/src/theme/theme.js`（`set/sync/listen/state`）、`pages/settings/settings.js`、`main/m5-channels.ts::SETTINGS_GET/SET` |
 | **本地文件状态探测 / 删除任务时文件已不存在 / 打开文件与打开文件夹反馈** | `apps/desktop/src/main/local-file-status.ts`（errno 分类 + 短 TTL 缓存 + force 重查）、`apps/desktop/src/main/adapters/local-file-status-port.ts`（真实 `stat` + 幂等回收）、`main/m5-channels.ts::TASK_ACTION` / `TASK_LIST`、`core/src/task-detail/task-detail.ts::open`、`ui/src/pages/queue/queue.js::fileStateKey` / `openActionMessage` / `performRemoval`；卡片「打开文件」按钮**只在 live 模式注入**（静态预览不注入，保住冻结基线）；原理见 §9 坑 22 |
-| **产物路径封链（回收/打开防越界）** | `core/src/path-resolver/containment.ts`（纯函数：归一/大小写/拒 `..`/按段前缀）→ `core/src/task-queue/task-queue.ts::acceptContainedArtifacts`（入库主门：roots=该请求的 videoDir/audioDir/tempDir，全拒转 `ARTIFACT_OUTSIDE_ROOTS`）→ `main/m5-channels.ts::TASK_ACTION`（withFiles 整批拒绝）与 `core/src/task-detail/task-detail.ts::open`（REFUSED）两道副门；request===null 旧记录 fail-open（D-120 冻结语义）。D-184 |
+| **产物路径封链（回收/打开防越界）** | `core/src/path-resolver/containment.ts`（纯函数：归一/大小写/拒 `..`/按段前缀）→ `core/src/task-queue/task-queue.ts::acceptContainedArtifacts`（入库主门：roots=该请求的 videoDir/audioDir/tempDir，全拒转 `ARTIFACT_OUTSIDE_ROOTS`）→ `main/m5-channels.ts::TASK_ACTION`（withFiles 整批拒绝）与 `core/src/task-detail/task-detail.ts::open`（REFUSED）两道副门；**request 缺失/损坏/根不可判定一律拒绝、记录保留**（D-203，业主授权推翻 D-120 旧宽容）；withFiles 在 trash 前有 **realpath 整批预检**（`TrashFilesPort.preflight?` → `local-file-status-port.ts::preflightTrashPaths`：symlink/junction/根外/上下文不可解析 → 整批拒绝、回收站零调用，D-207）；open 门 realpath 解析最终目标后重校验（D-204）。D-184/D-203/D-204/D-207 |
 | **spawn 前取消（pre-spawn 窗口）** | `engine-ytdlp/src/yt-dlp-engine.ts`：runDownload 每个 pre-spawn await 后查 `isCanceled()`（最后一处紧贴 spawn，其后到 register 是同一同步块）→ `cancelBeforeSpawn()`（空 tempDir 非递归 rmdir + canceled 事件）；`cancel()` 在 killTree===null 时返回 **true**（false 仅保留 D-142「树没死仍在跑」语义）。D-182 |
 | **响应式布局（视口宽高驱动）** | `packages/ui/src/styles/layout.css`（`--ui-step` + 高特异性覆盖）；`ytvdlt.css` 仍是 M3 固定画幅，**不要改它** |
 | **TXT 清单批量导入（选文件 / 预览 / 确认入队）** | `packages/core/src/txt-import/parse.ts`（纯解析，URL 校验由外层注入）→ `apps/desktop/src/main/txt-import-service.ts`（一次性票据 + 真实计数）→ `apps/desktop/src/main/adapters/txt-file-picker.ts`（原生选择器 + 读）→ `main/txt-import-file.ts`（扩展名 / 大小 / 严格 UTF-8 纯解码）→ `m5-channels.ts::TXT_IMPORT_PICK/ENQUEUE` → `m4-host.ts::enqueueTxtBatch` → `TaskQueue.enqueueBatch()`；UI 在 `packages/ui/src/txt-import/txt-import.js`（**仅 live 模式注入**，静态基线不受影响） |
@@ -189,6 +189,7 @@ ui（零依赖） ← preload ← apps/desktop
 | **主题只在设置页生效 / 重启回浅色** | ① 设置页是否还在走 `CONFIG_SET`（M3 fixture，不持久化）② `theme.js` 的 `ytvdlt.appearance` 本地缓存与 `SETTINGS_GET` 回读 ③ `<html>` 上的 `data-theme` | 真正的持久化只走 `SETTINGS_SET` → `general.theme` | 再查 `config.json` 是否被只读目录回落、`theme.css` 是否被覆盖 |
 | **全屏退不出去 / 各页面按钮不一致** | ① 是否同时用了 HTML Fullscreen API 与 `Window.setFullScreen()` ② 菜单 F11 是否还挂 `role:'togglefullscreen'` ③ `WINDOW_FULLSCREEN` handler 是否注册、`enter-full-screen` 是否推送 | D-106 把两套状态合并为主进程单一真相 | 再查 `shell/app-nav.js` 的 bridge 分支与静态预览降级 |
 | **点 X / Ctrl+W 后应用直接退出、下载被中断** | ① close 监听器是否「preventDefault + hide」二连（真实 Electron 未拦必销毁窗口）② `trayReady` 是否成立——托盘创建失败会放行真实关窗，这是 D-60 ③ 的设计兜底不是 bug ③ `quitting` 是否在非退出路径被误置 | Electron 只认 preventDefault，hide 挡不住销毁；假 Electron 不模拟这一点，单测拦不住这类回归（D-197） | 再查 `window-all-closed` → `app.quit()` 退出路径、私密清理 before-quit 兜底与托盘点击聚焦 |
+| **删任务提示「无法验证产物文件归属」/「真实路径指向任务输出目录之外」** | ① 该任务是否 request 缺失/损坏的恢复记录（D-203 有意拒绝，不是 bug）② 产物路径是否含符号链接/junction（D-207 预检 realpath 解析到根外/父目录不可解析）③ 输出目录是否不可判定（下载位置被移动/跨盘） | 「无法证明归属就绝不删除、绝不放行」是业主验收红线，不得因「用户想删/想开」放松门禁 | 确认任务记录已保留、拒绝文案如实透出原因；真要删文件请用户在资源管理器手动操作 |
 | **「检查更新」没反应 / 一直提示失败** | ① `logs/app-*.jsonl` 里 `app-update` 与 `component-check` ② GitHub API 是否可达（`api.github.com/repos/yechenliao0820/YTVDLT/releases/latest`）③ `advanced.autoCheckAppUpdate` / `lastAppUpdateCheckAt` 是否把自动检查挡在节流窗口内 ④ 该版本是否已被「以后不再提示」写进 `advanced.skippedAppVersion` | 更新链路不碰 UI 状态，失败只写日志、不动正在运行的版本 | 再查 Release 资产名是否还能被 `selectInstallerAsset` 认出来（改名成非 `Setup` 且带 portable 字样会被打 0 分） |
 | **勾选「同时删除本地文件」后记录删不掉 / 卡片仍显示已完成但文件早已被外部删除** | ① 产物路径是不是已被用户在资源管理器删掉（`ENOENT` 是幂等完成，不是失败）② `TASK_ACTION` 是否在 `taskDetail.perform('remove')` 之前就 return ③ `EACCES` / `EBUSY` 有没有被误判成 `ENOENT` ④ `fileStatus` 是否来自过期缓存、重进页面有没有带 `refreshFileStatus` | 记录删除与文件清理必须解耦；只有真实文件系统错误才保留记录（原理见 §9 坑 22） | 再查共享物理文件的引用计数、`shell.trashItem` 的真实 errno、以及 `open-folder` 走的是目录检查而不是文件检查 |
 | **切语言 / 启动瞬间冒出 6 条演示任务** | ① `queue.js::tasks()` 的 live 分支是否又回退到 `SAMPLE` ② 是否在首条 `TASK_LIST` 回来前就 `render()` ③ 详情页是否把 `index.html` 里的 fixture 值直接画了出来 | 截图 fixture 只服务 `file://` 静态基线；live 模式「还不知道」必须是空白 / `data-state="loading"`，**绝不允许**用样例数据顶替（D-141） | 再查首条回复是否被 paint-key 吞掉（空队列尤其）、2.5 s 看门狗有没有转错误态 |
@@ -230,7 +231,7 @@ ui（零依赖） ← preload ← apps/desktop
 20. **剪贴板写入只走主进程通道**（D-178）：`CLIPBOARD_WRITE` 只收 `text` 单键、UTF-16 上限 1,000,000，主进程经既有 `ClipboardPort`（Electron `clipboard.writeText`）写入并回 `{ok}` + 稳定码（`CLIPBOARD_UNAVAILABLE` / `CLIPBOARD_WRITE_FAILED`）。打包版渲染层直调 `navigator.clipboard.writeText` 会被 D-170 的全拒 permission handler 静默拦截——新增复制能力一律走此通道，不再渲染层直调。
 21. **`CONFIG_GET` 有域白名单**（D-175）：主进程 `READABLE_CONFIG_DOMAINS` 只放行 `general` / `format` / `subtitle` 三个纯偏好域；`paths` / `network`（proxy / cookiesFile）/ `saved_links`（URL）/ `advanced` 一律**抛错**拒绝，不静默回空。放开新域前必须逐键证明非敏感 + 补单测 + 记决策（流程写在常量注释里）。`CONFIG_SET` 的 6 键白名单（D-168）不变。
 22. **入队/预检 URL 有长度上限**（D-186）：`DOWNLOAD_START` 与 `URL_SUPPORT_CHECK` 的 url 上限 `MAX_URL_CHARS = 4096`（UTF-16 单位），超限抛 `requires a bounded string url`、不回显 URL；预览通道（SUBTITLE_PREVIEW / PLAYLIST_PREVIEW）维持各自 2048，TXT 链路走 `TXT_IMPORT_LIMITS`——新增任何「渲染层提交 URL」的入口必须带长度上限。
-23. **artifact 路径封链双门**（D-184）：入库主门（TaskQueue 写 `record.artifacts` 前按该请求的 videoDir/audioDir/tempDir 过滤，全拒转 `ARTIFACT_INCOMPLETE` + `ARTIFACT_OUTSIDE_ROOTS` report）+ 动作副门（withFiles 回收整批拒绝、open 回 REFUSED）；纯函数在 `core/src/path-resolver/containment.ts`；request===null 的旧记录 fail-open（D-120 冻结语义，两侧有测试）。新增任何消费 artifacts 的破坏性动作必须先过同一封链。
+23. **artifact 路径封链双门**（D-184）：入库主门（TaskQueue 写 `record.artifacts` 前按该请求的 videoDir/audioDir/tempDir 过滤，全拒转 `ARTIFACT_INCOMPLETE` + `ARTIFACT_OUTSIDE_ROOTS` report）+ 动作副门（withFiles 回收整批拒绝、open 回 REFUSED）；纯函数在 `core/src/path-resolver/containment.ts`；**request===null / 结构损坏 / 根不可判定一律拒绝，记录保留**（D-203，业主授权推翻 D-120 旧宽容——「无法证明归属就绝不删除」是验收红线）；withFiles 在 trash 前有 D-207 realpath 整批预检（symlink/junction/根外/上下文不可解析 → 整批拒绝、回收站零调用）；打开侧 D-204 realpath 解析最终目标后重校验。新增任何消费 artifacts 的破坏性动作必须先过同一封链 + 同一预检。
 
 ---
 
@@ -344,7 +345,8 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 `fix/d-190-194`、`fix/d-195-196`）按业主决定全部保留，作为各轮改动的远端溯源点。
 
 **为什么不能直推**：`.github/workflows/ci.yml` 在 `push main` 与所有 PR 上跑
-（`windows-latest`；`pnpm typecheck` → `npm test`（四维 ≥70）→ `check-layering` →
+（`windows-latest`；`pnpm typecheck` → `npm test`（四维 ≥70）→ 安全套件定向步骤（D-203…D-207
+的新测试显式列入，含 skipped=0 守卫脚本）→ `check-layering` →
 `frozen-gate`），但 workflow 文件**不能强制自己必须过**——强制力完全来自仓库设置。
 所有 `uses:` 引用已钉 commit SHA（D-185，行尾 `# v<版本>` 注释供人工核对，含 desktop-pack.yml 的 upload-artifact）；升级 action 版本时按「GitHub API tag→commit 与 SHA→commit 双向回环」验证后改 SHA，绝不猜。
 `handoff-check.mjs` 不检查这一项，所以「本地全绿」不等于「可以合并」。
@@ -449,6 +451,7 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 
 37. **真实 Electron 的 close 事件未被 `preventDefault()` 就必然销毁窗口，而假 Electron 不模拟这一点**（D-197）：「想 hide」和「不销毁」是两件事——`window.hide()` 只藏窗口，close 的默认销毁照常发生 → `window-all-closed` → `app.quit()`，下载被中断。close 相关单测必须复刻真实语义（emitClose 模式：构造带 `preventDefault` 的 event 调 listener；未被拦 → 视同销毁并触发 `window-all-closed`），否则测试永远绿、真机必坏。
 38. **「类型可选 + 双层可选链」意味着「不接线 = 功能不存在」**（D-198）：`electron.session?.defaultSession?.setPermission…Handler` 两层都可选，surface 不给 `session` 键时 deny-all 两门在生产从未安装，单测还全绿（假对象根本没有 session）。检查任何「权限/安全加固」功能，先 grep 生产 surface（`electron-entry.ts::electronSurface()`）是否真的提供了依赖键；新增这类键时同步补「传了必注册、不传静默跳过」的真断言。
+39. **「字符串上在可信根内」的路径可以真实指向根外：Windows reparse point（symlink/junction）是真实逃逸向量**（D-204/D-207）：containment 是纯字符串包含，junction 可以是**中间组件**（`<videoDir>/link/file.mp4`，link 外指）——末段 lstat 报普通文件、完全穿透；悬空 junction 还会让 stat/lstat ENOENT 被误读成「文件已删」。两侧策略刻意不同，不要复用同一守卫：**删除面**（不可逆）trash 前对整批 realpath 预检，任一 symlink/根外/上下文不可解析 → 整批拒绝、回收站零调用、记录保留；**打开面**（跟随意图）realpath 解析最终目标后重校验，根外 REFUSED、ENOENT 走缺失流程、EACCES/ELOOP fail-closed。`realpath` 缺席只存在于旧测试假对象（生产 node-ports 恒提供）。
 
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
@@ -478,6 +481,8 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 | **IPC / 导航边界未做真机窗口验证**：sender、主 frame、`will-navigate`、`setWindowOpenHandler` 目前只有假 Electron 单测；打包后真机点一遍待业主指令（铁律 9） | `main/bootstrap.ts`、`tests/unit/ipc-trust-boundary.test.ts` |
 | **本轮加固缺在线 / 安装包证据**：HTTP 逐跳、有界读取、IPC 边界全部是离线受控测试（127.0.0.1 + 假 Electron）；真实站点预检六态矩阵与 Windows 安装包验收需业主放行国际网并点名打包（铁律 9） | `tests/unit/http-network-boundary.test.ts`；口径见 D-137「未覆盖」 |
 | **日志页（task-log）在 live 模式没有注入器与导航入口**：`__YTVDLT_TASK__` 只有读取方、无注入方，「复制日志」暂无真实用户路径（D-178 已保证接线后即可用） | `ui/src/pages/task-log/`、`scripts/e2e-cases.mjs` |
+| **主进程拒绝/失败文案（文件删除、打开、D-203/D-204/D-207 新句）未接英文 UI 映射**：en 界面经 `result.message` 原样显示中文（既有 code→i18n 映射只覆盖 7 个码） | `apps/desktop/src/main/m5-channels.ts` 文案常量、`packages/ui/src/i18n/messages.js` |
+| **文件权限的 TOCTOU 竞态、真实文件符号链接、UNC 管理员共享：登记为未测边界**（能力门显式 skip，不写抖动测试假装覆盖；junction 全矩阵与 realpath 已真实 fs 实测） | `tests/unit/win-fs-link-security.test.ts` 头注、D-206/D-207「未覆盖」；Electron 真进程 `shell.trashItem` 亦未端到端实测 |
 
 > 这张表会随开发推进变短。**完成一项就删一行**，不要留着写「已做」——那是本手册最容易腐烂的地方。
 >

@@ -24,6 +24,21 @@
 #    而红；修复后仍不放宽任何断言与覆盖率门限。
 # 4) 安装包打包（约 5 分钟且属业主点名项，手册 §0 铁律 9）：见同目录
 #    desktop-pack.yml —— 仅 workflow_dispatch 手动触发，永不随 push/PR 运行。
+#
+# ── 本轮追加说明（A-D206 安全轮）：Security suite 步骤的存在理由 ──────────
+# 上方 1)-4) 的排除清单维持不变，本条不是排除项。新增的「Security suite
+# (fail-closed · links · registry i18n)」步骤（Tests 之后、门禁之前）：
+# 7 个安全边界测试文件本就在 npm test 全量套件内，该步骤把它们【点名单独
+# 重跑】（显式纳入：每个文件对应本轮安全要求 1-6 之一，映射见步骤注释），
+# 并带一个跳过守卫（要求 7：windows-latest 管理员 runner 上
+# win-fs-link-security 的 skipped 必须为 0；守卫对 vitest JSON 结果做结构
+# 性校验——缺文件/坏 JSON/非终态用例一律显式失败，绝不静默放过）。这是
+# 增量步骤：既有门禁（typecheck / coverage 阈值 / layering / frozen）与
+# job 名（= required status check）一律未动。特殊权限说明（要求 8）：
+# junction 无需权限；文件/目录 symlink 需要 SeCreateSymbolicLinkPrivilege
+# —— runner 以管理员运行可用；本地无开发者模式时按能力探测显式 skip，
+# 本地覆盖范围以 A-D206 能力探测输出为准（详见该步骤注释与
+# tests/unit/win-fs-link-security.test.ts 头注释）。
 
 name: CI
 
@@ -105,6 +120,57 @@ jobs:
 
       - name: Tests (unit + contract with coverage gate)
         run: npm test
+
+      # ── Security suite（A-D206 安全轮 · 本轮安全边界测试的显式纳入，要求 9）──
+      # 以下 7 个文件已被上面的 npm test 全量套件覆盖；这里【点名单独重跑】，
+      # 让本轮安全要求（1-6）在 CI 报告里有步骤级、可定位的证据，而不是混在
+      # 全量结果里。文件 ↔ 本轮安全要求映射：
+      #   - tests/unit/artifact-containment-actions.test.ts → 要求 3/5
+      #     （request===null 时回收门 fail-closed、越界拒绝、混合批整批拒绝、
+      #     回收站 spy 零误收；D-182 / D-203）
+      #   - tests/unit/restore-chain-fail-closed.test.ts → 要求 4（损坏快照走
+      #     完整启动恢复链后，危险 artifacts 不复活；A-D203 / D-195）
+      #   - tests/unit/win-fs-link-security.test.ts → 要求 1/2/5（真实
+      #     junction/symlink：D-203 删除守卫 + D-204 realpath 打开守卫 +
+      #     拒绝时回收站零调用；A-D206）
+      #   - tests/unit/task-detail.test.ts / task-detail-folder.test.ts →
+      #     要求 2 的打开面（open 门 fail-closed + realpath 分支；D-204）
+      #   - tests/unit/win-startup.test.ts → 要求 6（注册表多语种 not-found
+      #     识别 + Access-Denied / 未知错误 fail-closed；D-166）
+      #   - tests/unit/path-containment.test.ts → 要求 1 的纯函数门面（路径
+      #     归一化 / 长路径前缀 / UNC 形态；D-182）
+      # 特殊权限说明（要求 8）：junction 创建【无需】任何权限（junction 用例
+      # 永不跳过）；文件/目录 symlink 需要 SeCreateSymbolicLinkPrivilege ——
+      # windows-latest runner 以管理员运行，应当可用。本地开发机无开发者模式
+      # 时，该套件按能力探测对 file-symlink / UNC 用例【显式 skip】（可数，
+      # 不静默），本地覆盖范围以 A-D206 能力探测输出（A-0/B-0/C-1 用例的
+      # stdout）为准，详见 tests/unit/win-fs-link-security.test.ts 头注释。
+      # Reporter 说明：CLI 显式指定 --reporter 会整体覆盖 vitest.config.ts 的
+      # reporters，把定向结果落到独立文件 reports/vitest-security-results.json
+      # —— 不会覆盖 Tests 步骤全量套件写入的 reports/vitest-results.json
+      # （scripts/acceptance.mjs 的证据输入）。
+      # shell: bash 说明：Actions 对 windows 的默认 pwsh 只把【最后一条】命令
+      # 的 $LASTEXITCODE 作为步骤退出码，多行 run 里 vitest 失败会被下一行吞掉；
+      # bash（Actions 自动附加 -eo pipefail）保证任何一条命令非零即整步失败。
+      - name: Security suite (fail-closed · links · registry i18n)
+        shell: bash
+        run: |
+          pnpm exec vitest run \
+            --reporter=default \
+            --reporter=json \
+            --outputFile.json=reports/vitest-security-results.json \
+            tests/unit/artifact-containment-actions.test.ts \
+            tests/unit/restore-chain-fail-closed.test.ts \
+            tests/unit/win-fs-link-security.test.ts \
+            tests/unit/task-detail.test.ts \
+            tests/unit/task-detail-folder.test.ts \
+            tests/unit/win-startup.test.ts \
+            tests/unit/path-containment.test.ts
+          # 跳过守卫（要求 7）：CI 管理员 runner 上 win-fs-link-security 的
+          # skipped 必须为 0（junction 用例无需权限、永不跳过）。守卫同时做
+          # 结构性校验：JSON 缺失/损坏、七个文件任何一个没出现在结果里、
+          # 非终态用例、运行未全绿 —— 一律 exit 2 拒绝放行，绝不静默放过。
+          node scripts/check-security-suite-results.mjs reports/vitest-security-results.json
 
       # 分层依赖检查（core 禁 import node:*/electron；结果写 reports/layering.json，
       # 目录不存在时脚本自建，gitignore 不影响）。

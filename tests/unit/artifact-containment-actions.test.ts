@@ -7,10 +7,28 @@
  * snapshot):
  *   - `withFiles` removal refuses the WHOLE batch before anything is trashed;
  *   - `open-file` / `open-folder` refuse an outside target (core task-detail);
- *   - a record without a request cannot be judged and keeps the frozen D-120
- *     semantics (fail-open, pinned deliberately).
+ *   - D-203 (breaking change, supersedes the frozen D-120 tolerance): a record
+ *     without a usable request has no trustworthy roots, and the recycle gate
+ *     now fails CLOSED for it — the batch is refused and the record is kept.
+ *
+ * The D-203 suite below also exercises the real trash adapter
+ * (`createTrashFilesPort`) against REAL filesystem entries under `os.tmpdir()`:
+ * a plain file still recycles, and a real NTFS junction is refused before the
+ * destructive call (junctions need no administrator rights to create).
+ *
+ * D-207 closes the two A-D206 findings this suite's fixtures could not express:
+ * a MIDDLE-path junction escapes the name-level containment (the kernel
+ * resolves it silently) — the whole batch is now pre-flighted (realpath
+ * re-check) and refused before the recycle bin is ever reached; and a mixed
+ * batch (legit file + link) can no longer push the legit file into the bin
+ * first and then fail the batch without saying so. A provably-gone file
+ * (deleted externally, parent intact) keeps the D-120 idempotent `missing`
+ * flow through the same pre-flight.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, promises as fs, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
 import type { DownloadRequest, TaskRecord } from '@ytvdlt/shared';
 import {
@@ -22,6 +40,7 @@ import type { IShellPort } from '@ytvdlt/shared';
 import {
   createM5Handlers, type M5ChannelDeps, type SystemAppearancePort,
 } from '../../apps/desktop/src/main/m5-channels.js';
+import { createTrashFilesPort } from '../../apps/desktop/src/main/adapters/local-file-status-port.js';
 import { createInMemoryPorts } from './helpers/in-memory-ports.js';
 
 const REQUEST: DownloadRequest = {
@@ -52,7 +71,11 @@ interface Harness {
   recordGone(): boolean;
 }
 
-async function harness(initial: TaskRecord): Promise<Harness> {
+async function harness(
+  initial: TaskRecord,
+  /** D-203: lets a suite wire the REAL trash adapter instead of the fake. */
+  overrides: Partial<M5ChannelDeps> = {},
+): Promise<Harness> {
   const mem = createInMemoryPorts();
   for (const artifact of initial.artifacts) mem.state.files.set(artifact, 'video-bytes');
   const config = new ConfigStore({ ports: mem.ports });
@@ -109,6 +132,7 @@ async function harness(initial: TaskRecord): Promise<Harness> {
         return paths.map((path) => ({ path, status: 'trashed' as const }));
       },
     },
+    ...overrides,
   };
   const handlers = createM5Handlers(deps);
   return {
@@ -168,14 +192,21 @@ describe('D-182 · withFiles removal refuses paths outside the record roots', ()
     expect(h.recordGone()).toBe(true);
   });
 
-  it('a record without a request cannot be judged and keeps D-120 semantics', async () => {
+  it('D-203 · a record without a request now fails CLOSED (was D-120 fail-open)', async () => {
     const h = await harness(record(['C:/Windows/evil.mp4'], false));
     const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
       taskId: 't1', action: 'remove', withFiles: true,
     });
-    expect(result['ok']).toBe(true);
-    expect(h.trashCalls).toEqual([['C:/Windows/evil.mp4']]);
-    expect(h.recordGone()).toBe(true);
+    expect(result['ok']).toBe(false);
+    expect(result['code']).toBe('FILE_DELETE_FAILED');
+    expect(result['failureKind']).toBe('file-cleanup');
+    expect(String(result['reason'])).toContain('无法验证产物文件归属');
+    expect(String(result['message'])).toContain('任务记录已保留');
+    // Nothing is trashed and the record (with its history) is kept — the user
+    // falls back to "history only" removal by unticking the option.
+    expect(h.trashCalls).toEqual([]);
+    expect(h.performCalls).toEqual([]);
+    expect(h.recordGone()).toBe(false);
   });
 });
 
@@ -204,13 +235,15 @@ describe('D-182 · open actions refuse an outside target (core task-detail)', ()
     expect(h.shellCalls).toEqual([{ op: 'open', path: 'C:/Videos/a.mp4' }]);
   });
 
-  it('a request-less record keeps the pre-D-182 open behaviour', async () => {
+  it('D-204: a request-less record is REFUSED by open too (fail-closed)', async () => {
     const h = await harness(record(['C:/Windows/evil.mp4'], false));
     const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, { taskId: 't1', action: 'open-file' });
-    // No roots → no verdict → the gate stays open; the file exists on the fake
-    // fs, so the shell is invoked exactly as before D-182.
-    expect(result['ok']).toBe(true);
-    expect(h.shellCalls).toEqual([{ op: 'open', path: 'C:/Windows/evil.mp4' }]);
+    // D-204 closed the last fail-open: no request → no verdict → REFUSED,
+    // shell 零调用（与 D-203 的删除链路语义一致：归属无法验证就不动手）。
+    expect(result['ok']).toBe(false);
+    expect(result['code']).toBe('REFUSED');
+    expect(h.shellCalls).toEqual([]);
+    expect(h.performCalls).toEqual(['t1:open-file']);
   });
 });
 
@@ -220,7 +253,7 @@ describe('D-182 · open actions refuse an outside target (core task-detail)', ()
 // 旧的 fail-open 会让任意路径进回收站 / 被 shell 打开。
 // ---------------------------------------------------------------------------
 describe('D-193 · damaged/restored snapshots cannot bypass the action gate', () => {
-  /** A record WITH a request (so it is not the legacy fail-open case). */
+  /** A record WITH a request (so it is not the request-less D-203 case). */
   const damaged = (overrides: Partial<DownloadRequest['paths']>): TaskRecord => {
     const base = record(['C:/Windows/evil.mp4']);
     return { ...base, request: { ...REQUEST, paths: { ...REQUEST.paths, ...overrides } } };
@@ -233,7 +266,9 @@ describe('D-193 · damaged/restored snapshots cannot bypass the action gate', ()
     });
     expect(result['ok']).toBe(false);
     expect(result['code']).toBe('FILE_DELETE_FAILED');
-    expect(String(result['message'])).toContain('不可判定');
+    // D-203 unified message: unusable request info = ownership unverifiable.
+    expect(String(result['message'])).toContain('无法验证产物文件归属');
+    expect(String(result['message'])).toContain('任务记录已保留');
     expect(h.trashCalls).toEqual([]);
     expect(h.performCalls).toEqual([]);
     expect(h.recordGone()).toBe(false);
@@ -257,14 +292,19 @@ describe('D-193 · damaged/restored snapshots cannot bypass the action gate', ()
     expect(h.shellCalls).toEqual([]);
   });
 
-  it('request-less legacy 仍保持 D-120 fail-open（收紧没有误伤既有契约）', async () => {
+  it('D-203 · request-less legacy 不再 fail-open：整批拒绝、零回收、记录保留', async () => {
     const h = await harness(record(['C:/Windows/evil.mp4'], false));
     const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
       taskId: 't1', action: 'remove', withFiles: true,
     });
-    expect(result['ok']).toBe(true);
-    expect(h.trashCalls).toEqual([['C:/Windows/evil.mp4']]);
-    expect(h.recordGone()).toBe(true);
+    expect(result['ok']).toBe(false);
+    expect(result['code']).toBe('FILE_DELETE_FAILED');
+    expect(result['failureKind']).toBe('file-cleanup');
+    expect(String(result['reason'])).toContain('无法验证产物文件归属');
+    expect(result['failedCount']).toBe(1);
+    expect(h.trashCalls).toEqual([]);
+    expect(h.performCalls).toEqual([]);
+    expect(h.recordGone()).toBe(false);
   });
 });
 
@@ -272,9 +312,11 @@ describe('D-193 · damaged/restored snapshots cannot bypass the action gate', ()
 // D-195 · 在线审计 P2：损坏快照 → 恢复 → 文件删除的完整链路
 // 修前：sanitizeRecord 把结构非法的 request 置 null，却留下 artifacts；
 // 动作层把 request===null 当旧版兼容记录 fail-open → 任意路径进回收站。
+// D-203 起该链路 fail-closed：request===null（无论 artifacts 是否已被清洗为
+// 空）→ 整批拒绝、记录保留；用户可取消勾选仅删历史。
 // ---------------------------------------------------------------------------
 describe('D-195 · damaged snapshot → recovery → withFiles (end to end)', () => {
-  it('被清洗为 request=null 的记录，其产物路径不会到达回收站', async () => {
+  it('被清洗为 request=null 的记录：产物路径不会到达回收站，记录保留（D-203 fail-closed）', async () => {
     const mem = createInMemoryPorts();
     const store = new TaskStore({ ports: mem.ports });
     const damaged = {
@@ -298,22 +340,187 @@ describe('D-195 · damaged snapshot → recovery → withFiles (end to end)', ()
     expect(recovered?.id).toBe('t1'); // 任务历史仍在
 
     // TaskQueue.restore() 只做 shallow copy + 状态归一，不改 artifacts；把
-    // 恢复结果直接交给动作层，即该链路的终点。
+    // 恢复结果直接交给动作层，即该链路的终点。D-203：request 为 null 时
+    // 归属不可验证 → 整批拒绝，记录（连同其历史）原样保留。
     const h = await harness(recovered as TaskRecord);
     const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
       taskId: 't1', action: 'remove', withFiles: true,
     });
-    expect(result['ok']).toBe(true);        // 记录照常删除，不破坏 D-120
+    expect(result['ok']).toBe(false);        // 拒绝，不再假装“已删除”
+    expect(result['code']).toBe('FILE_DELETE_FAILED');
+    expect(String(result['message'])).toContain('无法验证产物文件归属');
     expect(h.trashCalls.flat()).toEqual([]); // 零个本地文件被回收
-    expect(h.recordGone()).toBe(true);
+    expect(h.recordGone()).toBe(false);      // 记录保留，等用户明确选择仅删历史
   });
 
-  it('对照组：真正的旧版无 request 记录仍保持 D-120 fail-open', async () => {
+  it('D-203 · 对照组：真正的旧版无 request 记录同样整批拒绝、零回收', async () => {
     const h = await harness(record(['C:/Windows/evil.mp4'], false));
     const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
       taskId: 't1', action: 'remove', withFiles: true,
     });
+    expect(result['ok']).toBe(false);
+    expect(h.trashCalls).toEqual([]);
+    expect(h.recordGone()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-203 · request-less records fail CLOSED + the adapter's link guard, checked
+// against the REAL filesystem (os.tmpdir) and the REAL trash adapter with a
+// recording (non-destructive) trashItem. Junctions are used because file
+// symlinks need administrator/developer-mode rights; a junction is
+// indistinguishable from a symlink under lstat.
+// ---------------------------------------------------------------------------
+describe('D-203 · recycle gate vs real filesystem entries', () => {
+  const cleanup: string[] = [];
+  afterEach(() => {
+    while (cleanup.length > 0) {
+      const dir = cleanup.pop();
+      if (dir !== undefined) rmSync(dir, { recursive: true, force: true }); // self-created tmp only
+    }
+  });
+
+  /** A real temp tree: <root>/videos is the request's (trustworthy) output root. */
+  const makeRealTree = (): { root: string; videoDir: string } => {
+    const root = mkdtempSync(join(tmpdir(), 'ytvdlt-d203-'));
+    cleanup.push(root);
+    const videoDir = join(root, 'videos');
+    mkdirSync(videoDir, { recursive: true });
+    return { root, videoDir };
+  };
+
+  const requestFor = (videoDir: string, tempDir: string): DownloadRequest => ({
+    ...REQUEST,
+    paths: { ...REQUEST.paths, videoDir, audioDir: videoDir, tempDir },
+  });
+
+  it('request===null + a plausible output path is refused WITHOUT touching the file', async () => {
+    const { videoDir } = makeRealTree();
+    const plausible = join(videoDir, 'holiday.mp4');
+    await fs.writeFile(plausible, 'x');
+    const h = await harness(record([plausible], false), {
+      trashFiles: createTrashFilesPort(async () => {
+        throw new Error('trashItem must never be called for an unverifiable record');
+      }),
+    });
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
+      taskId: 't1', action: 'remove', withFiles: true,
+    });
+    expect(result['ok']).toBe(false);
+    expect(result['code']).toBe('FILE_DELETE_FAILED');
+    expect(String(result['message'])).toContain('缺少可用的下载请求信息');
+    expect(h.recordGone()).toBe(false);
+    expect(await fs.readFile(plausible, 'utf8')).toBe('x'); // the file is untouched
+  });
+
+  it('a real file inside determinable roots still recycles (no regression)', async () => {
+    const { root, videoDir } = makeRealTree();
+    const artifact = join(videoDir, 'episode.mp4');
+    await fs.writeFile(artifact, 'video-bytes');
+    const trashed: string[] = [];
+    // The harness record() helper carries REQUEST (C:/Videos roots); swap in
+    // the real temp roots so the real file is contained.
+    const target = { ...record([artifact], true), request: requestFor(videoDir, join(root, 'temp')) };
+    const h = await harness(target, {
+      trashFiles: createTrashFilesPort(async (path) => { trashed.push(path); }),
+    });
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
+      taskId: 't1', action: 'remove', withFiles: true,
+    });
     expect(result['ok']).toBe(true);
-    expect(h.trashCalls).toEqual([['C:/Windows/evil.mp4']]);
+    expect(result['filesTrashed']).toBe(1);
+    expect(trashed).toEqual([artifact]);
+    expect(h.recordGone()).toBe(true);
+  });
+
+  it('a real NTFS junction inside the roots is refused and the count is honest', async () => {
+    const { root, videoDir } = makeRealTree();
+    const outside = join(root, 'outside');
+    mkdirSync(outside, { recursive: true });
+    await fs.writeFile(join(outside, 'external.mp4'), 'foreign');
+    const junction = join(videoDir, 'evil-link');
+    // junction = directory link; lstat reports it as a symlink, no admin needed.
+    await fs.symlink(join(root, 'outside'), junction, 'junction');
+    const trashed: string[] = [];
+    const target = { ...record([junction], true), request: requestFor(videoDir, join(root, 'temp')) };
+    const h = await harness(target, {
+      trashFiles: createTrashFilesPort(async (path) => { trashed.push(path); }),
+    });
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
+      taskId: 't1', action: 'remove', withFiles: true,
+    });
+    expect(result['ok']).toBe(false);
+    expect(result['code']).toBe('FILE_DELETE_FAILED');
+    expect(result['failureKind']).toBe('file-cleanup');
+    expect(result['failedCount']).toBe(1); // the honest per-outcome count
+    expect(String(result['reason'])).toContain('符号链接/联接无法验证归属');
+    expect(trashed).toEqual([]); // trashItem was never reached
+    expect(h.recordGone()).toBe(false);
+    // The junction and its target both survive.
+    expect((await fs.lstat(junction)).isSymbolicLink()).toBe(true);
+    expect(await fs.readFile(join(outside, 'external.mp4'), 'utf8')).toBe('foreign');
+  });
+
+  // -------------------------------------------------------------------------
+  // D-207 · 批内混合的诚实计数：合法根内文件 + 根内 junction → 整批拒绝、
+  // 回收站零调用。修复前：通道层先调 trash（合法文件先进回收站），随后才因
+  // 链接错误整批拒绝，拒绝结果不含 filesTrashed——用户不知道部分文件已进
+  // 回收站。修复后：预检在 trash 之前对整批校验，任何一个路径不可证明归属
+  // → 整批拒绝，回收站从未被调用。
+  // -------------------------------------------------------------------------
+  it('D-207 · a MIXED batch (legit file + inside junction) is refused as a WHOLE — nothing enters the bin first', async () => {
+    const { root, videoDir } = makeRealTree();
+    const outside = join(root, 'outside');
+    mkdirSync(outside, { recursive: true });
+    await fs.writeFile(join(outside, 'external.mp4'), 'foreign');
+    const legit = join(videoDir, 'episode.mp4');
+    await fs.writeFile(legit, 'video-bytes');
+    const junction = join(videoDir, 'evil-link');
+    await fs.symlink(join(root, 'outside'), junction, 'junction');
+    const trashed: string[] = [];
+    const target = { ...record([legit, junction], true), request: requestFor(videoDir, join(root, 'temp')) };
+    const h = await harness(target, {
+      trashFiles: createTrashFilesPort(async (path) => { trashed.push(path); }),
+    });
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
+      taskId: 't1', action: 'remove', withFiles: true,
+    });
+    expect(result['ok']).toBe(false);
+    expect(result['code']).toBe('FILE_DELETE_FAILED');
+    expect(result['failureKind']).toBe('file-cleanup');
+    expect(result['failedCount']).toBe(1); // exactly one unprovable path; the WHOLE batch refused with it
+    expect(String(result['reason'])).toContain('符号链接/联接无法验证归属');
+    expect(result['filesTrashed']).toBeUndefined(); // honest counting: no trashed number on a refused batch
+    expect(trashed).toEqual([]); // trashItem ZERO calls — the legit file did NOT enter the bin first
+    expect(h.recordGone()).toBe(false); // record kept
+    // Nothing on disk changed either: the legit file and the junction survive.
+    expect(await fs.readFile(legit, 'utf8')).toBe('video-bytes');
+    expect((await fs.lstat(junction)).isSymbolicLink()).toBe(true);
+    expect(await fs.readFile(join(outside, 'external.mp4'), 'utf8')).toBe('foreign');
+  });
+
+  // -------------------------------------------------------------------------
+  // D-207 · 回归：普通缺失文件（父目录真实存在、上下文可判定）经预检仍走
+  // D-120 幂等 missing → 记录移除。预检只把「不可判定」的缺失升级为拒绝，
+  // 不改变合法的已删除场景。
+  // -------------------------------------------------------------------------
+  it('D-207 · a file deleted externally (parent intact) still flows missing → record removed (D-120 unchanged)', async () => {
+    const { root, videoDir } = makeRealTree();
+    const artifact = join(videoDir, 'gone.mp4');
+    await fs.writeFile(artifact, 'gone');
+    await fs.unlink(artifact); // deleted externally; videoDir itself still exists
+    const trashed: string[] = [];
+    const target = { ...record([artifact], true), request: requestFor(videoDir, join(root, 'temp')) };
+    const h = await harness(target, {
+      trashFiles: createTrashFilesPort(async (path) => { trashed.push(path); }),
+    });
+    const result = await h.dispatch(IPC_CHANNELS.TASK_ACTION, {
+      taskId: 't1', action: 'remove', withFiles: true,
+    });
+    expect(result['ok']).toBe(true);
+    expect(result['filesMissing']).toBe(1); // counted by the pre-flight, honestly
+    expect(result['filesTrashed']).toBe(0);
+    expect(trashed).toEqual([]); // the provably-gone path never reaches the trash call
+    expect(h.recordGone()).toBe(true); // D-120 idempotency intact: record removed
   });
 });

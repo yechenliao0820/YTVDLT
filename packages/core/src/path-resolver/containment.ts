@@ -32,19 +32,20 @@
  *     segment is an ordinary (legal) file-name character on Windows;
  *   - the match is segment-bound: `C:/V` does NOT contain `C:/VideosEvil`.
  *
- * `roots` empty means "cannot judge" and fails OPEN on purpose: the queue
- * hard-fails any download whose request is null before a byte moves, so no
- * record produced by a real run ever reaches the gate rootless; refusing
- * everything for a degenerate legacy record would only break the frozen
- * D-120 cleanup semantics for data that was never manifest-derived.
- *
- * D-193 narrows that tolerance: it belongs to `request === null` legacy
- * records ONLY. A stored request whose paths produce no *specific* root is a
- * damaged / restored snapshot, not a legacy record — the shape guard in
- * task-store only checks that the five request domains are objects, so
- * `paths: {}` (or `videoDir: "C:/"`) sails through while BOTH the intake and
- * the action gate derive their roots from that SAME record. Every destructive
- * consumer now uses `trustedArtifactRoots()` and fails closed in that case.
+ * `roots` empty means "cannot judge". The pure predicate below still returns
+ * true for empty roots (pinned behaviour and signature — bulk helpers such as
+ * `splitArtifactsByRoots()` rely on it), but since D-203 / D-204 NO consumer
+ * of `TaskRecord.artifacts` exercises filesystem authority on empty roots
+ * any more: every authority-exercising caller derives its scope through
+ * `trustedArtifactRoots()` and FAILS CLOSED when that returns `null`. What
+ * changed is the callers, not these functions:
+ *   - D-193 closed the "request present but roots undecidable" hole;
+ *   - D-203 closed it for the destructive / recycle path (request-less
+ *     records included);
+ *   - D-204 closed it for open-file / open-folder — a request-less record can
+ *     no longer be opened at all, and the open gate additionally re-checks
+ *     containment on the REAL path resolved through every symlink / NTFS
+ *     junction (fs port `realpath`, closing D-195 "uncovered ③").
  */
 
 export interface ArtifactRootsInput {
@@ -107,8 +108,10 @@ export function artifactRootsOf(paths: ArtifactRootsInput | null | undefined): r
  * True only when `candidate` is strictly INSIDE one of `roots` (segment
  * bound, so the root directory itself and any sibling name are excluded).
  * `roots` may be raw or `artifactRootsOf()` output — every entry is
- * normalized here, and unusable roots are skipped. `roots` empty fails
- * open — see the module comment.
+ * normalized here, and unusable roots are skipped. `roots` empty still
+ * returns true (pure predicate, unchanged); callers that exercise filesystem
+ * authority must gate on `trustedArtifactRoots()` first and fail closed on
+ * `null` — see the module comment.
  */
 export function isPathInsideRoots(candidate: unknown, roots: readonly string[]): boolean {
   const normalized = normalizedForContainment(candidate);
@@ -178,10 +181,12 @@ export function isSpecificRoot(root: string): boolean {
  * failing open there lets an arbitrary path (`C:/Windows/...`) pass BOTH
  * gates, because both derive their roots from that same record.
  *
- * Returns `null` when no trustworthy root exists. Callers keep the legacy
- * fail-open ONLY when the record has no request at all; otherwise they must
- * fail closed. `artifactRootsOf()` is intentionally left unchanged so the
- * pure function and its pinned semantics stay intact.
+ * Returns `null` when no trustworthy root exists. Callers must FAIL CLOSED
+ * on `null`: D-203 (destructive / recycle path) and D-204 (open-file /
+ * open-folder) removed the last request-less fail-open exemption, so no
+ * authority-exercising caller treats `null` as "cannot judge, allow" any
+ * more. `artifactRootsOf()` is intentionally left unchanged so the pure
+ * function and its pinned semantics stay intact.
  */
 export function trustedArtifactRoots(
   paths: ArtifactRootsInput | null | undefined,

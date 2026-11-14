@@ -1,17 +1,28 @@
 /**
  * M4-6 · task detail — the seven operations + the error-report redaction.
+ * D-204 · the open gate is fail-closed and re-checks containment on the
+ * realpath-resolved target (symlink / NTFS junction guard).
  */
 import { describe, it, expect } from 'vitest';
 import {
   TaskDetailService, TASK_DETAIL_ACTIONS, buildErrorReport, formatErrorReport, maskUrlSecrets,
 } from '@ytvdlt/core';
-import type { IShellPort, TaskRecord } from '@ytvdlt/shared';
+import type { DownloadRequest, IShellPort, TaskRecord } from '@ytvdlt/shared';
 import { createInMemoryPorts } from './helpers/in-memory-ports.js';
+
+const REQUEST: DownloadRequest = {
+  taskId: 't1', url: 'https://example.org/v?token=SECRET&sig=ABC&x=1',
+  format: { quality: 'best', videoCodecPref: 'auto', formatId: null, sortingFields: null, extractAudio: false, audioQuality: 'best', audioCodecPref: 'auto', audioFormat: null, audioMultistreams: false },
+  subtitle: { enabled: false, languages: 'en.*', autoCaptions: false, skipTranslated: true, convertTo: 'none', embed: false, keepSubtitleFile: false },
+  paths: { videoDir: 'C:/V', audioDir: '', commandDir: 'C:/cmd', privateMode: false, subdirByExtractor: false, subdirByPlaylist: false, outputTemplate: '%(title)s.%(ext)s', tempDir: '' },
+  network: { rateLimit: null, proxy: null, cookiesFile: null, userAgent: null, ipv4Only: false, concurrentFragments: null, aria2cPath: null },
+  advanced: { sponsorblockRemove: null, downloadSections: null, splitChapters: false, customTitle: null, debug: false, downloadArchive: null, customCommand: null },
+};
 
 const record = (overrides: Partial<TaskRecord> = {}): TaskRecord => ({
   id: 't1', url: 'https://example.org/v?token=SECRET&sig=ABC&x=1', kind: 'video', state: 'Error',
   createdAt: '2026-11-06T00:00:00.000Z', updatedAt: '2026-11-06T00:00:00.000Z',
-  mediaInfo: null, request: null, artifacts: ['C:/V/fixture.mp4'], lastPercent: 42,
+  mediaInfo: null, request: REQUEST, artifacts: ['C:/V/fixture.mp4'], lastPercent: 42,
   error: { code: 'HTTP_403', message: 'Forbidden: Cookie: SID=abc', detail: '', retryable: false, report: 'x' },
   privateMode: false, postprocessed: false,
   ...overrides,
@@ -173,5 +184,113 @@ describe('M4-6 · error report redaction', () => {
     expect(report.stderr.split('\n')).toHaveLength(400);
     expect(JSON.stringify(report)).not.toContain('secret-signature');
     expect(formatErrorReport(report)).toContain('Task: t1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-204 · open 门 fail-closed + realpath 真实路径校验（符号链接/junction 防护）
+// ---------------------------------------------------------------------------
+describe('D-204 · open gate fail-closed + realpath containment', () => {
+  /** Attach a controllable realpath stub to the in-memory fs port. */
+  function attachRealpath(
+    mem: ReturnType<typeof createInMemoryPorts>,
+    impl: (path: string) => Promise<string>,
+  ): void {
+    Object.assign(mem.ports.fs, { realpath: impl });
+  }
+
+  /** A rejection shaped like a real `node:fs` error (carries `code`). */
+  const fsError = (code: string, path: string): Error =>
+    Object.assign(new Error(`${code}: simulated, lstat '${path}'`), { code });
+
+  it('request-less record → REFUSED，shell 零调用（fail-closed）', async () => {
+    const { service, recorded } = harness(record({ request: null }));
+    for (const action of ['open-file', 'open-folder'] as const) {
+      const result = await service.perform('t1', action);
+      expect(result.ok).toBe(false);
+      expect(result.code).toBe('REFUSED');
+      expect(result.message).toContain('无法验证产物路径归属');
+      expect(result.message).toContain('已拒绝打开');
+    }
+    expect(recorded.shell).toHaveLength(0);
+  });
+
+  it('request 存在但 roots 不可判定（损坏快照）→ 同样 REFUSED', async () => {
+    const damaged: TaskRecord = record({
+      request: { ...REQUEST, paths: { ...REQUEST.paths, videoDir: '', audioDir: '', tempDir: '' } },
+    });
+    const { service, recorded } = harness(damaged);
+    const result = await service.perform('t1', 'open-file');
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('REFUSED');
+    expect(result.message).toContain('无法验证产物路径归属');
+    expect(recorded.shell).toHaveLength(0);
+  });
+
+  it('realpath 把「看似根内」的路径解析到根外 → REFUSED，信息明确', async () => {
+    const { service, mem, recorded } = harness(record({ artifacts: ['C:/V/link.mp4'] }));
+    // junction: C:/V/link.mp4 → C:/Windows/System32（字符串上完全在根内）
+    attachRealpath(mem, async (p) => (p === 'C:/V/link.mp4' ? 'C:/Windows/System32/evil.mp4' : p));
+    const result = await service.perform('t1', 'open-file');
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('REFUSED');
+    expect(result.message).toContain('产物真实路径指向任务输出目录之外');
+    expect(result.message).toContain('符号链接');
+    expect(recorded.shell).toHaveLength(0);
+  });
+
+  it('realpath 解析后仍在根内 → OK，shell 仍打开用户可见的原始路径', async () => {
+    const { service, mem, recorded } = harness(record({ artifacts: ['C:/V/junction.mp4'] }));
+    attachRealpath(mem, async (p) => (p === 'C:/V/junction.mp4' ? 'c:/v/real-target.mp4' : p));
+    const result = await service.perform('t1', 'open-file');
+    expect(result.ok).toBe(true);
+    expect(result.code).toBe('OK');
+    expect(recorded.shell).toEqual([{ op: 'open', path: 'C:/V/junction.mp4' }]);
+  });
+
+  it('realpath ENOENT → 走 FILE_MISSING 流程（不当安全拒绝吞掉）', async () => {
+    const { service, mem, recorded } = harness(record({ artifacts: ['C:/V/gone.mp4'] }));
+    attachRealpath(mem, async (p) => { throw fsError('ENOENT', p); });
+    const result = await service.perform('t1', 'open-file');
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('FILE_MISSING');
+    expect(result.message).toContain('产物不存在');
+    expect(recorded.shell).toHaveLength(0);
+  });
+
+  it('realpath ENOTDIR 同样走 FILE_MISSING 流程', async () => {
+    const { service, mem, recorded } = harness(record({ artifacts: ['C:/V/notdir.mp4'] }));
+    attachRealpath(mem, async (p) => { throw fsError('ENOTDIR', p); });
+    const result = await service.perform('t1', 'open-file');
+    expect(result.code).toBe('FILE_MISSING');
+    expect(recorded.shell).toHaveLength(0);
+  });
+
+  it('realpath EACCES → fail-closed REFUSED，错误信息带真实原因', async () => {
+    const { service, mem, recorded } = harness(record({ artifacts: ['C:/V/locked.mp4'] }));
+    attachRealpath(mem, async (p) => { throw fsError('EACCES', p); });
+    const result = await service.perform('t1', 'open-file');
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('REFUSED');
+    expect(result.message).toContain('无法解析产物真实路径');
+    expect(result.message).toContain('EACCES');
+    expect(recorded.shell).toHaveLength(0);
+  });
+
+  it('realpath 缺席（旧假对象）→ 只按字符串门放行，行为与 D-204 之前一致', async () => {
+    // 默认 in-memory fake 不带 realpath：字符串门之内 → 照旧打开（安全强度
+    // 下降是注释里明确记录的兼容行为，production node-ports 恒提供 realpath）。
+    const inside = harness(record({ artifacts: ['C:/V/fixture.mp4'] }));
+    const opened = await inside.service.perform('t1', 'open-file');
+    expect(opened.ok).toBe(true);
+    expect(inside.recorded.shell).toEqual([{ op: 'open', path: 'C:/V/fixture.mp4' }]);
+    // 字符串门之外 → 照旧被字符串门拒绝。
+    const outside = harness(record({ artifacts: ['C:/Windows/evil.mp4'] }));
+    outside.mem.state.files.set('C:/Windows/evil.mp4', 'bytes');
+    const refused = await outside.service.perform('t1', 'open-file');
+    expect(refused.ok).toBe(false);
+    expect(refused.code).toBe('REFUSED');
+    expect(refused.message).toContain('产物路径超出任务输出目录');
+    expect(outside.recorded.shell).toHaveLength(0);
   });
 });

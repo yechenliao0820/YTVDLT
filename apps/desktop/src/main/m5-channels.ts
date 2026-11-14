@@ -136,8 +136,43 @@ export interface TrashFileOutcome {
   readonly reason?: string;
 }
 
+/**
+ * D-207: verdict of the delete-chain pre-flight (`TrashFilesPort.preflight`).
+ *
+ * The pre-flight resolves every eligible path to its FINAL real location and
+ * re-runs containment on it — the destructive counterpart of D-204's open-face
+ * realpath re-check. Its policy is the owner acceptance criterion "无法证明
+ * 文件属于当前任务，就绝不允许删除":
+ *
+ *   - `ok`      — every path is provably this task's own (the real location
+ *                 sits inside the trusted roots, or the entry is provably
+ *                 gone with a decidable, contained parent context).
+ *                 `missingPaths` (exact input strings) are the provably-gone
+ *                 entries: they are excluded from the trash call and counted
+ *                 as `filesMissing` (D-120 idempotency unchanged);
+ *   - `refused` — at least one path cannot be proven to belong to the task
+ *                 (real location outside the roots through a symlink /
+ *                 junction, an undecidable context such as a dangling
+ *                 mid-path junction, or an unresolvable real path). The
+ *                 WHOLE batch is refused: the recycle bin is never called,
+ *                 the record is kept, `reason` carries the real cause and
+ *                 `refusedCount` the honest offender count.
+ */
+export type TrashPreflightVerdict =
+  | { readonly kind: 'ok'; readonly missingPaths: readonly string[] }
+  | { readonly kind: 'refused'; readonly reason: string; readonly refusedCount: number };
+
 export interface TrashFilesPort {
   trash(paths: readonly string[]): Promise<readonly (string | TrashFileOutcome)[]>;
+  /**
+   * D-207 (optional, additive): pre-flight the WHOLE batch BEFORE `trash()`.
+   *
+   * Absent on legacy D-87 / D-120 fakes, which then keep their exact previous
+   * behaviour (the adapter's per-entry lstat link guard remains the backstop).
+   * The production adapter (createTrashFilesPort) always provides it, so the
+   * withFiles removal chain runs it automatically — no extra wiring anywhere.
+   */
+  preflight?(paths: readonly string[], roots: readonly string[]): Promise<TrashPreflightVerdict>;
 }
 
 /** Normalise D-87 string replies and D-120 structured replies into one shape. */
@@ -1038,23 +1073,29 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       // anything downloaded in this session; the check defends restored /
       // manipulated snapshots. The whole batch is refused (nothing is trashed,
       // the record is kept and the reason is reported) — deleting a foreign
-      // file is the one error that cannot be undone. Records without a request
-      // cannot be judged and keep the frozen D-120 semantics.
-      const hasRequest = target?.request !== null && target?.request !== undefined;
+      // file is the one error that cannot be undone.
+      // D-203 (breaking change, supersedes the frozen D-120 tolerance): a
+      // record without a usable request has NO trustworthy roots, and
+      // `isPathInsideRoots` fails OPEN on empty roots by design — so a
+      // request-less legacy record used to let ANY recorded path (e.g.
+      // `C:/Windows/evil.mp4`) into the recycle bin. The gate is therefore
+      // fail-closed for EVERY record: whenever `trustedArtifactRoots` returns
+      // null (request === null, a request cleaned by the D-161/D-195 shape
+      // guard, an undeterminable output dir, or no specific root) the whole
+      // batch is refused and the record plus its history are kept intact.
       const removalRoots = trustedArtifactRoots(target?.request?.paths ?? {});
-      // D-193: the fail-open tolerance belongs to request-less legacy records
-      // ONLY. A record WITH a request but no trustworthy roots is a damaged /
-      // restored snapshot: empty roots would let ANY path into the recycle bin,
-      // and both gates derive their roots from this same record.
-      if (hasRequest && removalRoots === null) {
+      // D-193 / D-203: null roots mean the ownership of every artifact is
+      // unverifiable — both gates derive their scope from this same record,
+      // so an empty scope would make "inside" mean "anywhere".
+      if (removalRoots === null) {
         return {
           action: 'remove', ok: false, code: 'FILE_DELETE_FAILED', failureKind: 'file-cleanup',
-          reason: '任务输出目录不可判定，为防止误删已拒绝回收',
-          message: '本地文件清理失败：任务输出目录不可判定，为防止误删已拒绝回收；任务记录已保留',
+          reason: '无法验证产物文件归属（任务缺少可用的下载请求信息），为防止误删已拒绝回收本地文件',
+          message: '本地文件清理失败：无法验证产物文件归属（任务缺少可用的下载请求信息），为防止误删已拒绝回收本地文件；任务记录已保留',
           failedCount: artifacts.length,
         };
       }
-      const refused = artifacts.filter((path) => !isPathInsideRoots(path, removalRoots ?? []));
+      const refused = artifacts.filter((path) => !isPathInsideRoots(path, removalRoots));
       if (refused.length > 0) {
         return {
           action: 'remove', ok: false, code: 'FILE_DELETE_FAILED', failureKind: 'file-cleanup',
@@ -1074,13 +1115,51 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       }
       const eligible = artifacts.filter((path) => !claimedElsewhere.has(samePathKey(path)));
       const sharedSkipped = artifacts.length - eligible.length;
-      const outcomes = normalizeTrashOutcomes(await deps.trashFiles.trash(eligible));
+      // ---- D-207: pre-flight the WHOLE batch before anything destructive -----
+      // The string gate above compares NAMES. On Windows the kernel silently
+      // resolves a reparse point placed in a MIDDLE path component, so a
+      // recorded `<videoDir>/link/file.mp4` can physically live anywhere while
+      // every name-level check passes — the adapter's end-component lstat guard
+      // cannot see it, and a dangling mid-path junction even masquerades as
+      // "already missing". The pre-flight (carried by the injected trash port,
+      // implemented adapter-side against the real filesystem) resolves every
+      // eligible path to its FINAL real location and re-runs containment on it.
+      // ONE unprovable path refuses the WHOLE batch: the recycle bin is never
+      // reached, the record is kept and `taskDetail.perform('remove')` is never
+      // called. This also closes the honest-count hole — a legitimate file can
+      // no longer be recycled first and then abandoned in the bin behind a
+      // refused result that mentions no `filesTrashed`. Provably-gone entries
+      // (realpath ENOENT with a decidable, contained parent) keep the D-120
+      // idempotent semantics: excluded from the trash call, counted as
+      // `filesMissing`. Ports without `preflight` (legacy fakes) keep their
+      // exact previous behaviour; the adapter's per-entry lstat guard stays in
+      // place behind this gate as the TOCTOU second line.
+      const preflight = deps.trashFiles.preflight;
+      let trashTargets = eligible;
+      let preflightMissing: readonly string[] = [];
+      if (preflight !== undefined) {
+        const verdict = await preflight(eligible, removalRoots);
+        if (verdict.kind === 'refused') {
+          return {
+            action: 'remove', ok: false, code: 'FILE_DELETE_FAILED', failureKind: 'file-cleanup',
+            reason: verdict.reason,
+            message: `本地文件清理失败：${verdict.reason}；任务记录已保留`,
+            failedCount: verdict.refusedCount,
+          };
+        }
+        preflightMissing = verdict.missingPaths;
+        if (verdict.missingPaths.length > 0) {
+          const gone = new Set(verdict.missingPaths);
+          trashTargets = eligible.filter((path) => !gone.has(path));
+        }
+      }
+      const outcomes = normalizeTrashOutcomes(await deps.trashFiles.trash(trashTargets));
       // A D-87 adapter replies with only the paths it handled. A short reply is
       // a partial failure and must keep the record (existing contract).
-      if (outcomes.length < eligible.length) {
+      if (outcomes.length < trashTargets.length) {
         return {
           action: 'remove', ok: false, code: 'ERROR', failureKind: 'file-cleanup',
-          message: `本地文件未全部移入回收站（${outcomes.length}/${eligible.length}），记录已保留`,
+          message: `本地文件未全部移入回收站（${outcomes.length}/${trashTargets.length}），记录已保留`,
         };
       }
       const failed = outcomes.filter((entry) => entry.status === 'error');
@@ -1094,7 +1173,11 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
           failedCount: failed.length,
         };
       }
-      const filesMissing = outcomes.filter((entry) => entry.status === 'missing').length;
+      // D-207: `filesMissing` is honest about BOTH sources — entries the
+      // pre-flight proved gone (never handed to the trash call) and entries
+      // the adapter itself reported missing.
+      const filesMissing = preflightMissing.length
+        + outcomes.filter((entry) => entry.status === 'missing').length;
       const filesTrashed = outcomes.filter((entry) => entry.status === 'trashed').length;
       deps.fileStatus?.forget(taskId);
       const removal = await deps.taskDetail.perform(taskId, 'remove');

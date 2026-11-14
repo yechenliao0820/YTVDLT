@@ -61,8 +61,50 @@ function runRegProcess(args: readonly string[]): Promise<{ code: number; stdout:
  * Deliberately POSITIVE and narrow: an unknown locale still fails closed
  * (throws / reports failure), and a real error such as "Access is denied." is
  * never mistaken for absence.
+ *
+ * D-205 · per-phrase provenance for every alternative below. Each entry is a
+ * MULTI-WORD phrase (never a bare verb such as `finden` / `trouver` /
+ * `найти`, which would over-match unrelated prose), matched against
+ * `stderr` of a reg.exe run that already exited with code 1 (see
+ * `isRegValueAbsent`). Source levels: "real-run" = executed against real
+ * reg.exe on this zh-CN dev host (2026-11-14, OEM code page 936);
+ * "documented" = Microsoft docs / published reg.exe localisation strings,
+ * NOT reproduced locally.
+ *   en-US  "ERROR: The system was unable to find the specified registry key or value."
+ *          → `unable to find` [documented: Microsoft Learn troubleshooting pages]
+ *   zh-CN  "错误: 系统找不到指定的注册表项或值。"
+ *          → `找不到` / `不存在` / `未找到` [real-run 2026-11-14, exit 1 on stderr]
+ *   zh-TW  "錯誤: 系統找不到指定的登錄機碼或值。" → `找不到` [documented]
+ *   ja-JP  "エラー: 指定されたレジストリ キーまたは値が見つかりませんでした。"
+ *          → `見つかりません` [documented]
+ *   de-DE  "FEHLER: Das System kann den angegebenen Registrierungsschlüssel oder -wert nicht finden."
+ *          → `nicht finden` [documented: Microsoft Learn (de-de) + reproduced reports]
+ *   fr-FR  "ERREUR : Le système n'a pas pu trouver la clé ou la valeur du Registre spécifiée."
+ *          → `pas pu trouver` [documented: Microsoft Learn (fr-fr) configure-endpoints-vdi]
+ *   ru-RU  "Ошибка: системе не удалось найти указанный раздел реестра или значение."
+ *          → `не удалось найти` [documented: reproduced reports, exit 1]
+ *   it-IT  "ERRORE: Impossibile trovare la chiave o il valore del Registro di sistema specificato."
+ *          → `impossibile trovare` [documented: reproduced reports, exit 1];
+ *          doc wording "Il sistema non è riuscito a trovare la chiave o il valore specificato."
+ *          → `non è riuscito a trovare` [documented: Microsoft Learn (it-it)]
+ *   es-ES  "ERROR: no puede encontrar la clave o el valor del Registro especificados."
+ *          → `no puede encontrar` [documented: reproduced reports];
+ *          doc wording "…el sistema no pudo encontrar la clave o valor especificado."
+ *          → `no pudo encontrar` [documented: Microsoft Learn (es-es)]
+ *   ko-KR  "오류: 시스템이 지정된 레지스트리 키 또는 값을 찾을 수 없습니다."
+ *          → `찾을 수 없` [documented: vendor docs quoting Korean reg.exe]
+ *   pt-BR  "ERRO: O sistema não pôde encontrar a chave ou o valor do Registro especificado."
+ *          → `não pôde encontrar` [documented: reproduced reports]
+ * Fail-closed guarantees (pinned by tests): none of the phrases above occurs
+ * in any locale's Access-Denied diagnostic ("Access is denied." / "错误: 拒绝访问。"
+ * [zh-CN real-run] / "Zugriff verweigert" / "Accès refusé" / "Отказано в доступе" /
+ * "Accesso negato" / "Acceso denegado" / "액세스가 거부되었습니다." / "Acesso negado",
+ * the non-zh ones documented), in localized SUCCESS output ("操作成功完成。"
+ * [real-run], "The operation completed successfully."), or in a value dump;
+ * and an unknown locale (e.g. Polish) still fails closed.
  */
-const REG_NOT_FOUND_RE = /unable to find|找不到|不存在|未找到|見つかりません/i;
+const REG_NOT_FOUND_RE =
+  /unable to find|找不到|不存在|未找到|見つかりません|nicht finden|pas pu trouver|не удалось найти|impossibile trovare|non è riuscito a trovare|no puede encontrar|no pudo encontrar|찾을 수 없|não pôde encontrar/i;
 
 /** True only for a confirmed "key or value does not exist" reg failure. */
 export function isRegValueAbsent(result: {
