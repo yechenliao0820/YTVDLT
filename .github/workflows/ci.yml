@@ -30,9 +30,10 @@
 # (fail-closed · links · registry i18n)」步骤（Tests 之后、门禁之前）：
 # 7 个安全边界测试文件本就在 npm test 全量套件内，该步骤把它们【点名单独
 # 重跑】（显式纳入：每个文件对应本轮安全要求 1-6 之一，映射见步骤注释），
-# 并带一个跳过守卫（要求 7：windows-latest 管理员 runner 上
-# win-fs-link-security 的 skipped 必须为 0；守卫对 vitest JSON 结果做结构
-# 性校验——缺文件/坏 JSON/非终态用例一律显式失败，绝不静默放过）。这是
+# 并带一个跳过守卫（要求 7 · D-208 语义：符号链接权限类用例在管理员 runner
+# 上必须实跑，非 allowlist 的 skipped 一律失败；UNC 管理员共享跳过为显式
+# allowlist、大声报告；守卫对 vitest JSON 结果做结构性校验——缺文件/坏
+# JSON/非终态用例一律显式失败，绝不静默放过）。这是
 # 增量步骤：既有门禁（typecheck / coverage 阈值 / layering / frozen）与
 # job 名（= required status check）一律未动。特殊权限说明（要求 8）：
 # junction 无需权限；文件/目录 symlink 需要 SeCreateSymbolicLinkPrivilege
@@ -166,10 +167,12 @@ jobs:
             tests/unit/task-detail-folder.test.ts \
             tests/unit/win-startup.test.ts \
             tests/unit/path-containment.test.ts
-          # 跳过守卫（要求 7）：CI 管理员 runner 上 win-fs-link-security 的
-          # skipped 必须为 0（junction 用例无需权限、永不跳过）。守卫同时做
-          # 结构性校验：JSON 缺失/损坏、七个文件任何一个没出现在结果里、
-          # 非终态用例、运行未全绿 —— 一律 exit 2 拒绝放行，绝不静默放过。
+          # 跳过守卫（要求 7 · D-208 语义）：CI 管理员 runner 上符号链接
+          # 权限类用例（A-3/A-4b/B-11c）必须实跑——非 allowlist 的 skipped
+          # 一律 exit 1；UNC 管理员共享跳过（A-8a/A-8b，SMB 回环属环境属性）
+          # 为显式 allowlist、大声报告不静默。守卫同时做结构性校验：JSON
+          # 缺失/损坏、七个文件任何一个没出现在结果里、非终态用例、运行未
+          # 全绿 —— 一律 exit 2 拒绝放行。
           node scripts/check-security-suite-results.mjs reports/vitest-security-results.json
 
       # 分层依赖检查（core 禁 import node:*/electron；结果写 reports/layering.json，

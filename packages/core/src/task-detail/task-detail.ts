@@ -19,7 +19,12 @@ import type { ITaskQueue } from '../ports.js';
 import type { ErrorReport } from '../error-report/error-report.js';
 import { maskUrlSecrets } from '../error-report/error-report.js';
 import { primaryMediaArtifact } from '../artifact-classify/kinds.js';
-import { isPathInsideRoots, normalizedForContainment, trustedArtifactRoots } from '../path-resolver/containment.js';
+import {
+  canonicalContainmentRoots,
+  isPathInsideRoots,
+  normalizedForContainment,
+  trustedArtifactRoots,
+} from '../path-resolver/containment.js';
 
 export type TaskDetailAction =
   | 'open-file'
@@ -317,8 +322,14 @@ export class TaskDetailService {
         message: `无法解析产物真实路径（${reason}），无法证明路径安全，已拒绝打开`,
       };
     }
-    const contained = isPathInsideRoots(real, roots)
-      || (opts?.allowRootItself === true && pathEqualsAnyRoot(real, roots));
+    // D-208: the verdict compares a realpath RESOLUTION against the roots —
+    // include the roots' canonical (realpath) aliases so an 8.3 short-name /
+    // reparse-point root form (`RUNNER~1` vs `runneradmin`) does not refuse a
+    // legitimate file. The alias is the SAME trusted directory, not a
+    // widening of trust.
+    const verificationRoots = await canonicalContainmentRoots(roots, realpath);
+    const contained = isPathInsideRoots(real, verificationRoots)
+      || (opts?.allowRootItself === true && pathEqualsAnyRoot(real, verificationRoots));
     if (!contained) {
       return {
         kind: 'refused',

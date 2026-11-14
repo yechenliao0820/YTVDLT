@@ -53,7 +53,9 @@ import {
 import type { DownloadRequest, IShellPort, ITaskQueue, TaskRecord } from '@ytvdlt/shared';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
 import type { TaskDetailAction, TaskDetailResult } from '@ytvdlt/core';
-import { createTrashFilesPort } from '../../apps/desktop/src/main/adapters/local-file-status-port.js';
+import {
+  createTrashFilesPort, preflightTrashPaths,
+} from '../../apps/desktop/src/main/adapters/local-file-status-port.js';
 import { createNodePorts } from '../../apps/desktop/src/main/adapters/node-ports.js';
 import { createM5Handlers } from '../../apps/desktop/src/main/m5-channels.js';
 import type { TrashFileOutcome } from '../../apps/desktop/src/main/m5-channels.js';
@@ -75,16 +77,18 @@ const capabilities = {
   /** UNC 管理员共享是否【稳定】可达（连续多次 stat 成功才判 true）。 */
   uncStable: false,
   uncReason: '',
+  /** 稳定可达的 UNC 主机形态（D-208：localhost 与 127.0.0.1 依次探测）。 */
+  uncHost: '',
 };
 
 let probeDir: string | null = null;
 const tempDirs: string[] = [];
 
-/** UNC 形态：`\\localhost\<盘符>$<剩余路径>`（要求输入为盘符绝对路径）。 */
-function uncFormOf(path: string): string | null {
+/** UNC 形态：`\\<host>\<盘符>$<剩余路径>`（要求输入为盘符绝对路径；host 由能力探测选定）。 */
+function uncFormOf(path: string, host: string = 'localhost'): string | null {
   const match = /^[A-Za-z]:/.exec(path);
   if (match === null) return null;
-  return `\\\\localhost\\${path.slice(0, 2)}$${path.slice(2)}`;
+  return `\\\\${host}\\${path.slice(0, 2)}$${path.slice(2)}`;
 }
 
 /** UNC 抖动容错：小间隔重试的 stat / lstat（探测与用例内复测共用）。 */
@@ -130,15 +134,27 @@ async function probeCapabilities(): Promise<void> {
     capabilities.junction = false;
     capabilities.junctionReason = `${(error as { code?: string } | null)?.code ?? 'UNKNOWN'}`;
   }
-  // 3) UNC 管理员共享稳定性（`\\localhost\<盘符>$<tmpdir>` 必须真实存在）。
-  const uncTmp = uncFormOf(tmpdir());
-  if (uncTmp === null) {
+  // 3) UNC 管理员共享稳定性（`\\<host>\<盘符>$<tmpdir>` 必须真实存在）。
+  //    D-208：SMB 回环可能只对其中一种主机形态放行——依次尝试 localhost 与
+  //    127.0.0.1，取第一个稳定可达的形态记录到 uncHost。
+  capabilities.uncHost = '';
+  const uncLocalhost = uncFormOf(tmpdir(), 'localhost');
+  if (uncLocalhost === null) {
     capabilities.uncStable = false;
-    capabilities.uncReason = 'tmpdir 非盘符路径，无法构造 \\\\localhost\\<盘符>$ 形态';
+    capabilities.uncReason = 'tmpdir 非盘符路径，无法构造 \\\\主机\\<盘符>$ 形态';
   } else {
-    const verdict = await stableProbe(uncTmp);
+    let verdict = { ok: false, reason: '' };
+    for (const host of ['localhost', '127.0.0.1'] as const) {
+      const probe = await stableProbe(uncFormOf(tmpdir(), host) as string);
+      if (probe.ok) {
+        verdict = probe;
+        capabilities.uncHost = host;
+        break;
+      }
+      verdict = probe;
+    }
     capabilities.uncStable = verdict.ok;
-    if (!verdict.ok) capabilities.uncReason = `\\\\localhost\\<盘符>$ 对 tmpdir 不可稳定 stat：${verdict.reason}`;
+    if (!verdict.ok) capabilities.uncReason = `\\\\localhost / \\\\127.0.0.1 的 <盘符>$ 对 tmpdir 均不可稳定 stat：${verdict.reason}`;
   }
 }
 
@@ -635,7 +651,7 @@ describe.skipIf(!onWindows)('A · 删除面：真实 createTrashFilesPort + 记�
     const root = makeCaseDir('a8a');
     const videoDir = join(root, 'videos');
     mkdirSync(videoDir, { recursive: true });
-    const uncVideoDir = uncFormOf(videoDir);
+    const uncVideoDir = uncFormOf(videoDir, capabilities.uncHost || 'localhost');
     expect(uncVideoDir).not.toBeNull();
     // 用例内复测：UNC 形态对刚建好的目录必须真实可达，否则按能力判定跳过。
     const inCase = await stableProbe(uncVideoDir as string);
@@ -665,7 +681,7 @@ describe.skipIf(!onWindows)('A · 删除面：真实 createTrashFilesPort + 记�
     await fs.writeFile(join(outsideDir, 'external.mp4'), 'foreign-bytes');
     const junction = join(videoDir, 'unc-link');
     await fs.symlink(outsideDir, junction, 'junction'); // 经盘符形态创建
-    const uncVideoDir = uncFormOf(videoDir);
+    const uncVideoDir = uncFormOf(videoDir, capabilities.uncHost || 'localhost');
     expect(uncVideoDir).not.toBeNull();
     const artifact = `${uncVideoDir}\\unc-link`;
     // 用例内复测 UNC 形态对 junction 的 lstat 是否报符号链接（SMB 可能过滤 reparse point）。
@@ -683,6 +699,58 @@ describe.skipIf(!onWindows)('A · 删除面：真实 createTrashFilesPort + 记�
     expect(received).toEqual([]);
     expect(await fs.readFile(join(outsideDir, 'external.mp4'), 'utf8')).toBe('foreign-bytes');
     await unlinkIfExists(junction);
+  });
+});
+
+// ===========================================================================
+// D-208 · canonical roots —— 根字符串形态 ≠ realpath 形态（8.3 短名/别名）。
+// 纯注入假件（无磁盘），任意平台执行：windows-latest runner 的 TEMP 形如
+// `C:\Users\RUNNER~1\…`（8.3 短名）而 realpath 报长名 `C:\Users\runneradmin\…`，
+// 旧判定把 realpath 结果只与字符串根比较 → 合法文件被整批误拒（run#14 实测：
+// D-203 真实 fs 用例全拒、混合批 failedCount=2、missing 误判拒绝）。修复后
+// 判定对「字符串根 + 其 canonical 别名」（canonicalContainmentRoots）进行。
+// ===========================================================================
+describe('D-208 · canonical roots（根形态 ≠ realpath 形态时判定仍正确）', () => {
+  const SHORT = 'C:/Users/RUNNER~1/AppData/Local/Temp/yt208';
+  const LONG = 'C:/Users/runneradmin/AppData/Local/Temp/yt208';
+  /** 模拟内核行为：短名形态 → 长名形态（其余恒等）。 */
+  const mapShortToLong = (p: string): string =>
+    (p.startsWith(SHORT) ? LONG + p.slice(SHORT.length) : p);
+
+  function contextWith(realpathImpl: (p: string) => Promise<string>) {
+    return {
+      roots: [`${SHORT}/videos`],
+      realpath: realpathImpl,
+      lstat: async () => ({ isSymbolicLink: () => false }),
+    };
+  }
+
+  it('roots 为短名、产物字符串在根内但 realpath 解析为长名 → ok（不再误拒合法文件）', async () => {
+    const verdict = await preflightTrashPaths(
+      [`${SHORT}/videos/real.mp4`],
+      contextWith(async (p) => mapShortToLong(p)),
+    );
+    expect(verdict).toEqual({ kind: 'ok', missingPaths: [] });
+  });
+
+  it('missing 判定同样用 canonical 根：父目录解析为长名且等于根 → missing（D-120 不变）', async () => {
+    const verdict = await preflightTrashPaths([`${SHORT}/videos/gone.mp4`], contextWith(async (p) => {
+      const mapped = mapShortToLong(p);
+      if (mapped === `${LONG}/videos/gone.mp4`) {
+        throw Object.assign(new Error(`ENOENT: stat '${p}'`), { code: 'ENOENT' });
+      }
+      return mapped; // 父目录（videos）解析为长名形态
+    }));
+    expect(verdict).toEqual({ kind: 'ok', missingPaths: [`${SHORT}/videos/gone.mp4`] });
+  });
+
+  it('canonical 化不放宽安全：realpath 解析到根外 → 仍整批拒绝', async () => {
+    const verdict = await preflightTrashPaths([`${SHORT}/videos/link/evil.mp4`], contextWith(async (p) => {
+      const mapped = mapShortToLong(p);
+      return mapped.startsWith(`${LONG}/videos/link/`) ? `${LONG}/outside/evil.mp4` : mapped;
+    }));
+    expect(verdict.kind).toBe('refused');
+    if (verdict.kind === 'refused') expect(verdict.reason).toContain('指向任务输出目录之外');
   });
 });
 
@@ -741,8 +809,10 @@ describe.skipIf(!onWindows)('B · 打开面：真实 node-ports fs + 真实 Task
     const artifact = join(junction, 'real.mp4');
 
     // 真实 fs 证据：该路径确实经过 junction 解析（realpath ≠ 原始串）。
+    // D-208：两侧都取 canonical 形态——runner 的 tmpdir 带 8.3 短名
+    // （RUNNER~1），realpath 报长名（runneradmin），逐字比较会假红。
     const resolved = await fs.realpath(artifact);
-    expect(slash(resolved)).toBe(slash(realFile));
+    expect(slash(resolved)).toBe(slash(await fs.realpath(realFile)));
 
     const { service, shellCalls } = openHarness(recordWith([artifact], requestFor(videoDir, join(root, 'temp'))));
     const result = await service.perform('t1', 'open-file');
@@ -858,8 +928,9 @@ describe.skipIf(!onWindows)('B · 打开面：真实 node-ports fs + 真实 Task
     const onDisk = join(videoDir, 'ext-open.mp4');
     await fs.writeFile(onDisk, 'ext-bytes');
     const artifact = `\\\\?\\${onDisk}`;
-    // 真实 fs 证据：realpath 把 \\?\ 形态解析为普通形态（containment 归一化可判）。
-    expect(slash(await fs.realpath(artifact))).toBe(slash(onDisk));
+    // 真实 fs 证据：realpath 把 \\?\ 形态解析为普通形态（containment 归一化可
+    // 判）。D-208：两侧都取 canonical 形态（runner tmpdir 短名差异，同 B-10）。
+    expect(slash(await fs.realpath(artifact))).toBe(slash(await fs.realpath(onDisk)));
 
     const { service, shellCalls } = openHarness(recordWith([artifact], requestFor(videoDir, join(root, 'temp'))));
     const result = await service.perform('t1', 'open-file');

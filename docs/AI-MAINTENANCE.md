@@ -346,7 +346,7 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 
 **为什么不能直推**：`.github/workflows/ci.yml` 在 `push main` 与所有 PR 上跑
 （`windows-latest`；`pnpm typecheck` → `npm test`（四维 ≥70）→ 安全套件定向步骤（D-203…D-207
-的新测试显式列入，含 skipped=0 守卫脚本）→ `check-layering` →
+的新测试显式列入；守卫：符号链接权限跳过零容忍、UNC 管理员共享跳过显式 allowlist——D-208）→ `check-layering` →
 `frozen-gate`），但 workflow 文件**不能强制自己必须过**——强制力完全来自仓库设置。
 所有 `uses:` 引用已钉 commit SHA（D-185，行尾 `# v<版本>` 注释供人工核对，含 desktop-pack.yml 的 upload-artifact）；升级 action 版本时按「GitHub API tag→commit 与 SHA→commit 双向回环」验证后改 SHA，绝不猜。
 `handoff-check.mjs` 不检查这一项，所以「本地全绿」不等于「可以合并」。
@@ -451,7 +451,7 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 
 37. **真实 Electron 的 close 事件未被 `preventDefault()` 就必然销毁窗口，而假 Electron 不模拟这一点**（D-197）：「想 hide」和「不销毁」是两件事——`window.hide()` 只藏窗口，close 的默认销毁照常发生 → `window-all-closed` → `app.quit()`，下载被中断。close 相关单测必须复刻真实语义（emitClose 模式：构造带 `preventDefault` 的 event 调 listener；未被拦 → 视同销毁并触发 `window-all-closed`），否则测试永远绿、真机必坏。
 38. **「类型可选 + 双层可选链」意味着「不接线 = 功能不存在」**（D-198）：`electron.session?.defaultSession?.setPermission…Handler` 两层都可选，surface 不给 `session` 键时 deny-all 两门在生产从未安装，单测还全绿（假对象根本没有 session）。检查任何「权限/安全加固」功能，先 grep 生产 surface（`electron-entry.ts::electronSurface()`）是否真的提供了依赖键；新增这类键时同步补「传了必注册、不传静默跳过」的真断言。
-39. **「字符串上在可信根内」的路径可以真实指向根外：Windows reparse point（symlink/junction）是真实逃逸向量**（D-204/D-207）：containment 是纯字符串包含，junction 可以是**中间组件**（`<videoDir>/link/file.mp4`，link 外指）——末段 lstat 报普通文件、完全穿透；悬空 junction 还会让 stat/lstat ENOENT 被误读成「文件已删」。两侧策略刻意不同，不要复用同一守卫：**删除面**（不可逆）trash 前对整批 realpath 预检，任一 symlink/根外/上下文不可解析 → 整批拒绝、回收站零调用、记录保留；**打开面**（跟随意图）realpath 解析最终目标后重校验，根外 REFUSED、ENOENT 走缺失流程、EACCES/ELOOP fail-closed。`realpath` 缺席只存在于旧测试假对象（生产 node-ports 恒提供）。
+39. **「字符串上在可信根内」的路径可以真实指向根外：Windows reparse point（symlink/junction）是真实逃逸向量**（D-204/D-207）：containment 是纯字符串包含，junction 可以是**中间组件**（`<videoDir>/link/file.mp4`，link 外指）——末段 lstat 报普通文件、完全穿透；悬空 junction 还会让 stat/lstat ENOENT 被误读成「文件已删」。两侧策略刻意不同，不要复用同一守卫：**删除面**（不可逆）trash 前对整批 realpath 预检，任一 symlink/根外/上下文不可解析 → 整批拒绝、回收站零调用、记录保留；**打开面**（跟随意图）realpath 解析最终目标后重校验，根外 REFUSED、ENOENT 走缺失流程、EACCES/ELOOP fail-closed。`realpath` 缺席只存在于旧测试假对象（生产 node-ports 恒提供）。另有一个对称坑：**「同名目录、两种合法形态」**——根字符串可能含 8.3 短名（`C:\Users\RUNNER~1\…`，TEMP 常见、CI runner 必现）而 `realpath` 报长名（`runneradmin`），realpath 判定必须对「字符串根 + canonical 别名」（`canonicalContainmentRoots`）进行，只比字符串根会误拒全部合法文件（D-208，PR CI run#14 实测）。
 
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 

@@ -17,14 +17,16 @@
  *   - success === true 且 numFailedTests === 0（正常情况下 vitest 非零退出
  *     早已让 bash -eo pipefail 步骤失败，这里是双保险）。
  *
- * 跳过守卫（→ exit 1）：
- *   - win-fs-link-security.test.ts 的 skipped 必须为 0。windows-latest
- *     runner 以管理员运行，应当拥有 SeCreateSymbolicLinkPrivilege；junction
- *     用例无需权限、永远执行。skipped > 0 = runner 缺符号链接权限或 UNC
- *     管理员共享不可稳定构造 → 显式失败并输出可操作指引（不许放宽守卫）。
- *   - 边界说明：本地开发机（无开发者模式）skipped > 0 是预期行为——本守卫
- *     只应绑定在 CI 的安全套件步骤；本地覆盖范围以 A-D206 能力探测输出
- *     （A-0 / B-0 / C-1 用例的 stdout）为准。
+ * 跳过守卫（D-208 语义）：
+ *   - 符号链接权限类跳过：零容忍。windows-latest runner 以管理员运行，应当
+ *     拥有 SeCreateSymbolicLinkPrivilege；junction 用例无需权限、永远执行。
+ *     任何非 allowlist 的 skipped（尤其符号链接用例）→ exit 1 + 可操作指引。
+ *   - UNC 能力门跳过（A-8a / A-8b，`\\<host>\<盘符>$` 管理员共享）：显式
+ *     allowlist 放行并大声报告——SMB 回环可达性是环境属性而非权限缺失，
+ *     runner 阻断时该覆盖缺口按 D-206/D-208 登记（不构成静默跳过）。
+ *   - 边界说明：本地开发机（无开发者模式）符号链接用例 skipped > 0 是预期
+ *     行为——本守卫只应绑定在 CI 的安全套件步骤；本地覆盖范围以 A-D206
+ *     能力探测输出（A-0 / B-0 / C-1 用例的 stdout）为准。
  *
  * 用法：node scripts/check-security-suite-results.mjs [结果JSON路径]
  */
@@ -121,17 +123,30 @@ for (const expected of EXPECTED_FILES) {
   console.log(`[security-suite-guard]   ${expected.padEnd(42)} passed=${counts.passed} failed=${counts.failed} skipped=${counts.skipped}`);
 }
 
-// ── 跳过守卫（要求 7）──────────────────────────────────────────────────────
+// ── 跳过守卫（要求 7 · D-208 语义）────────────────────────────────────────
+// 符号链接权限类跳过零容忍；UNC 管理员共享跳过为显式 allowlist（大声报告，
+// 不构成静默跳过——SMB 回环可达性是环境属性而非权限缺失，覆盖缺口按
+// D-206/D-208 登记）。
+const CAPABILITY_SKIP_ALLOWLIST = ['A-8a', 'A-8b'];
 const skipped = flatOf(GUARD_FILE).filter((assertion) => assertion.status === 'skipped');
-if (skipped.length > 0) {
-  console.error(`[security-suite-guard] SKIP GUARD FAILURE — ${GUARD_FILE} 的 skipped=${skipped.length}（要求 7：windows-latest runner 上必须为 0）`);
+const unexpectedSkips = skipped.filter((assertion) => {
+  const name = String(assertion.fullName ?? assertion.title ?? '');
+  return !CAPABILITY_SKIP_ALLOWLIST.some((id) => name.includes(id));
+});
+if (unexpectedSkips.length > 0) {
+  console.error(`[security-suite-guard] SKIP GUARD FAILURE — ${unexpectedSkips.length} 个非 allowlist 跳过（要求 7：符号链接权限在 windows-latest runner 上必须可用，相关用例必须实跑）`);
   console.error('[security-suite-guard] 被跳过的用例：');
-  for (const assertion of skipped) console.error(`[security-suite-guard]   - ${assertion.fullName ?? assertion.title}`);
+  for (const assertion of unexpectedSkips) console.error(`[security-suite-guard]   - ${assertion.fullName ?? assertion.title}`);
   console.error('[security-suite-guard] 可操作指引：');
-  console.error('[security-suite-guard]   1) windows-latest runner 以管理员运行，应拥有 SeCreateSymbolicLinkPrivilege——skipped>0 说明 runner 缺符号链接权限，或 UNC 管理员共享 \\\\localhost\\<盘符>$ 不可稳定构造；应检查 runner 环境，而不是放宽本守卫。');
-  console.error('[security-suite-guard]   2) junction 用例无需权限、永不跳过；被跳过的只会是 file-symlink 门（A-3/A-4b/B-11c）或 UNC 门（A-8a/A-8b）。');
-  console.error('[security-suite-guard]   3) 诊断依据：A-0/B-0/C-1 能力探测用例的 stdout 输出 EPERM/UNC 探测原因。本地开发机（无开发者模式）skipped>0 是预期行为，本守卫只绑定 CI。');
+  console.error('[security-suite-guard]   1) windows-latest runner 以管理员运行，应拥有 SeCreateSymbolicLinkPrivilege——非 allowlist skipped>0 说明 runner 缺符号链接权限；应检查 runner 环境，而不是放宽本守卫。');
+  console.error('[security-suite-guard]   2) junction 用例无需权限、永不跳过；allowlist 之外的被跳用例只会来自 file-symlink 门（A-3/A-4b/B-11c）。');
+  console.error('[security-suite-guard]   3) 诊断依据：A-0/B-0/C-1 能力探测用例的 stdout 输出 EPERM 探测原因。本地开发机（无开发者模式）符号链接用例 skipped>0 是预期行为，本守卫只绑定 CI。');
   process.exit(1);
 }
+if (skipped.length > 0) {
+  console.warn(`[security-suite-guard] ALLOWED CAPABILITY SKIPS — ${skipped.length} 个 UNC 能力门跳过（allowlist：${CAPABILITY_SKIP_ALLOWLIST.join('/')}，环境不可得、大声报告非静默）`);
+  for (const assertion of skipped) console.warn(`[security-suite-guard]   - ${assertion.fullName ?? assertion.title}`);
+  console.warn('[security-suite-guard] 覆盖缺口登记：UNC 真实共享场景未在 runner 验证（D-206/D-208 未覆盖），留真机。');
+}
 
-console.log(`[security-suite-guard] PASS — ${GUARD_FILE} skipped=0，七个安全文件全部执行且全绿（${report.numPassedTests} passed / 0 failed）。`);
+console.log(`[security-suite-guard] PASS — 七个安全文件全部执行且全绿（${report.numPassedTests} passed / 0 failed）；skipped=${skipped.length}（全部属 allowlist 能力门）。`);

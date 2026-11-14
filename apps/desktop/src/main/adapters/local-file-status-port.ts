@@ -11,7 +11,7 @@
  */
 import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
-import { isPathInsideRoots, normalizedForContainment } from '@ytvdlt/core';
+import { canonicalContainmentRoots, isPathInsideRoots, normalizedForContainment } from '@ytvdlt/core';
 import type { TrashFileOutcome, TrashFilesPort, TrashPreflightVerdict } from '../m5-channels.js';
 import {
   createLocalFileStatusProbe, type LocalFileStatusPort, type StatOutcome,
@@ -139,7 +139,15 @@ type PreflightEntry =
   | { readonly kind: 'missing' }
   | { readonly kind: 'refused'; readonly reason: string };
 
-async function preflightOnePath(path: string, context: TrashPreflightContext): Promise<PreflightEntry> {
+async function preflightOnePath(
+  path: string,
+  context: TrashPreflightContext,
+  // D-208: string roots PLUS their canonical (realpath) aliases — see
+  // `canonicalContainmentRoots`. The verdicts below compare a REALPATH
+  // resolution, which on Windows can legitimately be in a different form
+  // (8.3 short name vs long name) than the configured root string.
+  verificationRoots: readonly string[],
+): Promise<PreflightEntry> {
   // (1) end-component link -> refuse. An lstat FAILURE is no verdict here: a
   // dangling mid-path junction lstat-ENOENTs through its children, and that
   // case is decided by the realpath tree below — never as "missing".
@@ -171,7 +179,7 @@ async function preflightOnePath(path: string, context: TrashPreflightContext): P
             + '无法证明产物归属（悬空符号链接/联接或目录上下文不可判定），已拒绝回收',
         };
       }
-      if (!isPathInsideRoots(parentReal, context.roots) && !pathEqualsAnyRoot(parentReal, context.roots)) {
+      if (!isPathInsideRoots(parentReal, verificationRoots) && !pathEqualsAnyRoot(parentReal, verificationRoots)) {
         // The parent resolved, but through a junction its REAL location sits
         // outside the roots — the recorded path escapes containment exactly
         // like the resolved-file case, so it cannot be proven to be this
@@ -186,7 +194,7 @@ async function preflightOnePath(path: string, context: TrashPreflightContext): P
       reason: `无法解析产物真实路径（${errnoDetail(error)}），无法证明产物归属，已拒绝回收`,
     };
   }
-  if (!isPathInsideRoots(real, context.roots)) {
+  if (!isPathInsideRoots(real, verificationRoots)) {
     return { kind: 'refused', reason: OUTSIDE_REFUSAL_REASON };
   }
   return { kind: 'ok' };
@@ -208,11 +216,15 @@ export async function preflightTrashPaths(
   paths: readonly string[],
   context: TrashPreflightContext,
 ): Promise<TrashPreflightVerdict> {
+  // D-208: the verdicts compare realpath RESOLUTIONS — give them the string
+  // roots plus their canonical aliases so an 8.3 short-name / reparse-point
+  // root form does not refuse legitimate files.
+  const verificationRoots = await canonicalContainmentRoots(context.roots, context.realpath);
   const missingPaths: string[] = [];
   let refusedReason: string | null = null;
   let refusedCount = 0;
   for (const path of paths) {
-    const entry = await preflightOnePath(path, context);
+    const entry = await preflightOnePath(path, context, verificationRoots);
     if (entry.kind === 'refused') {
       refusedReason ??= entry.reason;
       refusedCount += 1;

@@ -194,3 +194,46 @@ export function trustedArtifactRoots(
   const roots = artifactRootsOf(paths).filter(isSpecificRoot);
   return roots.length > 0 ? roots : null;
 }
+
+/**
+ * D-208 · Canonical aliases of the trusted roots, for verdicts that compare
+ * `realpath` RESOLUTIONS.
+ *
+ * The string gates compare NAMES: the recorded artifact against the configured
+ * root string. The D-204 / D-207 verdicts compare a `realpath` resolution
+ * against those same roots — and on Windows the two forms can legitimately
+ * differ for the SAME directory: a configured root may contain an 8.3 short
+ * name (`C:\Users\RUNNER~1\…` — the form `TEMP` uses on many machines and on
+ * CI runners) while `realpath` reports the long form (`C:\Users\runneradmin\…`),
+ * or a root may itself sit behind a reparse point whose real location is the
+ * same trusted directory under another name. Comparing a resolved path against
+ * only the string roots refuses every legitimate file on such machines
+ * (observed on the windows-latest runner: all D-203 real-fs entries refused).
+ *
+ * Returns the string roots PLUS the best-effort `realpath` of every root
+ * (de-duplicated by normalized containment form). Adding the canonical alias
+ * of a trusted root does NOT widen trust — it is the same trusted directory
+ * under the name the kernel actually reports. A root that cannot be resolved
+ * simply keeps its string form. Realpath verdicts must compare against THIS
+ * list, never against the raw string roots alone.
+ */
+export async function canonicalContainmentRoots(
+  roots: readonly string[],
+  realpath: (path: string) => Promise<string>,
+): Promise<readonly string[]> {
+  const out: string[] = [...roots];
+  for (const root of roots) {
+    let real: string;
+    try {
+      real = await realpath(root);
+    } catch {
+      continue; // unresolvable root: the string form stays the only evidence
+    }
+    const normalizedReal = normalizedForContainment(real);
+    if (normalizedReal === null) continue;
+    if (!out.some((existing) => normalizedForContainment(existing) === normalizedReal)) {
+      out.push(real);
+    }
+  }
+  return out;
+}

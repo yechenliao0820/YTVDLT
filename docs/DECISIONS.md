@@ -2242,3 +2242,13 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 ## 附注 · 本轮（D-203…D-207）审计遗留（建议未动，留决策）
 
 审计 8 项全部通过、零代码缺口；以下低危项**建议但未动**，留业主决策：① `m5-channels.ts` 失败兜底 `failed[0]?.reason ?? '未知错误'` 仅在注入端口违约时可达（生产适配器恒带 errno），可附带 path 定位；② D-204/D-203 拒绝文案为主进程中文句，英文 UI 经 `result.message` 原样显示（既有 7 码映射架构未覆盖新文案），可在 messages.js 双语补键并映射 REFUSED 进打开码表（遵循 D-100）；③ withFiles 对不存在 taskId 返回 `FILE_DELETE_FAILED(failedCount:0)` 而非 `TASK_MISSING`（语义标签不精确，ok:false 如实）；④ `node-ports exists()` 把 EACCES 视为 false，仅影响无 realpath 的降级路径（生产恒提供 realpath）。
+
+## D-208 · 2026-11-14 · realpath 判定的 canonical 根形态（8.3 短名误拒收口）+ UNC 跳过 allowlist（PR CI run#14 首红修复）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | PR CI（windows-latest，run#14）Tests 步骤红：7 例失败，全部集中在真实文件系统安全套件——`expected 'C:/Users/runneradmin/…' to be 'C:/Users/RUNNER~1/…'`。runner 的 `TEMP` 带 **8.3 短名**（`RUNNER~1`），`realpath` 报**长名**（`runneradmin`）；D-207 预检 / D-204 判定把 realpath 结果只与**字符串形态的可信根**比较 → 形态不一致 → 合法文件被整批误拒（D-203 真实 fs 用例全拒、混合批 failedCount=2、外部删除误判拒绝、B-13 大小写变体拒绝）。本地 TEMP 无 8.3 别名所以全绿——真实用户配置目录含短名/别名时同样会被误拒，**属产品缺陷非 CI 环境问题**。 |
+| 根因 | 「同名目录、两种合法路径形态」：`realpath` 永远报 canonical（长）形态，而可信根字符串可能含 8.3 短名或 reparse point 别名；containment 是纯字符串比较，形态不归一必假阳。 |
+| 决策 | ① `containment.ts` 新增 `canonicalContainmentRoots(roots, realpath)`（core 纯函数，realpath 注入）：返回字符串根 + 每根 best-effort realpath 别名（按归一化形态去重；根不可解析时保留字符串形态）。canonical 别名是**同一个可信目录**，不扩权。② D-207 预检（`preflightTrashPaths`）与 D-204 打开判定（`resolveRealPath`）改为对 canonical 根列表判定；字符串门保持不变。③ B-10/B-14 测试断言两侧都取 canonical 形态。④ 新增回归测试（注入 fake realpath 模拟短名根形态，修复前必红）：preflight 3 例（ok / missing / 拒绝不放宽）+ open 门 1 例。⑤ UNC 探测依次尝试 `\\localhost\X$` 与 `\\127.0.0.1\X$`（`capabilities.uncHost` 记录可用形态，A-8a/A-8b 随动）；CI 守卫改为「符号链接权限跳过零容忍 + UNC 跳过显式 allowlist 大声报告」——run#14 实测 runner `fileSymlink=true`（符号链接用例实跑全过）、UNC SMB 回环不可达属环境属性，覆盖缺口按 D-206/D-208 登记留真机。 |
+| 验证 | 本机定向 9 套件全绿（210 用例）；全量 2764 / 0 failed（覆盖最低 86.95%）；M1 17/17、M5 10/10 gates allGreen；安全套件按 CI 口径实跑 134 passed / 5 skipped，守卫本地正确 exit 1（3 个符号链接跳过非 allowlist——本机无符号链接权限属预期），CI 预期仅剩 2 个 UNC allowlist 跳过 → exit 0。 |
+| 未覆盖 | UNC 真实共享场景在 runner 上仍 skip（allowlist 登记的覆盖缺口，留真机）；TOCTOU 依旧不测（D-206/D-207 边界）。 |

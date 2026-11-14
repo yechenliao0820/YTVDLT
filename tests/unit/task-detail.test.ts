@@ -248,6 +248,31 @@ describe('D-204 · open gate fail-closed + realpath containment', () => {
     expect(recorded.shell).toEqual([{ op: 'open', path: 'C:/V/junction.mp4' }]);
   });
 
+  it('D-208 · 根为 8.3 短名形态、realpath 解析出长名 → OK（canonical roots 不误拒）', async () => {
+    // runner 实测形态：TEMP = `C:\Users\RUNNER~1\…`（8.3 短名），realpath 报
+    // `C:\Users\runneradmin\…`（长名）。判定必须对「字符串根 + canonical 别
+    // 名」进行，否则合法文件被 REFUSED（windows-latest run#14）。
+    const SHORT = 'C:/Users/RUNNER~1/AppData/Local/Temp/yt208';
+    const LONG = 'C:/Users/runneradmin/AppData/Local/Temp/yt208';
+    const { service, mem, recorded } = harness(record({
+      request: {
+        ...REQUEST,
+        paths: { ...REQUEST.paths, videoDir: `${SHORT}/videos`, audioDir: `${SHORT}/videos`, tempDir: `${SHORT}/temp` },
+      },
+      artifacts: [`${SHORT}/videos/junction.mp4`],
+    }));
+    // trustedArtifactRoots 返回归一化小写根；真实 fs 的 realpath 大小写不敏
+    // 感——假件同样按小写前缀映射（与内核行为一致）。
+    attachRealpath(mem, async (p) => {
+      const lower = p.toLowerCase();
+      return lower.startsWith(SHORT.toLowerCase()) ? LONG + p.slice(SHORT.length) : p;
+    });
+    const result = await service.perform('t1', 'open-file');
+    expect(result.ok).toBe(true);
+    expect(result.code).toBe('OK');
+    expect(recorded.shell).toEqual([{ op: 'open', path: `${SHORT}/videos/junction.mp4` }]);
+  });
+
   it('realpath ENOENT → 走 FILE_MISSING 流程（不当安全拒绝吞掉）', async () => {
     const { service, mem, recorded } = harness(record({ artifacts: ['C:/V/gone.mp4'] }));
     attachRealpath(mem, async (p) => { throw fsError('ENOENT', p); });

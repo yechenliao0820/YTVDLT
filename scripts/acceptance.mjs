@@ -1441,9 +1441,10 @@ const M5_ASSERTIONS = [
   { id: 'A-D203', layer: 'L1', subject: 'D-195 完整启动恢复链 fail-closed：损坏 request 快照清洗为 null 并清空 artifacts，经 restoreTasks + TaskQueue.restore 后路径不复活；request===null 的恢复记录 withFiles 删除门（D-203）与 open 门（D-204）一律 fail-closed（拒绝动作、回收站/shell 零调用、记录保留）；request 完好但产物越界维持 D-184 整批拒绝；合法任务恢复后照常回收且记录移除', tests: ['restore-chain-fail-closed'], needs: ['vitest'], evidence: ['reports/vitest-results.json::restore-chain-fail-closed.test.ts', 'packages/core/src/task-store/task-store.ts::sanitizeRecord', 'packages/core/src/task-store/bootstrap.ts::restoreTasks', 'apps/desktop/src/main/m5-channels.ts::TASK_ACTION'] },
   // A-D206 · Windows 真实文件系统符号链接 / junction 安全测试：与 A-D198/A-D203 同一做法，
   // 真断言，状态由 findTestCount() 对真实 vitest 结果计数（skipped/pending/todo 不计入
-  // failed，跳过面单独显式展示——CI windows-latest 由 check-security-suite-results.mjs
-  // 守卫强制 skipped=0）。真实 os.tmpdir() fixture + 真实 createTrashFilesPort（D-203 lstat
-  // 守卫 + D-207 预检）+ 真实 node-ports realpath（D-204）；文件符号链接/UNC 用例按能力探测
+  // failed，跳过面单独显式展示——CI 守卫 check-security-suite-results.mjs 对符号链接权限
+  // 类跳过零容忍，UNC 管理员共享跳过为显式 allowlist 并大声报告，缺口登记 D-206/D-208）。
+  // 真实 os.tmpdir() fixture + 真实 createTrashFilesPort（D-203 lstat
+  // 守卫 + D-207 预检 + D-208 canonical roots）+ 真实 node-ports realpath（D-204）；文件符号链接/UNC 用例按能力探测
   // ctx.skip（带 reason，输出可数），junction 用例永远执行；「中间 junction」逃逸已由
   // D-207 预检关闭（A-2b/A-2c/A-2d 为严格拒绝断言），TOCTOU 竞态登记为已知边界不做抖动测试。
   { id: 'A-D206', layer: 'L1', subject: 'Windows 真实文件系统链接安全（D-203 删除守卫 + D-204 realpath 打开守卫）：指向根外的目录 junction / 悬空 junction / junction 循环在删除面一律拒绝（符号链接/联接无法验证归属、trashItem spy 零误收、目标文件完好、悬空不误入 missing 幂等分支）；打开面经真实 realpath 解析最终目标后重过 containment——junction 指向根外/循环 → REFUSED（含「符号链接/联接」「无法证明路径安全」），指向根内/大小写变体/\\?\\ 前缀 → OK 且 shell 收到原始路径，悬空链接 → FILE_MISSING/目录回退而非安全拒绝；能力探测（文件符号链接 EPERM、UNC 管理员共享稳定性）驱动受限用例显式 ctx.skip 且每个 describe 保留永远执行的探测用例；删除面「中间 junction」逃逸（产物字符串在根内、末段 lstat 穿透）已由 D-207 预检关闭——realpath 解析到根外/父目录不可解析 → 整批拒绝、回收站零调用、记录保留，stat→trashItem TOCTOU 竞态登记为不测边界', tests: ['win-fs-link-security'], needs: ['vitest'], evidence: ['reports/vitest-results.json::win-fs-link-security.test.ts', 'apps/desktop/src/main/adapters/local-file-status-port.ts::createTrashFilesPort', 'packages/core/src/task-detail/task-detail.ts::resolveRealPath', 'apps/desktop/src/main/adapters/node-ports.ts::realpath'] },
