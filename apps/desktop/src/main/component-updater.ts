@@ -28,7 +28,8 @@
  * default exists for generic local traffic, not for this path).
  */
 import type {
-  ComponentVersionCheck, ComponentVersionReport, CorePorts, HttpFetchOptions, QueueIntakeGate,
+  ComponentVersionCheck, ComponentVersionReport, CorePorts, HttpFetchOptions, HttpPort,
+  QueueIntakeGate,
 } from '@ytvdlt/shared';
 import type { ILogger } from '@ytvdlt/core';
 import { compareVersions } from '@ytvdlt/core';
@@ -111,6 +112,16 @@ export interface ComponentUpdaterDeps {
   /** Fallback feed directory (HTTPS). `null` disables components without their own. */
   readonly baseUrl: string | null;
   readonly intakeGate: QueueIntakeGate | null;
+  /**
+   * D-214 (append-only, OPTIONAL): the update-only Electron/Chromium HttpPort.
+   * ALL three network reads of this module — the version query, the
+   * `SHA2-256SUMS` manifest and the component binary — go through it, so a
+   * system proxy / TUN / Fake-IP DNS cannot be rejected by the D-143
+   * Node-level address pinning. `componentFetchPolicy` / `mirrorHopPolicy`
+   * are unchanged and still travel with every request as `urlPolicy`.
+   * Absent (offline unit tests) keeps `ports.http` exactly as before.
+   */
+  readonly updateHttp?: HttpPort;
   readonly channel?: 'stable' | 'nightly';
 }
 
@@ -235,6 +246,10 @@ export function latestVersionFromReleaseJson(text: string): string | null {
 
 export function createComponentUpdater(deps: ComponentUpdaterDeps): ComponentUpdatePort {
   const { ports, logger, components, baseUrl, intakeGate } = deps;
+  // D-214: ONE port for the whole component chain. The binary is fetched by
+  // `HttpUpdateSource` with the SAME `http` instance, so nothing can silently
+  // fall back to the ordinary (DNS-pinned) transport mid-update.
+  const updateHttp = deps.updateHttp ?? ports.http;
   let updating = false;
   /** Latest versions discovered by `check()`, by component id. */
   const latestKnown = new Map<string, string>();
@@ -285,7 +300,7 @@ export function createComponentUpdater(deps: ComponentUpdaterDeps): ComponentUpd
 
     async check(): Promise<ComponentVersionReport> {
       const results: ComponentVersionCheck[] = [];
-      const http = ports.http;
+      const http = updateHttp;
       for (const component of components) {
         const installed = await installedVersion(component.path);
         const apiUrl = isHttpUrl(component.versionApiUrl) ? component.versionApiUrl.trim() : '';
@@ -304,6 +319,9 @@ export function createComponentUpdater(deps: ComponentUpdaterDeps): ComponentUpd
           // Component-update hardening: the version query carries the source's
           // URL policy (official GitHub API → strict allowlist), so a redirect
           // cannot walk the release JSON off the trusted hosts.
+          // D-214: `updateHttp` is the Electron/Chromium update transport;
+          // that transport enforces this policy on hop 0 and on EVERY Location
+          // with manual redirects instead of Node DNS pinning.
           const text = await http.getText(apiUrl, withSourcePolicy(apiUrl, { timeoutMs: 15_000 }));
           const latestVersion = latestVersionFromReleaseJson(text);
           if (latestVersion === null) {
@@ -352,7 +370,7 @@ export function createComponentUpdater(deps: ComponentUpdaterDeps): ComponentUpd
       if (updating) {
         return { ok: false, source: baseUrl, reason: '更新正在进行中', results: [] };
       }
-      const http = ports.http;
+      const http = updateHttp;
       if (http === undefined) {
         return { ok: false, source: baseUrl, reason: '当前构建不支持网络更新', results: [] };
       }
@@ -368,6 +386,10 @@ export function createComponentUpdater(deps: ComponentUpdaterDeps): ComponentUpd
               component: component.id,
             });
           }
+          // D-214: `http` is the update-only HttpPort, so BOTH the SHA2-256SUMS
+          // manifest and the component binary travel over the same proxy-aware
+          // Chromium session. SelfUpdater's checksum / atomic swap / backup /
+          // rollback pipeline is not touched by the transport change.
           // D-161: manifest + binary carry the SAME full source policy as the
           // version query — GitHub allowlist for official feeds, same-host /
           // no-downgrade + intranet-address allowance for operator mirrors.

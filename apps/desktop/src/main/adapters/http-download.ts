@@ -12,7 +12,32 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, rename, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { allowAnyHttpUrl, fetchFollowingRedirects, type RedirectPolicy } from './http-policy.js';
+import {
+  MAX_HTTP_REDIRECTS, allowAnyHttpUrl, fetchFollowingRedirects, type RedirectPolicy,
+} from './http-policy.js';
+
+/**
+ * D-214 (append-only): the ONE seam an update-only transport can replace.
+ *
+ * The installer is ~220 MB, so this adapter — not the transport — still owns
+ * the `.part` file, the byte ceiling, the idle deadline, the SHA-256 digest,
+ * the progress callback and the cancellation cleanup. The injected transport
+ * only supplies a fetch-shaped `Response` whose body is a real stream; it must
+ * enforce `urlPolicy` on the initial URL AND on every redirect hop, cap the
+ * chain at `maxRedirects`, and abort the underlying request when `signal`
+ * fires (headers AND full body).
+ *
+ * Leaving this unset keeps the D-143 `node:http(s)` transport with DNS
+ * pinning exactly as before — the ordinary (non-update) path is untouched.
+ */
+export interface DownloadResponseContext {
+  readonly url: string;
+  readonly headers: Record<string, string>;
+  readonly signal: AbortSignal;
+  /** Applied by the transport to hop 0 and to every Location. */
+  readonly urlPolicy: (rawUrl: string) => boolean;
+  readonly maxRedirects: number;
+}
 
 export interface DownloadProgress {
   readonly downloadedBytes: number;
@@ -43,6 +68,15 @@ export interface DownloadRequest {
    * URL check only, as before D-143.
    */
   readonly allowResolvedAddress?: (address: string) => boolean;
+  /**
+   * D-214 (append-only, OPTIONAL): update-only Electron/Chromium transport.
+   * When present, `hostPolicy` is forwarded as `urlPolicy` and every hop is
+   * re-checked by the transport; `allowResolvedAddress` is deliberately NOT
+   * forwarded — the Chromium stack resolves the target itself (proxy-side DNS
+   * / Fake-IP), so Node-level address pinning does not apply to this channel.
+   * The new security boundary is the URL allowlist + default TLS verification.
+   */
+  readonly openResponse?: (context: DownloadResponseContext) => Promise<Response>;
   readonly signal?: AbortSignal;
   readonly trashPartial?: (path: string) => Promise<void>;
 }
@@ -85,18 +119,33 @@ export async function downloadToFile(request: DownloadRequest): Promise<Download
     // now re-checked, the chain is capped, and the same AbortSignal covers it.
     // D-143: `allowResolvedAddress` (when the caller passes one) additionally
     // gates every resolved IP and pins the connection to the verified address.
-    const redirectPolicy: RedirectPolicy = request.hostPolicy === undefined
-      ? allowAnyHttpUrl
-      : {
+    const headers = { 'user-agent': 'YTVDLT-updater' };
+    let response: Response;
+    if (request.openResponse !== undefined) {
+      // D-214: the update-only Electron/Chromium transport owns the connection;
+      // everything below (byte ceiling, `.part`, hash, progress, abort cleanup)
+      // is unchanged and shared with the D-143 path.
+      response = await request.openResponse({
+        url: request.url,
+        headers,
+        signal: controller.signal,
+        urlPolicy: request.hostPolicy ?? allowAnyHttpUrl.allow,
+        maxRedirects: MAX_HTTP_REDIRECTS,
+      });
+    } else {
+      const redirectPolicy: RedirectPolicy = request.hostPolicy === undefined
+        ? allowAnyHttpUrl
+        : {
           allow: request.hostPolicy,
           ...(request.allowResolvedAddress === undefined
             ? {}
             : { allowResolvedAddress: request.allowResolvedAddress }),
         };
-    const response = await fetchFollowingRedirects(request.url, {
-      signal: controller.signal,
-      headers: { 'user-agent': 'YTVDLT-updater' },
-    }, redirectPolicy);
+      response = await fetchFollowingRedirects(request.url, {
+        signal: controller.signal,
+        headers,
+      }, redirectPolicy);
+    }
     if (!response.ok || response.body === null) {
       throw new Error(`HTTP ${response.status} for ${request.url}`);
     }

@@ -12,7 +12,9 @@
  * still the renderer's probe path; replacing it with `engine.probe()` belongs to
  * the same N1 block.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, session, shell, Tray } from 'electron';
+import {
+  app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, net, session, shell, Tray,
+} from 'electron';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -20,6 +22,9 @@ import type { CorePorts, EngineUpdateSource } from '@ytvdlt/shared';
 import { ArtifactVerifier, ErrorMapper, Logger, expandEnvVars, type IConfigStore } from '@ytvdlt/core';
 import { createEngine } from '@ytvdlt/engine-ytdlp';
 import { createNodePorts } from './adapters/node-ports.js';
+import {
+  createElectronUpdateNetwork, type UpdateNetworkSurface,
+} from './adapters/electron-update-network.js';
 import { createElectronShellPort } from './adapters/electron-shell-port.js';
 import { createPathPicker } from './adapters/path-picker.js';
 import { createLocalFileStatusPort, createTrashFilesPort } from './adapters/local-file-status-port.js';
@@ -78,6 +83,19 @@ export function electronSurface(): ElectronLike {
     // unit-test fakes that omit `session` keep the silently-skipped behaviour.
     session: session as unknown as NonNullable<ElectronLike['session']>,
   };
+}
+
+/**
+ * D-214: the ONLY production injection point of Electron's Chromium network
+ * stack for the UPDATE channel. `net.request()` (never `node:http(s)`) gives
+ * both updaters OS proxy / PAC / WPAD / TUN routing, while the application's
+ * default session — and therefore ordinary page, thumbnail and pre-check
+ * traffic — is left exactly as it was. The structural cast is the same seam
+ * `electronSurface()` uses: offline unit tests inject a fake surface instead
+ * of loading the Electron binary (B1/D-39).
+ */
+export function electronUpdateNetworkSurface(): UpdateNetworkSurface {
+  return { net, session } as unknown as UpdateNetworkSurface;
 }
 
 export async function startApplication(options: StartOptions): Promise<BootstrapHandle | null> {
@@ -179,6 +197,30 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       appVersion,
       shell: createElectronShellPort(shell),
     });
+    /**
+     * D-214: ONE update-only network object shared by BOTH update chains.
+     * `readProxy` is LAZY — the ConfigStore does not exist yet at this point,
+     * and reading `network.proxy` at the start of each request means a settings
+     * change applies to the NEXT request without re-routing a download already
+     * in flight. `''` means "use the OS proxy" (never force DIRECT).
+     */
+    const updateNetwork = createElectronUpdateNetwork({
+      surface: electronUpdateNetworkSurface(),
+      readProxy: () => {
+        if (configRef === null) return '';
+        const raw = configRef.getDomain('network')['proxy'];
+        if (raw === undefined || raw === null) return '';
+        // A malformed non-string value must surface as an INVALID proxy error
+        // in parseUpdateProxy(), never silently degrade into "no proxy".
+        return typeof raw === 'string' ? raw : String(raw);
+      },
+    });
+    /**
+     * Update modules get their OWN ports object: even a stray `ports.http`
+     * read inside an updater lands on the update transport. Thumbnails, URL
+     * pre-checks and the rest of the host keep the original D-143-pinned ports.
+     */
+    const updatePorts: CorePorts = { ...ports, http: updateNetwork.httpPort };
     const logger = new Logger({ ports, appVersion });
     // D-169: the runtime was never checked at start-up. `checkRuntimeForApp()`
     // existed since M1 and had ZERO callers, so a build shipped without
@@ -418,7 +460,10 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     configRef = host.m4.task.config;
 
     componentUpdater = createComponentUpdater({
-      ports,
+      // D-214: the component chain (version query, SHA2-256SUMS manifest and
+      // yt-dlp.exe binary) is entirely on the update-only transport.
+      ports: updatePorts,
+      updateHttp: updateNetwork.httpPort,
       logger,
       components: [
         {
@@ -470,7 +515,12 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     // 0.2.1 (D-93): the app updater, now on GitHub Releases rather than the
     // electron-updater generic feed (which needs `latest.yml` we do not publish).
     appUpdater = createAppUpdateService({
-      ports,
+      // D-214: `/releases/latest` + `/releases` use the update-only HttpPort;
+      // the installer uses the update-only STREAMING downloader, which is the
+      // existing `downloadToFile` pipeline with `net.request()` as its transport.
+      ports: updatePorts,
+      updateHttp: updateNetwork.httpPort,
+      downloadInstaller: updateNetwork.downloadInstaller,
       logger,
       config: host.m4.task.config,
       currentVersion: appVersion,
