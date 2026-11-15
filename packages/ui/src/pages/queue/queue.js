@@ -1895,14 +1895,36 @@
     });
   }
 
+  /**
+   * D-215: current page URL with `lang` set (en) or removed (zh-CN), every
+   * other query parameter untouched. The old `[?&]lang=[^&]*` strip ate the
+   * leading `?` whenever `lang` was the FIRST parameter — exactly the shape
+   * `app-nav.pageUrl()` saves on a page hop (`?lang=en&v=…`) — and left
+   * `…index.html&v=…`, a file name that does not exist. The main-process
+   * `will-navigate` trust gate then refused the reload silently, so after one
+   * round trip through the settings page BOTH language buttons looked dead.
+   * Rebuilding the query cannot mangle the separator (same helper style as
+   * `app-nav.js::pageUrl`).
+   */
+  function localeSwitchUrl(target) {
+    var base = String(global.location ? global.location.href : '').split('#')[0].split('?')[0];
+    try {
+      var params = new global.URLSearchParams(String(global.location ? global.location.search : ''));
+      if (target === 'en') params.set('lang', 'en');
+      else params.delete('lang');
+      var query = params.toString();
+      return query !== '' ? base + '?' + query : base;
+    } catch (error) {
+      // No URLSearchParams: append-only fallback (the pre-D-215 zh->en path).
+      return target === 'en' ? base + '?lang=en' : base;
+    }
+  }
+
   function switchLocale(next) {
     var target = next === 'en' ? 'en' : 'zh-CN';
     store('ytvdlt.locale', target);
     call('SETTINGS_SET', { language: target }).then(function () { /* best effort */ });
-    var url = String(global.location.href).replace(/[?&]lang=[^&]*/g, '');
-    // Keep the other query switches (tab / theme / kind) intact.
-    var separator = url.indexOf('?') === -1 ? '?' : '&';
-    var finalUrl = target === 'zh-CN' ? url : url + separator + 'lang=' + target;
+    var finalUrl = localeSwitchUrl(target);
     if (global.location && typeof global.location.replace === 'function') global.location.replace(finalUrl);
   }
 

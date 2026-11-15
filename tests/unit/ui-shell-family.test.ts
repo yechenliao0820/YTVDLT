@@ -737,6 +737,45 @@ describe('D-187 · app-nav：队列页导航条注入（D-106）', () => {
     expect(callsTo('ytvdlt:window:fullscreen').at(-1)?.payload).toEqual({ action: 'set', value: true });
     navRef.setFullscreenState(false);
   });
+
+  it('D-217 全屏过渡遮罩：真实变化挂载→淡出→移除；同值同步不挂；无桥不挂（live-only）', () => {
+    const bodyNode = doc().body as UiNode;
+    const veilInBody = (): boolean =>
+      (bodyNode.children as UiNode[]).some((c) => c.getAttribute('id') === 'ytvdlt-fs-veil');
+    const veilOf = (): UiNode | undefined =>
+      (bodyNode.children as UiNode[]).find((c) => c.getAttribute('id') === 'ytvdlt-fs-veil');
+    // ⓪ 前面用例（Escape / 去重点击）可能挂过遮罩且假 timer 未推进：先推进
+    //    一个完整生命周期（hold 240 + fade 260），把遗留遮罩全部冲干净。
+    vi.advanceTimersByTime(600);
+    expect(veilInBody()).toBe(false);
+    // ① did-finish-load 的基线同步：同值推送不是过渡，不挂遮罩（否则全屏下
+    //    每次菜单跳页都会闪一层遮罩）。
+    navRef.state.fsSynced = false;
+    navRef.setFullscreenState(navRef.state.fullscreen);
+    expect(veilInBody()).toBe(false);
+    expect(navRef.state.fsSynced).toBe(true);
+    // ② 真实变化（模拟主进程 enter/leave-full-screen 推送）→ 挂载并保持不透明。
+    navRef.setFullscreenState(!navRef.state.fullscreen);
+    expect(veilInBody()).toBe(true);
+    const veil = veilOf();
+    expect(veil!.getAttribute('data-active')).toBe('true');
+    expect(veil!.getAttribute('class')).toBe('ytv-fs-veil');
+    // ③ 保持期结束 → 淡出标记；淡出计时走完 → 从 body 移除（引用清空）。
+    vi.advanceTimersByTime(240);
+    expect(veil!.getAttribute('data-active')).toBe('false');
+    vi.advanceTimersByTime(180 + 80);
+    expect(veilInBody()).toBe(false);
+    // ④ 无桥（静态预览 / e2e）→ 永不挂载：冻结截图基线不受影响。
+    const original = win().ytvdltBridge;
+    delete win().ytvdltBridge;
+    try {
+      navRef.state.fsSynced = true;
+      navRef.setFullscreenState(!navRef.state.fullscreen);
+      expect(veilInBody()).toBe(false);
+    } finally {
+      win().ytvdltBridge = original;
+    }
+  });
 });
 
 describe('D-187 · app-nav：pageUrl / go / saveView / restoreView（D-106 / D-114）', () => {

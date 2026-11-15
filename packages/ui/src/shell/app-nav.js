@@ -28,7 +28,7 @@
   var VIEW_KEY = 'ytvdlt.queue.view';
   var HOST_IDS = ['queue-root', 'settings-root', 'ytvdlt-task-detail', 'ytvdlt-task-log', 'ytvdlt-batch'];
 
-  var state = { fullscreen: false, buttons: [], leave: [], installed: false };
+  var state = { fullscreen: false, fsSynced: false, buttons: [], leave: [], installed: false };
 
   function t(key, zh, en) {
     var i18n = global.YTVDLT && global.YTVDLT.i18n;
@@ -117,13 +117,82 @@
     });
   }
 
+  // ---------- D-217: fullscreen transition veil (live-only decoration) -------
+  // Flipping fullscreen resizes the OS window before the renderer's relayout
+  // catches up: for a fraction of a second the old frame sits frozen (the
+  // owner-visible "stuck" hitch). This veil is a theme-coloured layer that
+  // covers exactly that window and then fades out, so the switch reads as an
+  // intentional transition. Pure decoration: every step is best-effort and any
+  // failure silently skips it — the fullscreen operation never depends on it.
+  // Live-only (no preload bridge -> never mounts), so the frozen screenshot
+  // baselines are untouched; `html[data-motion="reduced"]` (theme.css) removes
+  // the fade, leaving a brief functional cover instead of an animation.
+  var FS_VEIL_ID = 'ytvdlt-fs-veil';
+  var FS_VEIL_HOLD_MS = 240;  // opaque while the resize + relayout settle
+  var FS_VEIL_FADE_MS = 180;  // CSS fade-out duration (layout.css)
+  var veilNode = null;
+
+  function veilDetach(veil) {
+    try {
+      if (veil.__veilTimer !== null && veil.__veilTimer !== undefined
+        && typeof global.clearTimeout === 'function') {
+        global.clearTimeout(veil.__veilTimer);
+      }
+      // Detach via the mount point, not via parentNode: test-sandbox nodes may
+      // not carry a parent link (坑 32), and a real node is always a body child
+      // here. Removing twice throws in real DOM — caught below.
+      if (doc && typeof doc.body.removeChild === 'function') doc.body.removeChild(veil);
+    } catch (error) { /* best effort: already detached */ }
+    if (veilNode === veil) veilNode = null;
+  }
+
+  function veilStart() {
+    try {
+      if (bridge() === null) return; // live-only: static preview / e2e never mount it
+      if (!doc || !doc.body || typeof doc.createElement !== 'function') return;
+      if (typeof doc.body.appendChild !== 'function' || typeof doc.body.removeChild !== 'function') return;
+      if (typeof global.setTimeout !== 'function') return;
+      if (veilNode === null) {
+        veilNode = doc.createElement('div');
+        veilNode.id = FS_VEIL_ID;
+        veilNode.className = 'ytv-fs-veil';
+        doc.body.appendChild(veilNode);
+      }
+      veilNode.setAttribute('data-active', 'true');
+      if (veilNode.__veilTimer !== null && veilNode.__veilTimer !== undefined
+        && typeof global.clearTimeout === 'function') {
+        global.clearTimeout(veilNode.__veilTimer);
+      }
+      veilNode.__veilTimer = global.setTimeout(function () {
+        veilNode.setAttribute('data-active', 'false'); // CSS fades opacity to 0
+        veilNode.__veilTimer = global.setTimeout(function () { veilDetach(veilNode); },
+          FS_VEIL_FADE_MS + 80);
+      }, FS_VEIL_HOLD_MS);
+    } catch (error) { /* best effort */ }
+  }
+
   /** Main-process push endpoint (and the only source of truth while packaged). */
-  function setFullscreenState(active) { paintFullscreen(active === true); }
+  function setFullscreenState(active) {
+    var next = active === true;
+    var changed = next !== state.fullscreen;
+    paintFullscreen(next);
+    // D-217: the FIRST push after a page load is the main process syncing the
+    // current state (did-finish-load), not a transition — veil real changes
+    // only, and only once that baseline sync has landed.
+    if (changed && state.fsSynced) veilStart();
+    state.fsSynced = true;
+  }
 
   function requestFullscreen(flag) {
     var target = flag === true;
     var b = bridge();
     if (b !== null) {
+      // D-217: raise the transition veil BEFORE the IPC round trip, so the OS
+      // resize happens under the veil instead of on a frozen frame. The button
+      // label keeps painting from the authoritative reply only — a rejected
+      // request must not leave the label lying about the window state — and
+      // the push endpoint re-arms the same veil, never a second one.
+      if (target !== state.fullscreen) veilStart();
       return Promise.resolve(b.invoke(FS_CHANNEL, { action: 'set', value: target }))
         .then(function (reply) {
           var value = reply && typeof reply === 'object' && typeof reply.fullscreen === 'boolean'

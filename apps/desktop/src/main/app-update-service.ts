@@ -33,7 +33,7 @@
 import { readFile, rename, writeFile } from 'node:fs/promises';
 import type {
   AppRelease, AppReleaseAsset, AppReleaseNote, AppUpdateAction, AppUpdateActionResult,
-  AppUpdateState, CorePorts,
+  AppUpdateState, CorePorts, HttpPort,
 } from '@ytvdlt/shared';
 import type { IConfigStore, ILogger } from '@ytvdlt/core';
 import { collectReleaseNotes, isNewerVersion } from '@ytvdlt/core';
@@ -74,10 +74,22 @@ export interface AppUpdateServiceDeps {
   readonly quit: () => void;
   readonly trashPartial?: (path: string) => Promise<void>;
   /**
+   * D-214 (append-only, OPTIONAL): the update-only Electron/Chromium HttpPort.
+   * `check()` and the D-140 release-history lookup (`notesSince`) use it, so
+   * the GitHub Releases JSON is reachable under an OS proxy / TUN / Fake-IP.
+   * Absent (offline unit tests) keeps `ports.http` exactly as before.
+   */
+  readonly updateHttp?: HttpPort;
+  /**
    * D-143: the installer downloader. Defaults to the real `downloadToFile`
    * (D-137 redirect policy + D-143 DNS pinning); injected by tests so they
    * stay offline — the old global-`fetch` stub stopped working when the
    * transport moved to `node:http`/`node:https`.
+   *
+   * D-214: production injects `ElectronUpdateNetwork.downloadInstaller` here —
+   * the SAME `downloadToFile` pipeline (`.part`, byte ceiling, SHA-256, PE
+   * check, cancellation) with its `openResponse` seam swapped to
+   * `net.request()`. The state machine and all verification steps are unchanged.
    */
   readonly downloadInstaller?: (request: DownloadRequest) => Promise<DownloadResult>;
 }
@@ -250,7 +262,10 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
     phase = 'checking';
     message = '';
     try {
-      const http = ports.http;
+      // D-214: both `/releases/latest` and `/releases` (notesSince) share the
+      // update-only HttpPort — one proxy-aware Chromium session, same GitHub
+      // URL allowlist on hop 0 and every redirect.
+      const http = deps.updateHttp ?? ports.http;
       if (http === undefined) return fail('当前构建不支持网络请求');
       const release = await fetchLatestRelease(http, deps.source);
       await persistCheckTime(ports.clock.nowIso());
@@ -364,13 +379,16 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
         url: asset.url,
         targetPath: target,
         expectedBytes: asset.sizeBytes > 0 ? asset.sizeBytes : null,
-        // D-137: the allowlist is checked again on EVERY redirect hop, not only
-        // on the `browser_download_url` we validated above.
+        // D-137 / D-214: the allowlist is checked again on EVERY redirect hop —
+        // by `fetchFollowingRedirects` on the default transport, or by the
+        // injected Electron transport's manual `redirect` event. It is NEVER
+        // widened for proxy compatibility.
         hostPolicy: isTrustedReleaseHost,
-        // D-143: DNS rebinding guard — every address every hop's hostname
-        // resolves to must be public, and the socket is pinned to the verified
-        // address. A checked github.com URL that quietly resolves to a private
-        // IP is refused before any byte is fetched.
+        // D-143: DNS rebinding guard for the DEFAULT (node:http(s)) transport.
+        // The D-214 Electron transport ignores it: Chromium resolves the target
+        // through the proxy / TUN itself, so Node-level address pinning does not
+        // apply to this channel. Keeping the field preserves the default path
+        // and every existing offline test unchanged.
         allowResolvedAddress: isPublicResolvedAddress,
         signal: controller.signal,
         ...(deps.trashPartial === undefined ? {} : { trashPartial: deps.trashPartial }),

@@ -66,6 +66,13 @@ function fakeElectron(options: {
         loadURL: async (url: string) => {
           log.urls.push(url);
           options.trace?.push('loadURL');
+          // Real Electron (D-215): `did-finish-load` fires while `loadURL()` is
+          // still running — the promise resolves inside the SAME event
+          // emission, so the `await` continuation only runs after the emission
+          // has finished. A listener registered after the `await` therefore
+          // never sees the first load (the launch-hidden regression). Firing
+          // here keeps that ordering contract honest in the fake.
+          events.get('wc:did-finish-load')?.();
         },
         on: (event: string, listener: () => void) => { events.set(`wc:${event}`, listener); },
         setWindowOpenHandler: (
@@ -303,8 +310,10 @@ describe('bootstrap · deep link + tray + lifecycle', () => {
       createHost: async () => host,
     });
     expect(log.urls[0]).toBe('file:///app/pages/queue/index.html?prefill=https%3A%2F%2Fexample.org%2Fwatch%3Fv%3D1');
-    // did-finish-load shows the window (no flash of an empty frame).
-    log.windowEvents.get('wc:did-finish-load')?.();
+    // D-215: the FIRST load's did-finish-load must already have shown the
+    // window (no flash of an empty frame, no launch-into-tray). The fake fires
+    // the event inside loadURL with real-Electron ordering, so a listener
+    // registered after the `await` leaves `shown` at 0 here.
     expect(log.shown).toBe(1);
     handle?.dispose();
   });

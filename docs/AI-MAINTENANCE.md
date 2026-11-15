@@ -154,7 +154,7 @@ ui（零依赖） ← preload ← apps/desktop
 | **设置页分区目录 + 滚动联动** | `ui/src/pages/settings/index.html`（`.settings-shell` / `.settings-nav` / `.settings-scroll`）、`settings.js::installSectionNav()` |
 | 截图基线用例 | `scripts/e2e-cases.mjs`、`tests/e2e/baselines/` |
 | **全局导航 / 返回下载队列 / 队列视图状态** | `packages/ui/src/shell/app-nav.js`（导航条注入、`saveView/restoreView`）、`pages/queue/queue.js::saveView/restoreView` |
-| **全屏唯一真相（菜单 / 按钮 / 所有页面）** | `apps/desktop/src/main/bootstrap.ts`（`WINDOW_FULLSCREEN` handler + 事件推送）、`main/app-menu.ts`（F11 click）、`ui/src/shell/app-nav.js`（按钮与 Esc） |
+| **全屏唯一真相（菜单 / 按钮 / 所有页面）** | `apps/desktop/src/main/bootstrap.ts`（`WINDOW_FULLSCREEN` handler + 事件推送）、`main/app-menu.ts`（F11 click）、`ui/src/shell/app-nav.js`（按钮与 Esc）；**过渡遮罩（D-217）**：真实变化挂 `.ytv-fs-veil`（live-only，layout.css），基线同步推送不挂，遮罩纯装饰绝不影响全屏操作本身 |
 | **主题 / 强调色 / 动效全局状态与持久化** | `packages/ui/src/theme/theme.js`（`set/sync/listen/state`）、`pages/settings/settings.js`、`main/m5-channels.ts::SETTINGS_GET/SET` |
 | **本地文件状态探测 / 删除任务时文件已不存在 / 打开文件与打开文件夹反馈** | `apps/desktop/src/main/local-file-status.ts`（errno 分类 + 短 TTL 缓存 + force 重查）、`apps/desktop/src/main/adapters/local-file-status-port.ts`（真实 `stat` + 幂等回收）、`main/m5-channels.ts::TASK_ACTION` / `TASK_LIST`、`core/src/task-detail/task-detail.ts::open`、`ui/src/pages/queue/queue.js::fileStateKey` / `openActionMessage` / `performRemoval`；卡片「打开文件」按钮**只在 live 模式注入**（静态预览不注入，保住冻结基线）；原理见 §9 坑 22 |
 | **产物路径封链（回收/打开防越界）** | `core/src/path-resolver/containment.ts`（纯函数：归一/大小写/拒 `..`/按段前缀）→ `core/src/task-queue/task-queue.ts::acceptContainedArtifacts`（入库主门：roots=该请求的 videoDir/audioDir/tempDir，全拒转 `ARTIFACT_OUTSIDE_ROOTS`）→ `main/m5-channels.ts::TASK_ACTION`（withFiles 整批拒绝）与 `core/src/task-detail/task-detail.ts::open`（REFUSED）两道副门；**request 缺失/损坏/根不可判定一律拒绝、记录保留**（D-203，业主授权推翻 D-120 旧宽容）；withFiles 在 trash 前有 **realpath 整批预检**（`TrashFilesPort.preflight?` → `local-file-status-port.ts::preflightTrashPaths`：symlink/junction/根外/上下文不可解析 → 整批拒绝、回收站零调用，D-207）；open 门 realpath 解析最终目标后重校验（D-204）。**D-209：realpath 判定用的 canonical 根（`canonicalContainmentRoots`）只收仍是 `isSpecificRoot` 的别名 —— 配置根本身是指向 `C:\` 的 junction 时，别名绝不能让整盘变成「根内」**。D-184/D-203/D-204/D-207/D-209 |
@@ -165,6 +165,25 @@ ui（零依赖） ← preload ← apps/desktop
 | **内嵌字幕后按 `keepSubtitleFile` 清理外置副本** | `core/src/task-queue/task-queue.ts::discardEmbeddedSubtitleArtifacts`（本任务字幕清单 + 媒体归属 / 语言段 / 其它任务引用三重校验；**D-209：`recycleSubtitleFiles(paths, roots)` 第二个参数是 `trustedArtifactRoots()` 作用域，`null` 时整批跳过**）→ `main/m5-host.ts::makeSubtitleRecycler`（**D-209：trash 前先跑 `TrashFilesPort.preflight`，与 withFiles 同一个 D-207 门；`refused` = 回收站零调用、链接与产物全保留**）→ `main/adapters/local-file-status-port.ts::createTrashFilesPort` → `shell.trashItem`（D-131；**删除只进回收站**）。新增任何「清理自己产出的文件」链路都必须走同一预检，别只加末段 lstat |
 | **支持的网站列表（引擎自述 / 搜索 / 排序 / GenericIE 说明）** | `engine-ytdlp/src/extractor-list.ts::parseExtractorList`（纯解析 `--list-extractors`，**唯一事实来源，无兜底名单**）→ `engine-ytdlp/src/yt-dlp-engine.ts::listExtractors` → `engine-ytdlp/src/site-discovery.ts`（可选能力接口 `SiteDiscovery` + `supportsSiteDiscovery()`，**不扩冻结的 5 方法 `DownloadEngine`**）→ `main/site-support-service.ts`（缓存身份 = 引擎路径 + 版本，自更新后 key 变化即失效）→ `m5-channels.ts::SUPPORTED_SITES`（投影 DTO，**丢 `enginePath`**）→ `ui/src/sites/supported-sites.js`（**仅 live 模式注入**，静态基线不受影响；文件内无任何写死站点名）。D-134 |
 | **URL 支持状态预检（六态模型，仅「明确不支持」拦截）** | `engine-ytdlp/src/extractor-list.ts::classifySupportFailure` / `extractorClaimedUrl`（纯函数，按真实 stderr 分类）→ `engine-ytdlp/src/yt-dlp-engine.ts::checkUrlSupport`（`--simulate`，默认 20 s，**永不抛异常**）→ `main/site-precheck-gate.ts::precheckBatch`（**三个入口共用的唯一定义**：worker 池并发 3、in-flight 去重、重复不折叠、超预算放行并记 `skipped`）→ `m5-channels.ts`（单 URL 在 `DOWNLOAD_START` **花掉字幕票据之前**拦截；`PLAYLIST_BATCH_ENQUEUE` 按条目预检）与 `main/txt-import-service.ts`（TXT 批量预检）。六态：`SUPPORTED / UNSUPPORTED / NO_MEDIA / INDETERMINATE / TIMEOUT / CANCELLED`，**只有 `UNSUPPORTED` 拦截**（`shared/src/site-support.ts::blocksEnqueue`），**门禁 fail open**。⚠️ `generic`（GenericIE）会认领一切 http(s) URL，故引擎的裸 `ERROR: Unsupported URL:` 是「认领了但无媒体」= **NO_MEDIA（放行）**，不是 UNSUPPORTED。**D-156（可取消）**：`URL_SUPPORT_CHECK_CANCEL`（零 payload，abort 所有在途预检）/ `URL_SUPPORT_CHECK_STATUS`（只读进度轮询）两通道；`AbortSignal` 贯穿 `SpawnOptions.signal` → `node-ports` `killTree` → `checkUrlSupport` → `SiteSupportService` → `precheckBatch`，三个入口（单 URL / TXT / 播放列表）取消即不入队并回带 `cancelled`；`CANCELLED` 落 `indeterminate` 桶、门禁仍 fail-open；UI 全部 live-only 动态 DOM（坑 30），静态截图基线零改动。D-134 / D-156 |
+
+> **D-214 · 更新链路的传输例外（结构知识）**：普通出站请求走
+> `adapters/http-policy.ts` 的 Node DNS 钉扎；**只有两条更新链路**走
+> `adapters/electron-update-network.ts` 的 Electron `net.request()`——代理 /
+> TUN / Fake-IP 交给 Chromium 与系统路由，应用不再自行解析并钉住目标 IP。
+> 装配点在 `main/electron-entry.ts::electronUpdateNetworkSurface()`：注入 `net`
+> 与 `session`，生成 `updatePorts`，把 `updateHttp` / `downloadInstaller` 显式
+> 注入 `app-update-service.ts` 与 `component-updater.ts`。代理优先级：
+> `network.proxy` 非空 → 校验后固定代理（无 `DIRECT` 回退、失败不绕行）→ 否则
+> `setProxy({mode:'system'})`（保留 PAC / WPAD / 自动检测）。每种代理配置对应
+> 一个独立、非持久、`cache:false` 的 Session，创建后永不改配置，在途下载不会
+> 被另一个更新任务改道。凭据只在**固定代理模式**的主进程 `login` 事件里按
+> `isProxy` + host / port 匹配时提供，绝不进 `proxyRules` / 日志 / 渲染层；
+> `system` 模式不挂 `login`（空 callback 会取消请求），系统代理认证交给
+> Electron / Chromium。逐跳校验
+> （`isTrustedReleaseHost` / `mirrorHopPolicy`、5 跳上限、循环、防降级）与默认
+> TLS 校验原样保留；`downloadToFile` 的 `.part` / SHA-256 / PE / 取消链路复用
+> 不变。`198.18.0.0/15` 只在**更新专用通道**不再被预先拒绝，其它所有请求的
+> 私网拒绝规则一字未改。
 
 ---
 
@@ -454,6 +473,32 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 38. **「类型可选 + 双层可选链」意味着「不接线 = 功能不存在」**（D-198）：`electron.session?.defaultSession?.setPermission…Handler` 两层都可选，surface 不给 `session` 键时 deny-all 两门在生产从未安装，单测还全绿（假对象根本没有 session）。检查任何「权限/安全加固」功能，先 grep 生产 surface（`electron-entry.ts::electronSurface()`）是否真的提供了依赖键；新增这类键时同步补「传了必注册、不传静默跳过」的真断言。
 39. **「字符串上在可信根内」的路径可以真实指向根外：Windows reparse point（symlink/junction）是真实逃逸向量**（D-204/D-207）：containment 是纯字符串包含，junction 可以是**中间组件**（`<videoDir>/link/file.mp4`，link 外指）——末段 lstat 报普通文件、完全穿透；悬空 junction 还会让 stat/lstat ENOENT 被误读成「文件已删」。两侧策略刻意不同，不要复用同一守卫：**删除面**（不可逆）trash 前对整批 realpath 预检，任一 symlink/根外/上下文不可解析 → 整批拒绝、回收站零调用、记录保留；**打开面**（跟随意图）realpath 解析最终目标后重校验，根外 REFUSED、ENOENT 走缺失流程、EACCES/ELOOP fail-closed。`realpath` 缺席只存在于旧测试假对象（生产 node-ports 恒提供）。另有一个对称坑：**「同名目录、两种合法形态」**——根字符串可能含 8.3 短名（`C:\Users\RUNNER~1\…`，TEMP 常见、CI runner 必现）而 `realpath` 报长名（`runneradmin`），realpath 判定必须对「字符串根 + canonical 别名」（`canonicalContainmentRoots`）进行，只比字符串根会误拒全部合法文件（D-208，PR CI run#14 实测）。**反方向的坑同样存在**：别名不能无条件进判定面 —— 配置根本身可能是指向盘符根的 junction，`realpath` 把「下载目录」解析成 `C:\`，判定随即放大成整盘；别名只有在仍是具体根（`isSpecificRoot`）时才收（D-209）。
 
+40. **代理 / TUN / Fake-IP 下更新失败，不要去改地址白名单**（D-214）：更新链路
+    不能用「先 DNS 解析、再把 socket 钉在已验证地址」的连接模型——代理在远端
+    解析 DNS、TUN 透明接管路由，`198.18.0.26` 这类 Fake-IP 在那个场景里是
+    **正常**解析结果。放宽 `isPrivateIpv4()` 或删掉 `isPublicResolvedAddress()`
+    会把 SSRF 防线一起关掉，普通缩略图 / URL 预检也跟着失守。正确做法是把
+    **更新通道**换到 Electron Chromium 网络栈（`net.request` + 独立 Session），
+    安全边界换成「初始 URL + 每跳 URL 白名单 + 默认 TLS 校验 + 代理失败不回退
+    直连」；`followRedirect()` 必须在 `redirect` 事件里同步调用，所以逐跳判定
+    只能是纯函数，不能 await DNS。普通请求继续留在 D-143 的钉扎路径上。
+
+41. **`did-finish-load` 的监听必须注册在 `await loadURL()` 之前**（D-215）：
+    `loadURL` 的 promise 与该事件在同一次事件派发内完成，`await` 的续体要等
+    整个派发结束才执行——注册在 `await` 之后的监听器**永远错过首次加载**。
+    窗口是 `show: false` 时，症状是「启动不弹主窗、只能托盘唤出」（托盘 show
+    与 second-instance 走 `showWindow()`，不经过该监听器）。单测假件若不在
+    `loadURL` 内同步发事件、而是事后手动触发，必然假绿——坑 37 的教训在
+    事件时序上的变体：**假件必须复刻真实派发次序**。
+
+42. **用正则从 URL 里删 query 参数会吞分隔符，改 query 一律走 URLSearchParams 重建**（D-216）：
+    `[?&]lang=[^&]*` 在 `lang` 排第一（`?lang=en&v=…`，正是 `app-nav.pageUrl()`
+    保存跳转参数的形态）时把 `?` 一起吃掉，产出 `…index.html&v=…`——整个
+    `&v=…` 变成文件名，文件不存在，再被 `will-navigate` 信任门的 `\.html?$`
+    校验**静默拒绝**，用户看到的就是「按钮点了没反应」。同类写法（剥参数后
+    再按「有没有 `?`」拼分隔符）在参数顺序变化时全部不可靠；`app-nav.pageUrl`、
+    `queue.js` / `settings.js` 的 `switchLocale` 已统一为 set/delete 重建。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 
@@ -486,6 +531,7 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 | **日志页（task-log）在 live 模式没有注入器与导航入口**：`__YTVDLT_TASK__` 只有读取方、无注入方，「复制日志」暂无真实用户路径（D-178 已保证接线后即可用） | `ui/src/pages/task-log/`、`scripts/e2e-cases.mjs` |
 | **主进程拒绝/失败文案（文件删除、打开、D-203/D-204/D-207 新句）未接英文 UI 映射**：en 界面经 `result.message` 原样显示中文（既有 code→i18n 映射只覆盖 7 个码） | `apps/desktop/src/main/m5-channels.ts` 文案常量、`packages/ui/src/i18n/messages.js` |
 | **文件权限的 TOCTOU 竞态、真实文件符号链接、UNC 管理员共享：登记为未测边界**（能力门显式 skip，不写抖动测试假装覆盖；junction 全矩阵与 realpath 已真实 fs 实测） | `tests/unit/win-fs-link-security.test.ts` 头注、D-206/D-207「未覆盖」；Electron 真进程 `shell.trashItem` 亦未端到端实测 |
+| **更新链路的代理 / TUN / Fake-IP 兼容性未在真实代理环境验收**：系统代理 / HTTP(S) / SOCKS / PAC / WPAD / TUN / Fake-IP 的端到端、407 代理认证、CDN 多跳重定向、安装包流式下载与取消，全部待项目负责人在真机确认；新适配器亦尚无专属离线单测 | `main/adapters/electron-update-network.ts`、`main/electron-entry.ts`；口径见 D-214「未覆盖」 |
 
 > 这张表会随开发推进变短。**完成一项就删一行**，不要留着写「已做」——那是本手册最容易腐烂的地方。
 >

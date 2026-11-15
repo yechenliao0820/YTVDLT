@@ -158,6 +158,28 @@ html body .queue-ambient span { font-size: calc(30px + var(--ui-step) * 2); }
    legacy header button in the DOM for compatibility but never show two. */
 html body #queue-fullscreen { display: none; }
 
+/* ---------- D-217: fullscreen transition veil (live-only) --------------------
+ * Mounted by shell/app-nav.js only when a preload bridge exists and only on a
+ * real fullscreen change: an opaque, theme-coloured layer covers the OS-level
+ * resize repaint (the "stuck frame" hitch), then fades out. Never mounts in
+ * static preview / e2e, so the frozen baselines are untouched. Reduced motion
+ * disables the fade via theme.css's global `transition: none !important`,
+ * leaving a brief functional cover instead of an animation. */
+.ytv-fs-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  background: var(--bg, #eef2f6);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease-out;
+}
+.ytv-fs-veil[data-active="true"] {
+  opacity: 1;
+  pointer-events: auto;
+  transition: none;
+}
+
 html body .settings-page {
   padding: var(--sp-page) var(--sp-inline) 12px;
   gap: calc(12px + var(--ui-step));

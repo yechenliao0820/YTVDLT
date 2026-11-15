@@ -134,6 +134,16 @@ export function uiNode(tagName = 'div'): UiNode {
         : (c.attrs[key] ?? c.dataset[key.replace(/^data-/i, '').replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())]) === value);
     },
   };
+  // Mirror real DOM: `el.className = x` also makes `getAttribute('class')`
+  // work (same fidelity rule as queue-page-harness's FakeNode).
+  let classNameValue = '';
+  Object.defineProperty(node, 'className', {
+    get: () => classNameValue,
+    set: (value: unknown) => {
+      classNameValue = String(value);
+      node.attrs['class'] = classNameValue;
+    },
+  });
   return node;
 }
 
@@ -276,6 +286,11 @@ export function installUiGlobals(options: UiGlobalsOptions = {}): UiGlobals {
       for (const fn of winListeners[type] ?? []) fn(event);
     },
     navigator: { userAgent: 'vitest-ui-harness', clipboard: undefined },
+    // Every real renderer (Electron 45 / headless Chrome) ships URLSearchParams,
+    // and page code calls `new global.URLSearchParams(...)` against this fake
+    // window (app-nav.pageUrl, queue/settings locale switch). Without it those
+    // paths silently take their no-URLSearchParams fallback in tests.
+    URLSearchParams: globalThis.URLSearchParams,
     requestAnimationFrame(cb: () => void): number {
       return setTimeout(() => cb(), 0) as unknown as number;
     },
