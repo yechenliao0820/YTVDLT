@@ -133,6 +133,21 @@ export interface ElectronLike {
   };
 }
 
+/**
+ * Minimal logging seam for the tray-creation path (`createTrayWithFallback`).
+ *
+ * The signatures MIRROR the real `Logger` from `@ytvdlt/core`
+ * (`error(scope, event, fields?)`), so `electron-entry` can pass its Logger
+ * without any adapter; the `void` returns keep every call fire-and-forget here
+ * — a broken log sink must never abort start-up — while the real Logger's
+ * `Promise<void>` returns stay structurally assignable.
+ */
+export interface TrayLogger {
+  error(scope: string, message: string, fields?: Record<string, unknown>): void;
+  warn(scope: string, message: string, fields?: Record<string, unknown>): void;
+  info(scope: string, message: string, fields?: Record<string, unknown>): void;
+}
+
 export interface BootstrapOptions {
   /** `file://.../pages/queue/index.html` (dev) or `app://…` (packaged). */
   readonly pageUrl: string;
@@ -152,6 +167,14 @@ export interface BootstrapOptions {
    * desktop entry additionally guards `before-quit` to let it finish.
    */
   readonly onWindowClose?: () => Promise<void> | void;
+  /**
+   * Delivery report 五-1: the packaged build hit a tray-creation failure that
+   * the old single-try `catch {}` swallowed without ONE log line, so the root
+   * cause stayed unknown. Every attempt of `createTrayWithFallback()` now logs
+   * through this logger; when it is absent (unit tests, dev runs without one)
+   * the code degrades to `console.error` so nothing is ever silent again.
+   */
+  readonly logger?: TrayLogger;
   readonly platform?: string;
 }
 
@@ -582,9 +605,16 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
   refreshAppMenu(menuLocale);
 
   // 5. Tray: same menu model as M4, rebuilt from live counters.
-  let tray: TrayLike | null = null;
-  try {
-    tray = new Tray(options.trayIconPath);
+  //
+  // Delivery report 五-1: the packaged build hit a tray-creation failure that
+  // the old single-try `catch {}` swallowed without ONE log line, so the root
+  // cause stayed unknown while `trayReady = false` made every window close quit
+  // the app mid-download. (The D-60 fallback itself is correct and stays.) Two
+  // INDEPENDENT, individually-logged attempts now: the configured icon path
+  // first, then `process.execPath` — the exe always carries the app icon
+  // resource (the same fallback `main.ts` already uses for the window icon).
+  function buildTray(iconPath: string): TrayLike {
+    const instance = new Tray(iconPath);
     const template: MenuItemLike[] = buildTrayMenu(stats()).map((item) => ({
       ...(item.type === 'separator' ? {} : { id: item.id }),
       label: item.label,
@@ -599,13 +629,37 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
         },
       } : {}),
     }));
-    tray.setToolTip(trayTooltip(stats()));
-    tray.setContextMenu(Menu.buildFromTemplate(template));
-    trayReady = true;
-  } catch {
-    // A missing tray icon must not abort start-up (headless CI / first run).
-    tray = null;
+    instance.setToolTip(trayTooltip(stats()));
+    instance.setContextMenu(Menu.buildFromTemplate(template));
+    return instance;
   }
+  /** One log line per failed attempt — never silent, never fatal. */
+  function logTrayFailure(attempt: 'icon' | 'exe', error: unknown): void {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    if (options.logger === undefined) {
+      console.error('[tray] creation failed:', { attempt, detail });
+      return;
+    }
+    options.logger.error('tray', 'tray creation failed', { attempt, detail });
+  }
+  function createTrayWithFallback(): TrayLike | null {
+    try {
+      return buildTray(options.trayIconPath);
+    } catch (error) {
+      logTrayFailure('icon', error);
+    }
+    try {
+      return buildTray(process.execPath);
+    } catch (error) {
+      logTrayFailure('exe', error);
+    }
+    // A missing tray icon must not abort start-up (headless CI / first run):
+    // `trayReady` stays false so the D-60 close fallback (let the close pass,
+    // the app quits) keeps protecting the window from being hidden invisibly.
+    return null;
+  }
+  const tray: TrayLike | null = createTrayWithFallback();
+  trayReady = tray !== null;
 
   // 6. OS theme / accent changes repaint the renderer without a reload.
   nativeTheme.on('updated', () => { options.onSystemAppearanceChanged?.(); });

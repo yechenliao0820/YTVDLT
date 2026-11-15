@@ -148,6 +148,18 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
    * tickets die with the process — `before-quit` clears them explicitly.
    */
   let subtitlePreviewRef: SubtitlePreviewService | null = null;
+  /**
+   * Delivery report 五-1: bootstrap's tray-creation fallback logs through the
+   * real Logger so a packaged failure lands in the JSONL log under <dataDir>/logs
+   * (a bare console fallback would be invisible in a windowed packaged build).
+   * The Logger is constructed INSIDE createHost() — it needs the ports object
+   * that is only assembled there — so this holder (same mutable-ref pattern as
+   * `hostRef`/`configRef` above) is filled the moment it exists. bootstrap()
+   * awaits createHost() BEFORE it reaches the tray step, so the ref is always
+   * set by the time the tray logger can fire; before that it degrades to
+   * console via `forwardLog` below.
+   */
+  let loggerRef: Logger | null = null;
 
   /** Clear history only when `general.privateMode` is on; never touches files. */
   const clearPrivateHistory = async (): Promise<void> => {
@@ -222,6 +234,7 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
      */
     const updatePorts: CorePorts = { ...ports, http: updateNetwork.httpPort };
     const logger = new Logger({ ports, appVersion });
+    loggerRef = logger;
     // D-169: the runtime was never checked at start-up. `checkRuntimeForApp()`
     // existed since M1 and had ZERO callers, so a build shipped without
     // `yt-dlp.exe` / `node.exe` / `ffmpeg` opened a perfectly normal window and
@@ -567,6 +580,22 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     return host;
   };
 
+  // Delivery report 五-1: forward the tray-failure log to the real Logger once
+  // createHost has built it; console fallback before that (and in unit tests).
+  function forwardLog(
+    level: 'error' | 'warn' | 'info',
+    scope: string,
+    message: string,
+    fields?: Record<string, unknown>,
+  ): void {
+    const target = loggerRef;
+    if (target === null) {
+      console[level](`[${scope}]`, message, fields ?? '');
+      return;
+    }
+    void target[level](scope, message, fields);
+  }
+
   const handle = await bootstrap(electronSurface(), {
     pageUrl: options.pageUrl,
     preloadPath: options.preloadPath,
@@ -575,6 +604,12 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     createHost,
     onSystemAppearanceChanged: () => { /* renderer re-reads SETTINGS_GET on focus */ },
     onWindowClose: clearPrivateHistory,
+    // Delivery report 五-1: tray-creation failures used to vanish into `catch {}`.
+    logger: {
+      error: (scope, message, fields) => { forwardLog('error', scope, message, fields); },
+      warn: (scope, message, fields) => { forwardLog('warn', scope, message, fields); },
+      info: (scope, message, fields) => { forwardLog('info', scope, message, fields); },
+    },
     platform: process.platform,
   });
   if (handle !== null && packaged) {

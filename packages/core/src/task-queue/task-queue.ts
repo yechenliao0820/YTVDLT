@@ -518,6 +518,13 @@ export class TaskQueue implements ITaskQueue {
       );
       record.artifacts = [...kept.artifacts];
       record.subtitleFiles = kept.links;
+      // D-209 (取消即终态、不写历史): a cancel that landed during the subtitle
+      // cleanup await must win too. Cleanup is the last await before the
+      // history write; without this guard the run went on to buildHistoryEntry
+      // + history.add() and left a successful history row behind a Canceled
+      // record. Same clean-cancel contract as the verification window above:
+      // no history row, no Completed, no error.
+      if (this.canceledMeanwhile(record)) return;
 
       // --- 4) history then Completed ---
       const entry = buildHistoryEntry(record, kept.artifacts, outcome.sizes, this.deps.ports);
@@ -526,7 +533,32 @@ export class TaskQueue implements ITaskQueue {
       // cleanup + history). A cancel that lands while either awaits must not
       // be flushed by a terminal transition the machine does not even allow
       // (`Canceled -> Completed`), which is what produced the UNKNOWN error.
-      if (this.canceledMeanwhile(record)) return;
+      if (this.canceledMeanwhile(record)) {
+        // D-209 (取消即终态、不写历史): a cancel that landed while history.add()
+        // was awaiting may already have PERSISTED the row — add() updates the
+        // store's in-memory list before awaiting its write queue. Leaving it
+        // behind turns the canceled task into a successful history entry, so
+        // compensate by removing exactly this row WITHOUT `deleteFile` (the
+        // media files belong to the user; a cancel never deletes them). A
+        // duplicate (added === false) wrote nothing and needs no compensation.
+        // The removal failure is deliberately NOT swallowed: a leftover row is
+        // the real state, so the error must surface via runSafely (which pins
+        // the reason on the record; the state stays Canceled because the
+        // machine has no Canceled -> Error edge) instead of lying by silence.
+        if (addResult.added === true) {
+          try {
+            await this.deps.history.remove(entry.id);
+          } catch (cause) {
+            throw new Error(
+              `D-209 cancel compensation failed: the history row of canceled task ${entry.id} is still in the history store: ${
+                cause instanceof Error ? cause.message : String(cause)
+              }`,
+              { cause },
+            );
+          }
+        }
+        return;
+      }
       if (addResult.added === false && addResult.reason === 'duplicate') {
         // D-101: the artifact passed every verification criterion and exists on
         // disk — failing the task here told the user "download failed" when the

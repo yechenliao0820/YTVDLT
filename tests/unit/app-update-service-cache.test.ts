@@ -2,10 +2,13 @@
  * D-104 · cached-installer integrity (the audit finding).
  *
  * A cache file that merely has the right size and an `MZ` header used to be
- * marked `ready` without recomputing its hash. These tests pin the new rules:
- * reuse requires a SHA-256 match against the published digest (or the local
- * sidecar), a mismatch isolates the file and re-downloads, and `install()`
- * re-verifies the bytes actually about to be launched.
+ * marked `ready` without recomputing its hash. These tests pin the rules:
+ * reuse requires recomputing the SHA-256 and matching the CURRENT release's
+ * published digest — a mismatch isolates the file and re-downloads. The local
+ * `.sha256` sidecar (a self-computed hash) is diagnostics only and NEVER
+ * authorizes reuse on its own, and `install()` re-verifies the bytes actually
+ * about to be launched. A release that publishes no digest cannot install at
+ * all: the cache is refused and the fresh download fails the install gate.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import {
@@ -160,33 +163,43 @@ describe('D-104 · cached installer SHA-256 verification', () => {
     expect(readFileSync(`${h.target}.sha256`, 'utf8').trim()).toBe(GOOD_HASH);
   });
 
-  it('falls back to the sidecar when GitHub supplies no digest', async () => {
+  it('no longer reuses a cache on sidecar alone when GitHub supplies no digest', async () => {
     const h = setup(null);
     h.writeCache(INSTALLER);
     h.writeSidecar(GOOD_HASH);
     await h.service.check({ manual: true });
-    const ready = await h.service.download();
-    expect(ready.phase).toBe('ready');
-    expect(ready.message).toContain('复用');
-    expect(h.downloadCalls()).toBe(0);
+    const state = await h.service.download();
+    // Tightened D-104: the sidecar stores a hash this app computed itself —
+    // not a trust root — so it alone must never authorize reuse.
+    expect(state.message).not.toContain('复用');
+    expect(h.downloadCalls()).toBe(1);
+    // The fresh download then hits the install gate: no digest, no install.
+    expect(state.phase).toBe('error');
+    expect(state.message).toContain('缺少 SHA-256 摘要');
+    expect(h.isolated('rejected')).toHaveLength(1);
   });
 
   it('refuses to reuse a legacy cache with no digest and no sidecar (fail-closed)', async () => {
     const h = setup(null);
     h.writeCache(INSTALLER);
     await h.service.check({ manual: true });
-    const ready = await h.service.download();
-    expect(ready.phase).toBe('ready'); // ...but only after a fresh download
+    const state = await h.service.download();
+    // No reuse: the installer is downloaded again, and the fresh download
+    // fails the digest gate (the old semantics made this download succeed).
     expect(h.downloadCalls()).toBe(1);
-    expect(readFileSync(`${h.target}.sha256`, 'utf8').trim()).toBe(GOOD_HASH);
+    expect(state.phase).toBe('error');
+    expect(state.message).toContain('缺少 SHA-256 摘要');
+    // The self-computed hash is never persisted as a trust baseline.
+    expect(existsSync(`${h.target}.sha256`)).toBe(false);
   });
 
-  it('writes a sidecar after a fresh download so a later launch can reuse it', async () => {
-    const h = setup(null);
+  it('still writes a sidecar after a fresh download (diagnostics only; reuse requires the digest)', async () => {
+    const h = setup(GOOD_HASH);
     await h.service.check({ manual: true });
     const ready = await h.service.download();
     expect(ready.phase).toBe('ready');
     expect(existsSync(`${h.target}.sha256`)).toBe(true);
+    expect(readFileSync(`${h.target}.sha256`, 'utf8').trim()).toBe(GOOD_HASH);
     // D-137 / D-143 wiring: every download request carries the GitHub allowlist
     // AND the resolved-address guard, whichever downloader ends up running it.
     expect(h.downloadRequests()).toHaveLength(1);

@@ -28,7 +28,9 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-/** `sha256:abc…` → `abc…`; anything else → null (verification then falls back to size + PE header). */
+/** `sha256:abc…` → `abc…`; anything else → null. D-219: null means NO trusted digest —
+ *  the installer REFUSES such assets outright (isolate + error), it no longer
+ *  falls back to size + PE header. */
 function digestOf(raw: unknown): string | null {
   const text = str(raw).trim();
   const match = /^sha256:([a-fA-F0-9]{64})$/.exec(text);

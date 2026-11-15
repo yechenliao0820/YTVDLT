@@ -164,7 +164,17 @@ export type TrashPreflightVerdict =
   | { readonly kind: 'refused'; readonly reason: string; readonly refusedCount: number };
 
 export interface TrashFilesPort {
-  trash(paths: readonly string[]): Promise<readonly (string | TrashFileOutcome)[]>;
+  /**
+   * `roots` (optional, append-only): the record's trusted output roots for the
+   * executor-side realpath re-validation (the D-207 "TOCTOU backstop" second
+   * line). When provided, the adapter re-resolves EVERY entry through
+   * `realpath` immediately before `trashItem` and refuses any resolution that
+   * lands outside these roots — closing the pre-flight→trash gap where a local
+   * attacker with write access to an output directory can swap a path (or a
+   * middle component) for a junction pointing elsewhere. Omitted (undefined)
+   * by legacy callers, which keep their exact previous behaviour.
+   */
+  trash(paths: readonly string[], roots?: readonly string[]): Promise<readonly (string | TrashFileOutcome)[]>;
   /**
    * D-207 (optional, additive): pre-flight the WHOLE batch BEFORE `trash()`.
    *
@@ -1154,7 +1164,10 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
           trashTargets = eligible.filter((path) => !gone.has(path));
         }
       }
-      const outcomes = normalizeTrashOutcomes(await deps.trashFiles.trash(trashTargets));
+      // D-207 backstop: the SAME trusted roots the pre-flight gated on go into
+      // the executor call, so `trash()` re-validates every entry's realpath
+      // immediately before `trashItem` (the pre-flight→trash swap-in window).
+      const outcomes = normalizeTrashOutcomes(await deps.trashFiles.trash(trashTargets, removalRoots));
       // A D-87 adapter replies with only the paths it handled. A short reply is
       // a partial failure and must keep the record (existing contract).
       if (outcomes.length < trashTargets.length) {
