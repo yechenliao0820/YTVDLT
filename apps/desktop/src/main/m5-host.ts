@@ -207,7 +207,12 @@ function makeSubtitleRecycler(
         const gone = new Set(provablyGone);
         targets = paths.filter((path) => !gone.has(path));
       }
-      const outcomes = targets.length === 0 ? [] : await port.trash(targets);
+      // D-207/D-209 backstop: the task's trusted roots (non-null — the queue
+      // refuses `null` roots before ever calling this hook) re-validated in
+      // the executor immediately before `trashItem`, same as the withFiles
+      // branch. A port whose `trash` ignores the optional roots (legacy fake)
+      // simply keeps its previous behaviour.
+      const outcomes = targets.length === 0 ? [] : await port.trash(targets, roots);
       const trashed = outcomes
         .filter((entry) => typeof entry === 'string'
           || entry.status === 'trashed' || entry.status === 'missing')

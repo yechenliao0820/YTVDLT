@@ -2342,3 +2342,41 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 渲染层加 **live-only 过渡遮罩**，把「冻住」变成一次有意的平滑过渡：① `shell/app-nav.js` 在真实全屏变化时向 `body` 挂主题色遮罩（layout.css `.ytv-fs-veil`，`position:fixed; inset:0; background:var(--bg)`），先 240 ms 不透明盖住重排帧、再 180 ms 淡出后从 DOM 移除；② `requestFullscreen` 在 IPC 往返**之前**挂遮罩（点击 → 遮罩先起 → resize 发生在遮罩之下）；③ 主进程唯一推送端点 `setFullscreenState` 只在「真实变化 **且** 已完成基线同步」时挂——`did-finish-load` 的状态同步推送不算过渡，否则全屏状态下每次菜单跳页都会闪一层遮罩；④ 按钮标签仍只按权威应答/推送绘制（乐观绘制会让被拒绝的请求谎报窗口状态，已否决）；⑤ 点击预挂与推送挂载共用同一节点，重入只顺延计时绝不叠层；⑥ 遮罩纯装饰，全程 try/catch best-effort，任何失败静默跳过，全屏操作不依赖它。无桥（静态预览 / e2e）永不挂载 → 冻结基线零改动；`html[data-motion="reduced"]` 经 theme.css 全局 `transition:none` 自动退化为无动画的功能性盖板。测试侧：ui-harness 节点补 `className` 访问器（镜像真实 DOM 的 class 属性联动，queue-page-harness 同款先例），遮罩移除走 `body.removeChild` 而非 `parentNode`（坑 32）。 |
 | 验证 | ui-shell-family 新增 D-217 用例（挂载→淡出→移除、同值同步不挂、无桥不挂、遗留遮罩 600 ms 冲刷）；`typecheck`（ui 包）通过；全量 `npm test` 168 文件 / 2784 passed / 5 skipped / 0 failed（四维 92.04 / 86.71 / 93.78 / 92.04，门限 70）；e2e 31/31 + 反例 5/5 全 PASS（0 px）；`frozen-gate` PASS、`check-layering` 0 violations、`build-desktop` 重跑同步 dist。 |
 | 未覆盖 | 真机手感（0.1 s 卡顿是否被感知为平滑过渡）待业主用新构建确认，打包需业主点名（铁律 9）；240/180 ms 为首版参数，真机偏快/偏慢直接调 `app-nav.js` 的 `FS_VEIL_HOLD_MS` / `FS_VEIL_FADE_MS` 与 layout.css 的 transition 时长。 |
+
+## D-218 · 2026-11-15 · 取消落在清理/历史写入窗口仍写入成功历史（外部审计 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 外部审计发现、主控核实：取消落在「字幕清理 await」或「history.add await」任一窗口内时，记录停在 Canceled 但历史里已有成功行（含落盘 history.json）。既有 D-209 竞态测试只覆盖验证窗口。 |
+| 根因 | `task-queue.ts` 收尾段：字幕清理 await 之后无取消检查、直接 `buildHistoryEntry` + `await history.add(...)`；`canceledMeanwhile` 只在 add 之后调用——它挡住了非法 `Canceled -> Completed` 迁移，挡不住「行已落库」。`history-store.add()` 先更新内存 `entries` 再 await 持久化，窗口内取消时两处都已写入。 |
+| 决策 | ① 窗口 A：清理完成、`record.artifacts` 赋值后、写历史前补 `canceledMeanwhile` 检查——行从未产生；② 窗口 B：add 返回后若取消且 `added === true`，补偿 `history.remove(entry.id)`（不带 `deleteFile`，绝不碰用户文件）后保持 Canceled；duplicate / private-mode（added=false）不补偿；补偿删除失败如实上抛（message 带原因与 cause，由 runSafely 记录，状态机无 `Canceled -> Error` 边故状态保持 Canceled），绝不静默吞。沿用 `canceledMeanwhile` 方法调用形式（TS narrowing 约束）。 |
+| 验证 | `task-queue.test.ts` 新增两个手动 deferred 闸门的确定性竞态用例（无 sleep）：窗口 A 挂清理、窗口 B 挂 `writeTextAtomic` 持久化，均断言 Canceled + `history.query({})` 为空 + 磁盘 history.json 为空（区分「内存删了、盘上没回写」）；红→绿验证：还原旧代码两用例必红。定向 3 文件 93 passed；全量 168 文件 0 failed。 |
+| 未覆盖 | 补偿删除自身失败的极端场景无专项用例（其语义由上抛路径覆盖）；取消与持久化在同一事件循环内的更细粒度交错未建模（用户态 JS 无内核级原子性）。 |
+
+## D-219 · 2026-11-15 · 更新包无发布摘要拒绝自动安装；复用唯一基准 = 发布 digest（外部审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 外部审计发现、主控核实：`release.ts::digestOf` 对缺失/畸形摘要返回 null 时，安装校验跳过哈希比对（仅大小 + PE 头），随后以下载内容**自算**哈希充当 `verifiedSha256` 基准并写入 sidecar。自算哈希不能证明首次下载内容的真实性。利用前提是可信发布源或受信传输链遭篡改（项目已有 TLS + `isTrustedReleaseHost` 白名单 + 逐跳校验 + D-143/D-214 传输加固），属纵深防御缺口而非无条件漏洞。 |
+| 决策 | ① 安装门：`asset.sha256 === null` → problems 记「发布数据缺少 SHA-256 摘要，无法证明安装包完整性，拒绝自动安装」，走既有失败路径（`isolateFile` 隔离改名不删、`phase='error'`、诚实 message、不写 sidecar）；② 复用门收紧：`verifiedCachedFile` 无发布 digest 直接不复用（重新下载），**发布 digest 成为唯一复用/安装信任基准**，sidecar 降级为纯诊断记录（写入保留、向后兼容）；③ 本项目发版流程（手册 §11）强制 Release 资产 digest 非空，正常发布不受影响；digest-less 历史缓存一次性失效（多下一次整包，预期代价，此后同一无摘要 Release 每次诚实拒绝）。`release.ts::digestOf` 的 null 语义保留，未改网络层。 |
+| 验证 | `app-update-service.test.ts` 新增 2 用例（digest 字段缺失 / 畸形短哈希 → 拒装 + 隔离改名 + 无 sidecar 落盘 + install 拒绝）；`app-update-service-cache.test.ts` 三条用例按收紧语义改写（意图保留、断言收紧），digest 匹配复用等既有用例零回归；定向 3 文件 54 passed + 回归 4 文件 29 passed；全量 0 failed。 |
+| 未覆盖 | 独立签名验证（代码签名证书）是信任根升级，属产品级决策，本轮只做 fail-closed；`install()` 基线链残留 `?? readSidecar(executable)` 兜底（当前不可达——installerPath 非空必伴随 verifiedSha256 非空），登记为潜在脚枪待下轮清理。 |
+
+## D-220 · 2026-11-15 · 托盘创建失败不再静默：JSONL 错误日志 + exe 图标回退（外部审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | DELIVERY-REPORT 五-1 真机记录：打包版关窗直接退出（应进托盘），已排除 close handler / 图标路径形态 / surface 键名，定位结论是 bootstrap 托盘创建 try 块**静默失败**（`catch {}` 无日志）→ `trayReady=false` → close 按 D-60 兜底放行为退出；无日志导致真机根因不可定位。 |
+| 根因 | `bootstrap.ts` 步骤 5 的 `catch {}` 一个字不记，且 bootstrap 拿不到任何 logger（grep 零命中）；打包版是无 stdout 的窗口进程，console 也不可见。 |
+| 决策 | ① `BootstrapOptions.logger`（最小 `TrayLogger` 接口，签名镜像 core Logger；`electron-entry.ts` 经 `loggerRef` mutable-holder + `forwardLog` 注入真实 Logger，早于 ref 构造的窗口期降级 console——打包版 JSONL 日志因此总能落盘）；② 托盘创建抽为 `createTrayWithFallback()`：先 `options.trayIconPath`、失败再用 `process.execPath`（exe 自带图标资源，main.ts 同款先例）重试一次，两次都失败才 `tray=null`；每次尝试独立记日志（scope `'tray'`，attempt icon/exe，detail=完整 stack）；③ **D-60 兜底语义一行未动**（tray=null → close 退出），修的是「不可诊断」不是兜底本身。真机下次复现时 JSONL 将直接给出根因栈。 |
+| 验证 | `bootstrap.test.ts` 三组新用例：回退成功（icon 抛错 → exe 成功，1 条日志、close 走 hide）、彻底失败（2 条日志、close 走退出兜底）、logger 缺席不崩；bootstrap 25 + app-menu 8 全绿；ipc-trust-boundary / session-permission-gate 13 条回归绿；typecheck desktop 通过。 |
+| 未覆盖 | 真机根因本身待新构建复现（日志到位即可定位）；`buildTray` 半成品实例泄漏形态（构造成功后 menu/tooltip 抛错——旧代码同形态，纯数据调用触发条件几乎不可能）与 `forwardLog` 在 JSONL sink 拒绝时的 unhandled rejection（设计取舍：日志永不中断启动）登记为 P4 观察项。 |
+
+## D-221 · 2026-11-15 · 回收站执行器逐条 realpath 复检（外部审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 外部审计发现、主控核实：`preflightTrashPaths`（D-207 整批门）与 `trash()` 执行器（lstat → stat → `trashItem` 全按原始路径）之间存在本地竞态窗口——具备输出目录写权限的本地攻击者可在间隙把路径或中间组件换成外指 junction，使外部同名文件进入回收站（静态分析，未实测，非无条件漏洞；§10 本就登记该边界）。 |
+| 决策 | ① `TrashFilesPort.trash` 增加可选第二参数 `roots?`（append-only 可选参数契约；该接口实际定义在 `m5-channels.ts`，shared/ports.ts 无此接口——审计外勘误）；② 执行器每批解析一次 `canonicalContainmentRoots`（D-208 短名别名同预检），每个条目在 stat 探测通过后、**紧贴 `trashItem` 前**逐条 realpath 重校验：根外 → error 拒收不调 trashItem；ENOENT/ENOTDIR → 既有 missing 幂等语义（不双报）；EACCES/ELOOP 等 → fail-closed；**空 roots 显式 fail-closed**（挡住 `isPathInsideRoots` 对空 roots 的 fail-open 设计）；roots 缺省 → 逐字节走旧路径（兼容旧调用方）；③ 两处生产调用方接线（withFiles 用该请求 trusted roots、字幕回收用 trustedArtifactRoots）；预检门本身一行未动，执行器复检是第二道线。 |
+| 验证 | `local-file-status-adapter.test.ts` 新增 8 用例（竞态拦截 trashItem 零调用 / ENOENT 幂等 / EACCES fail-closed / 根内不误伤 / 短名别名 / 混合批次 / 不传 roots 则 realpath 不被调用 / 空 roots fail-closed），17 passed；调用方回归 m5-channels + subtitle-discard + task-removal + queue-delete + restore-chain 共 116 passed；能力门既有 skip 保持原样。 |
+| 未覆盖 | realpath 与 trashItem 仍是两次独立路径级调用，竞态窗口从「预检后任意时刻」收窄到「相邻系统调用间的微秒级间隙」，用户态无法归零（需句柄级回收语义，Electron `shell.trashItem` 不提供）——已在代码内诚实注释；真实 junction 竞态未实测（§10 既登记）。 |

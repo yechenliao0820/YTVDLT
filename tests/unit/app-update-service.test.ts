@@ -3,6 +3,10 @@
  * three suppression reasons, all without a network or a real installer.
  */
 import { describe, expect, it } from 'vitest';
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { Logger } from '@ytvdlt/core';
 import type { IConfigStore } from '@ytvdlt/core';
 import type { CorePorts, HttpPort } from '@ytvdlt/shared';
@@ -46,6 +50,10 @@ function harness(options: {
   listResponse?: () => Promise<string>;
   currentVersion?: string;
   config?: Record<string, unknown>;
+  /** D-143 downloader seam, so tests can run a full offline download. */
+  downloadInstaller?: AppUpdateServiceDeps['downloadInstaller'];
+  /** Real directory for tests that actually write an installer to disk. */
+  updatesDir?: string;
 } = {}): Harness {
   const base = createInMemoryPorts();
   const single = options.response ?? (async () => releaseJson());
@@ -73,10 +81,13 @@ function harness(options: {
     config,
     currentVersion: options.currentVersion ?? '0.1.10',
     source: REPO,
-    updatesDir: 'C:/tmp/ytvdlt-updates',
+    updatesDir: options.updatesDir ?? 'C:/tmp/ytvdlt-updates',
     openExternal: async (url: string) => { opened.push(url); },
     openPath: async (path: string) => { opened.push(path); return ''; },
     quit: () => { quits += 1; },
+    ...(options.downloadInstaller === undefined
+      ? {}
+      : { downloadInstaller: options.downloadInstaller }),
   };
   return { service: createAppUpdateService(deps), config, values, opened, quitCount: () => quits };
 }
@@ -223,6 +234,66 @@ describe('app update service · install gate', () => {
     const state = await h.service.download();
     expect(state.phase).toBe('error');
     expect(state.message).toContain('GitHub');
+  });
+});
+
+describe('app update service · install gate (published digest required)', () => {
+  const INSTALLER = Uint8Array.from([0x4d, 0x5a, 0x90, 0x00, ...Array.from({ length: 60 }, () => 7)]);
+  const GOOD_HASH = createHash('sha256').update(INSTALLER).digest('hex');
+  const ASSET_NAME = 'YTVDLT-Setup-0.2.1.exe';
+
+  /**
+   * Full offline download against a release whose asset carries no usable
+   * `digest` (`undefined` = field absent; anything else = malformed, e.g. a
+   * short hash, which `digestOf` also maps to `null`). The fake downloader
+   * reports the bytes' own SHA-256 — exactly what the real transport computes;
+   * with no published digest that self-computed value must NOT become a trust
+   * baseline.
+   */
+  const digestGateHarness = (digest: string | undefined) => {
+    const dir = mkdtempSync(join(tmpdir(), 'ytvdlt-digest-gate-'));
+    const h = harness({
+      response: async () => releaseJson({
+        assets: [{
+          name: ASSET_NAME,
+          browser_download_url: `https://github.com/yechenliao0820/YTVDLT/releases/download/v0.2.1/${ASSET_NAME}`,
+          size: INSTALLER.length,
+          ...(digest === undefined ? {} : { digest }),
+        }],
+      }),
+      updatesDir: dir,
+      downloadInstaller: async (request) => {
+        writeFileSync(request.targetPath, INSTALLER);
+        return { path: request.targetPath, bytes: INSTALLER.length, sha256: GOOD_HASH };
+      },
+    });
+    return { ...h, dir };
+  };
+
+  const expectDigestGate = async (digest: string | undefined): Promise<void> => {
+    const h = digestGateHarness(digest);
+    await h.service.check({ manual: true });
+    const state = await h.service.download();
+    expect(state.phase).toBe('error');
+    expect(state.message).toContain('缺少 SHA-256 摘要');
+    // Isolated, not deleted: the rejected copy survives for support inspection.
+    const names = readdirSync(h.dir);
+    expect(names.filter((name) => name.startsWith(`${ASSET_NAME}.rejected-`))).toHaveLength(1);
+    expect(names.includes(ASSET_NAME)).toBe(false);
+    // The self-computed hash is never persisted as a baseline (no sidecar), so
+    // nothing becomes installable afterwards.
+    expect(existsSync(`${h.dir}/${ASSET_NAME}.sha256`)).toBe(false);
+    const attempt = await h.service.install();
+    expect(attempt.ok).toBe(false);
+    expect(attempt.message).toContain('尚未就绪');
+  };
+
+  it('refuses auto-install when the release publishes no digest field', async () => {
+    await expectDigestGate(undefined);
+  });
+
+  it('refuses auto-install when the published digest is malformed (short hash)', async () => {
+    await expectDigestGate(`sha256:${'a'.repeat(8)}`);
   });
 });
 

@@ -15,12 +15,18 @@
  *
  * Invariants that must not be relaxed:
  *   - a failed check/download NEVER changes the running app (phase → `error`);
- *   - nothing becomes installable without a size + SHA-256 + PE header check —
- *     a truncated 220 MB exe is the classic silent failure;
- *   - D-104: a REUSED cache file gets the SAME hash check as a fresh download.
- *     The published `digest` is authoritative; when GitHub omits it, a
- *     `.sha256` sidecar written at first download is the fallback. With neither
- *     baseline the cache is refused and the installer is downloaded again;
+ *   - nothing becomes installable without a PUBLISHED SHA-256 digest — a
+ *     release whose asset carries no `digest` cannot prove its installer, so
+ *     the download is rejected instead of falling back to size + PE header
+ *     (a self-computed hash proves nothing about the first download);
+ *   - a downloaded installer must additionally pass size + SHA-256 + PE header
+ *     checks — a truncated 220 MB exe is the classic silent failure;
+ *   - D-104: a REUSED cache file gets the SAME hash check as a fresh download,
+ *     and the ONLY baseline is the current release's published `digest`. The
+ *     `.sha256` sidecar written at first download is diagnostics only — a
+ *     self-computed hash is not a trust root and never authorizes reuse. With
+ *     no published digest the cache is refused and the installer is
+ *     downloaded again (which then fails the digest gate above);
  *   - `install()` re-verifies all three on the bytes about to be launched, so
  *     a file replaced between "ready" and "install" cannot be executed;
  *   - the installer URL must be a GitHub host (see `isTrustedReleaseHost`).
@@ -121,9 +127,12 @@ function safeFileName(name: string): string {
 }
 
 /**
- * D-104 · a locally persisted hash baseline for releases whose GitHub asset
- * has no `digest` field. Written atomically next to the installer after the
- * first verified download; a cache file without one cannot be trusted.
+ * D-104 · a locally persisted DIAGNOSTIC record, written atomically next to
+ * the installer after the first verified download. It is NOT a trust root:
+ * it stores a hash this app computed itself, so it can detect later corruption
+ * of the cache but can never vouch for the first download's authenticity.
+ * Cache reuse (see `verifiedCachedFile`) requires the release's published
+ * `digest`; the sidecar only rides along for support and inspection.
  */
 function sidecarPath(target: string): string { return `${target}.sha256`; }
 
@@ -309,10 +318,18 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
 
   /**
    * D-104: reuse a previously verified file instead of re-downloading 220 MB —
-   * but ONLY after recomputing its SHA-256. Size + `MZ` alone cannot detect a
-   * corrupted or substituted cache file. The published `digest` wins; a local
-   * sidecar (written at first download) is the fallback when GitHub omits it;
-   * with neither, the cache is refused rather than silently trusted.
+   * but ONLY after recomputing its SHA-256 and matching the CURRENT release's
+   * published `digest`. Size + `MZ` alone cannot detect a corrupted or
+   * substituted cache file.
+   *
+   * Tightened: the local `.sha256` sidecar no longer authorizes reuse. It
+   * records a hash THIS app computed — matching it proves only that the bytes
+   * did not change since this app last saw them, not that those bytes were
+   * authentic in the first place (the sidecar inherits whatever trust the
+   * first download had, which is exactly what is in question). When GitHub
+   * publishes no digest there is no trustworthy baseline, so the cache is
+   * refused and the installer is downloaded again — where the install gate
+   * rejects digest-less releases outright.
    */
   async function verifiedCachedFile(
     asset: AppReleaseAsset,
@@ -323,9 +340,10 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
     if (asset.sizeBytes > 0 && size !== asset.sizeBytes) return null;
     if (!(await looksLikeExecutable(path).catch(() => false))) return null;
 
-    const baseline = asset.sha256 ?? await readSidecar(path);
-    if (baseline === null) return null; // fail-closed: no trustworthy baseline
-    const expected = baseline.toLowerCase();
+    // Fail-closed: without the published digest there is no trustworthy
+    // baseline — the sidecar (a self-computed hash) is not one.
+    if (asset.sha256 === null) return null;
+    const expected = asset.sha256.toLowerCase();
     const actual = await ports.hash.sha256File(path).catch(() => null);
     if (actual === null || actual.toLowerCase() !== expected) {
       const isolated = await isolateFile(path, 'checksum-mismatch');
@@ -334,9 +352,9 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       });
       return null;
     }
-    // Published digest is authoritative: keep the sidecar in sync for later
-    // launches where the API may no longer return a digest.
-    if (asset.sha256 !== null && (await readSidecar(path)) !== expected) {
+    // Published digest is authoritative: keep the sidecar in sync for
+    // diagnostics on later launches (it never authorizes reuse by itself).
+    if ((await readSidecar(path)) !== expected) {
       await writeSidecar(path, expected).catch(() => undefined);
     }
     return { path, sha256: expected };
@@ -399,9 +417,16 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       });
 
       controller.signal.throwIfAborted();
-      // Verification order matters: size, hash, then the PE header. A failure
-      // renames the file instead of deleting it, so support can inspect it.
+      // Verification order matters: digest presence, size, hash, then the PE
+      // header. A failure renames the file instead of deleting it, so support
+      // can inspect it.
       const problems: string[] = [];
+      // A release without a digest cannot prove its installer at all: matching
+      // a self-computed hash would only prove we downloaded the same bytes
+      // twice, so digest-less releases never become installable.
+      if (asset.sha256 === null) {
+        problems.push('发布数据缺少 SHA-256 摘要，无法证明安装包完整性，拒绝自动安装');
+      }
       if (asset.sizeBytes > 0 && result.bytes !== asset.sizeBytes) {
         problems.push(`大小不符（${result.bytes}/${asset.sizeBytes}）`);
       }
@@ -421,8 +446,10 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
         return state();
       }
 
-      // D-104: persist the hash of the bytes we just verified, so a later
-      // launch can reuse this cache even when the API returns no digest.
+      // D-104 (tightened): persist the verified hash as a DIAGNOSTIC sidecar.
+      // Reuse requires the current release's published digest (see
+      // `verifiedCachedFile`) — a self-computed hash is not a trust root, so
+      // the sidecar never authorizes reuse by itself.
       await writeSidecar(target, result.sha256).catch(async (error: unknown) => {
         await logger.warn('app-update', 'could not write checksum sidecar', {
           detail: error instanceof Error ? error.message : String(error),

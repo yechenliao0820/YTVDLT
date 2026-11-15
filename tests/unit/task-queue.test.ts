@@ -662,3 +662,166 @@ describe('T2 · persistSnapshot failure is visible but never fatal', () => {
     expect(warnings(mem)).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// D-209 · "取消即终态、不写历史" beyond the verification window: the two
+// completion awaits AFTER verify().ok must honour the same contract.
+//
+//   窗口 A — the embedded-subtitle cleanup await (D-131 recycle hook): a
+//            cancel landing there used to fall through into
+//            buildHistoryEntry + history.add().
+//   窗口 B — the history.add() await itself: the store appends the entry to
+//            its in-memory list BEFORE the persist resolves, so the row was
+//            already written when the post-add cancel check returned. The
+//            queue now compensates by removing exactly that row (without
+//            deleteFile — a cancel never touches user files).
+//
+// Both tests park the run on a manually resolved promise gate (no sleeps —
+// the race is deterministic), cancel while parked, release the gate and then
+// assert: Canceled, empty history, slot released, no junk error. Vitest fails
+// the run on unhandled rejections, which pins the "no unhandled rejection"
+// half of the contract.
+// ---------------------------------------------------------------------------
+describe('D-209 · cancel during cleanup / history write leaves no history row', () => {
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => { resolve = r; });
+    return { promise, resolve };
+  }
+
+  const SUB = 'C:/out/t1.en.srt';
+
+  /** embed + keepSubtitleFile=false → the D-131 cleanup path really runs. */
+  const embeddedRecord = (): TaskRecord => {
+    const base = record('t1');
+    const req = base.request;
+    if (req === null) return base;
+    return {
+      ...base,
+      request: {
+        ...req,
+        subtitle: {
+          ...req.subtitle,
+          enabled: true,
+          languages: 'en.*',
+          convertTo: 'srt',
+          embed: true,
+          keepSubtitleFile: false,
+        },
+      },
+    };
+  };
+
+  /** Completed transfer; `killTree` answers true for an already-exited child. */
+  const completedEngine = (artifactPaths: readonly string[]): DownloadEngine => ({
+    async version() { return 'fake'; },
+    async probe() { return mediaInfo(); },
+    async probePlaylist() {
+      throw { code: 'UNKNOWN', message: 'x', detail: '', retryable: false, report: 'x' };
+    },
+    download(req: DownloadRequest, onEvent: (e: EngineEvent) => void) {
+      queueMicrotask(() => onEvent({
+        type: 'completed', taskId: req.taskId,
+        artifacts: artifactPaths.map((path) => ({
+          taskId: req.taskId, path, kind: 'video' as const, sizeBytes: 10,
+        })),
+      }));
+      return { pid: 4242, cancel: async () => true };
+    },
+    async selfUpdate() {
+      return { fromVersion: '', toVersion: '', channel: 'stable', changed: false };
+    },
+  });
+
+  it('窗口 A · a cancel during the embedded-subtitle cleanup stays Canceled and writes no history', async () => {
+    const mem = createInMemoryPorts();
+    mem.state.files.set(artifactFor('t1'), 'video-bytes');
+    mem.state.files.set(SUB, 'srt-bytes');
+    const history = new HistoryStore({ ports: mem.ports });
+    const gate = deferred();
+    const reachedCleanup = deferred();
+    const recyclerCalls: Array<{ paths: readonly string[]; roots: readonly string[] }> = [];
+    const queue = new TaskQueue({
+      ports: mem.ports,
+      engine: completedEngine([artifactFor('t1'), SUB]),
+      verifier: okVerifier(true),
+      history,
+      jsRuntimePath: 'C:/runtime/node.exe',
+      // The gate parks the run exactly inside the D-209 cleanup window (the
+      // same point the production recycler awaits TrashFilesPort.preflight).
+      recycleSubtitleFiles: async (paths: readonly string[], roots: readonly string[]) => {
+        recyclerCalls.push({ paths, roots });
+        reachedCleanup.resolve();
+        await gate.promise;
+        return paths;
+      },
+    });
+
+    await queue.enqueue(embeddedRecord());
+    // Deterministic: the run is parked inside the cleanup await.
+    await reachedCleanup.promise;
+    expect(queue.get('t1')?.state).toBe('Running');
+    // Sanity: cleanup really ran for exactly this task's own subtitle.
+    expect(recyclerCalls).toHaveLength(1);
+    expect(recyclerCalls[0]?.paths).toEqual([SUB]);
+    expect(recyclerCalls[0]?.roots).toContain('c:/out');
+
+    // The engine handle is still registered here, so cancel() answers true and
+    // walks the legal Running -> Canceled edge while the run is parked.
+    expect(await queue.cancel('t1')).toBe(true);
+    expect(queue.get('t1')?.state).toBe('Canceled');
+
+    gate.resolve();
+    await tick();
+
+    const task = queue.get('t1');
+    expect(task?.state).toBe('Canceled');
+    expect(task?.error ?? null).toBeNull();
+    expect(queue.activeTaskIds).not.toContain('t1');
+    // The old code fell through into buildHistoryEntry + history.add() here.
+    expect(await history.query({})).toEqual([]);
+  });
+
+  it('窗口 B · a cancel during history.add() compensates: the already-written row is removed again', async () => {
+    const { mem, queue, history } = setup('completed');
+    const historyPath = `${mem.ports.env.configDir()}/history.json`;
+    const gate = deferred();
+    const reachedAdd = deferred();
+    let gated = false;
+    const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (!gated && path === historyPath) {
+        // First history.json write = add()'s persist; park the store mid-write.
+        // The compensation's own persist (later on the HistoryStore write
+        // queue) passes through the `gated` flag.
+        gated = true;
+        reachedAdd.resolve();
+        await gate.promise;
+      }
+      await inner(path, text);
+    };
+
+    await queue.enqueue(record('t1'));
+    // Deterministic: history.add() has already appended the entry in memory
+    // and is parked inside its persist write.
+    await reachedAdd.promise;
+    expect(queue.get('t1')?.state).toBe('Running');
+
+    expect(await queue.cancel('t1')).toBe(true);
+    expect(queue.get('t1')?.state).toBe('Canceled');
+
+    gate.resolve();
+    await tick();
+
+    const task = queue.get('t1');
+    expect(task?.state).toBe('Canceled');
+    expect(task?.error ?? null).toBeNull();
+    expect(queue.activeTaskIds).not.toContain('t1');
+    // Compensation: the in-memory store is clean again...
+    expect(await history.query({})).toEqual([]);
+    // ...and the persisted history.json is clean too (remove() re-persisted).
+    const raw = mem.state.files.get(historyPath);
+    expect(raw).toBeDefined();
+    expect(JSON.parse(raw as string)).toEqual({ schemaVersion: 1, entries: [] });
+  });
+});

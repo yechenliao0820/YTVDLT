@@ -260,13 +260,41 @@ export async function preflightTrashPaths(
  * D-207 · the port now also carries the `preflight` pre-flight gate described
  * above: the M5 withFiles branch runs it over the WHOLE batch BEFORE `trash()`
  * and refuses the batch when any path cannot be proven to belong to the task.
- * `trash()` itself is unchanged and keeps the per-entry lstat guard as the
- * second line behind the pre-flight (TOCTOU backstop), so legacy callers
- * (e.g. the subtitle recycler) keep their exact previous behaviour.
+ *
+ * D-207 backstop · executor-side re-validation: the pre-flight and `trash()`
+ * are two separate calls, so a local attacker with write access to an output
+ * directory still has a window BETWEEN them to swap a recorded path (or one of
+ * its middle components) for a junction pointing outside the roots —
+ * `shell.trashItem` follows reparse points and would bin the EXTERNAL target.
+ * When the caller passes `roots`, `trash()` therefore re-resolves every entry
+ * through `realpath` IMMEDIATELY before its `trashItem` call (after the per-
+ * entry lstat guard and the stat probe) and re-runs containment on the
+ * RESOLVED path with the same `canonicalContainmentRoots` aliases the
+ * pre-flight uses. Decision tree per entry (fail-closed):
+ *   - resolves outside the roots          -> `error`（回收前复检）, NO trashItem;
+ *   - realpath throws ENOENT/ENOTDIR      -> the existing `missing` idempotent
+ *     semantics (the entry vanished after the stat probe said "present" —
+ *     exactly what `trashItem` itself would have classified as `missing`);
+ *   - realpath throws anything else       -> `error` with the real errno
+ *     (same wording as the pre-flight), NO trashItem;
+ *   - `roots` is an empty array           -> refuse (a verdict that compares
+ *     against NO roots cannot prove ownership — `isPathInsideRoots` fails OPEN
+ *     on empty roots by design, so the empty case must never reach it);
+ *   - `roots` omitted (undefined)         -> behaviour byte-for-byte unchanged
+ *     (lstat + stat + trashItem), legacy callers keep their contract.
+ *
+ * This narrows the race from "any time between the pre-flight and the recycle
+ * bin" to "between this realpath and `trashItem`" — two adjacent path-level
+ * calls. It cannot reach zero at the kernel level (see the residual-window
+ * note below); the acceptance criterion it implements is the D-203/D-207 one:
+ * a file that cannot be PROVEN to belong to the current task is never deleted.
  */
 export function createTrashFilesPort(
   trashItem: (path: string) => Promise<void>,
   stat: (path: string) => Promise<StatOutcome> = nodeStat,
+  // Injected for the unit tests of the re-validation itself; production uses
+  // the real `fs.realpath` (same primitive the pre-flight gate resolves with).
+  realpath: (path: string) => Promise<string> = (path: string) => fs.realpath(path),
 ): TrashFilesPort {
   return {
     preflight: (paths: readonly string[], roots: readonly string[]): Promise<TrashPreflightVerdict> =>
@@ -275,7 +303,17 @@ export function createTrashFilesPort(
         realpath: (path: string) => fs.realpath(path),
         lstat: (path: string) => fs.lstat(path),
       }),
-    async trash(paths: readonly string[]): Promise<readonly TrashFileOutcome[]> {
+    async trash(
+      paths: readonly string[],
+      roots?: readonly string[],
+    ): Promise<readonly TrashFileOutcome[]> {
+      // One canonical-alias resolution per BATCH (not per entry): the verdicts
+      // compare realpath resolutions against the same D-208 alias list the
+      // pre-flight uses, so an 8.3 short-name / reparse-point root form never
+      // refuses a legitimate file.
+      const verificationRoots = roots === undefined
+        ? undefined
+        : await canonicalContainmentRoots(roots, realpath);
       const outcomes: TrashFileOutcome[] = [];
       for (const path of paths) {
         // D-203: refuse links BEFORE any destructive action. This runs ahead of
@@ -304,6 +342,60 @@ export function createTrashFilesPort(
           outcomes.push({ path, status: 'error', reason: '记录的产物路径不是文件' });
           continue;
         }
+        // D-207 backstop · executor-side re-validation, immediately before the
+        // destructive call. The pre-flight already ran in the caller, but the
+        // two calls are separated in time: this re-check is what closes the
+        // swap-in window down to the irreducible realpath→trashItem gap.
+        if (verificationRoots !== undefined) {
+          if (verificationRoots.length === 0) {
+            // Fail closed: with NO roots to compare against, ownership cannot
+            // be proven (`isPathInsideRoots` fails OPEN on empty roots by
+            // design — the empty case must never be allowed to reach it).
+            outcomes.push({
+              path, status: 'error',
+              reason: '无法验证产物文件归属（回收前复检缺少可用的输出根目录），已拒绝移入回收站',
+            });
+            continue;
+          }
+          let real: string;
+          try {
+            real = await realpath(path);
+          } catch (error) {
+            const code = errnoOf(error);
+            if (code === 'ENOENT' || code === 'ENOTDIR') {
+              // Vanished between the stat probe and here — the same situation
+              // `trashItem` itself classifies as `missing` (existing D-120
+              // idempotency). One outcome per path, never a double report.
+              outcomes.push({ path, status: 'missing' });
+              continue;
+            }
+            // EACCES / EPERM / ELOOP / …: fail closed with the real errno —
+            // same wording as the pre-flight's unresolvable-real-path refusal.
+            outcomes.push({
+              path, status: 'error',
+              reason: `无法解析产物真实路径（${errnoDetail(error)}），无法证明产物归属，已拒绝回收`,
+            });
+            continue;
+          }
+          if (!isPathInsideRoots(real, verificationRoots)) {
+            // The string sat inside the roots, its FINAL resolution does not:
+            // a middle component was (or became) a reparse point. The external
+            // target must never enter the bin under this record's name.
+            outcomes.push({
+              path, status: 'error',
+              reason: '产物真实路径指向任务输出目录之外（回收前复检）',
+            });
+            continue;
+          }
+        }
+        // Residual window (honest note): `realpath` and `trashItem` are still
+        // two separate path-level calls — an attacker who wins the race
+        // BETWEEN them can still swap the path. Zeroing that requires
+        // opening the target by handle and unlink-by-handle OS semantics,
+        // which `shell.trashItem` (Electron) does not expose. This backstop
+        // reduces the exploitability from "any moment after the pre-flight"
+        // to "the microseconds between two adjacent syscalls", which is the
+        // accepted, registered residual risk (AI-MAINTENANCE §10).
         try {
           await trashItem(path);
           outcomes.push({ path, status: 'trashed' });

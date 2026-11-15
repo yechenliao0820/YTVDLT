@@ -49,6 +49,13 @@ function fakeElectron(options: {
   trace?: string[];
   /** D-197: make `new Tray(...)` throw so `trayReady` stays false (D-60 fallback). */
   trayFails?: boolean;
+  /**
+   * Delivery report 五-1: the CONFIGURED icon path throws but
+   * `process.execPath` succeeds — the "first attempt fails, exe retry wins"
+   * scenario. Only a path ending in `.ico` fails, so the test passes such a
+   * path as `trayIconPath`.
+   */
+  trayIconFails?: boolean;
 } = {}): Harness {
   const log: Harness['log'] = {
     quit: 0, handlers: [], windows: [], urls: [], trayToolTip: [], trayMenus: [],
@@ -120,7 +127,12 @@ function fakeElectron(options: {
     },
     Tray: (options.trayFails === true
       ? function FailingTray(): never { throw new Error('tray unavailable'); }
-      : FakeTray) as unknown as ElectronLike['Tray'],
+      : options.trayIconFails === true
+        ? function FlakyTray(iconPath: string): TrayLike {
+            if (/\.ico$/i.test(iconPath)) throw new Error('packaged icon path rejected');
+            return new FakeTray();
+          }
+        : FakeTray) as unknown as ElectronLike['Tray'],
     Menu: {
       buildFromTemplate: (template: readonly MenuItemLike[]) => Object.assign([...template], {
         popup: () => { log.contextMenus.push([...template]); },
@@ -382,6 +394,11 @@ describe('bootstrap · close-to-tray real semantics (D-197)', () => {
   });
 
   it('without a tray (D-60 fallback): close is NOT prevented, the real close quits', async () => {
+    // Delivery 五-1: the tray is now attempted TWICE (configured icon, then
+    // process.execPath) and every failure is logged. This test injects NO
+    // logger on purpose, so the console.error fallback runs — the bootstrap
+    // must stay crash-free and the D-60 semantics must not change: tray null
+    // -> close passes through -> real quit.
     const { electron, log } = fakeElectron({ trayFails: true });
     const { host } = fakeHost();
     const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => host });
@@ -408,6 +425,66 @@ describe('bootstrap · close-to-tray real semantics (D-197)', () => {
     expect(log.hidden).toBe(0);
     expect(log.destroyed).toBe(1);
     expect(log.quit).toBe(2); // the close finishes -> window-all-closed -> quit
+    handle?.dispose();
+  });
+});
+
+describe('bootstrap · tray fallback + failure logging (delivery report 五-1)', () => {
+  it('retries with process.execPath when the configured icon path fails, and logs the first attempt', async () => {
+    const { electron, log } = fakeElectron({ trayIconFails: true });
+    const { host } = fakeHost();
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
+    const handle = await bootstrap(electron, {
+      ...baseOptions,
+      // `.ico` on purpose: the fake rejects exactly that shape (packaged
+      // icon.ico present on disk but rejected by the Tray constructor).
+      trayIconPath: 'C:/app/tray.ico',
+      createHost: async () => host,
+      logger,
+    });
+    // The exe retry built the tray: menu + tooltip installed, handle exposes it.
+    expect(log.trayMenus).toHaveLength(1);
+    expect(log.trayToolTip).toHaveLength(1);
+    expect(handle?.tray).not.toBeNull();
+    // trayReady semantics hold: close is prevented and hidden, not destroyed.
+    expect(emitClose(log)).toBe(true);
+    expect(log.hidden).toBe(1);
+    expect(log.destroyed).toBe(0);
+    // The FIRST attempt's failure was logged exactly once, marked as 'icon'.
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith('tray', 'tray creation failed', {
+      attempt: 'icon',
+      detail: expect.stringContaining('packaged icon path rejected'),
+    });
+    handle?.dispose();
+    expect(log.trayDestroyed).toBe(1);
+  });
+
+  it('logs both attempts when every tray creation fails, then keeps the D-60 quit fallback', async () => {
+    const { electron, log } = fakeElectron({ trayFails: true });
+    const { host } = fakeHost();
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
+    const handle = await bootstrap(electron, {
+      ...baseOptions,
+      createHost: async () => host,
+      logger,
+    });
+    expect(handle?.tray).toBeNull();
+    // D-60 fallback unchanged: no tray -> close NOT prevented -> real quit.
+    expect(emitClose(log)).toBe(false);
+    expect(log.hidden).toBe(0);
+    expect(log.destroyed).toBe(1);
+    expect(log.quit).toBe(1); // window-all-closed -> app.quit()
+    // Two independent attempts, two separate log records: icon first, exe second.
+    expect(logger.error).toHaveBeenCalledTimes(2);
+    expect(logger.error).toHaveBeenNthCalledWith(1, 'tray', 'tray creation failed', {
+      attempt: 'icon',
+      detail: expect.stringContaining('tray unavailable'),
+    });
+    expect(logger.error).toHaveBeenNthCalledWith(2, 'tray', 'tray creation failed', {
+      attempt: 'exe',
+      detail: expect.stringContaining('tray unavailable'),
+    });
     handle?.dispose();
   });
 });

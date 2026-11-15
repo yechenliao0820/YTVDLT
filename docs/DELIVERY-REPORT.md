@@ -1,5 +1,9 @@
 # YTVDLT 交付报告（0.3.1 · 已发布 2026-11-15）
 
+> **文档时点说明**：本报告主体为 0.3.1-RC 真机验证记录（发布候选），文中「未执行/未验证」
+> 均指该时点（0.3.1 发布前），不代表现状；0.3.1 的发布状态以 `CHANGELOG.md` 0.3.1 行与
+> 下方发布补记为准。后续版本的验证以新增小节追加，不改写旧文。
+
 > **0.3.1 发布补记（2026-11-15）**：GitHub Release **v0.3.1** 已创建
 > （https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.1 ，说明英文，铁律 14），资产
 > `YTVDLT.Setup.0.3.1.exe`（226,400,406 B，GitHub 资产名点号规范化，坑 18）/ `.blockmap` /
@@ -55,7 +59,7 @@
 | # | 用例 | 结果 |
 |---|---|---|
 | 1 | 启动与版本 | 页面 `?v=0.3.1` 首帧提示 + `APP_INFO` 返回 `version 0.3.1, packaged:true` |
-| 2 | 应用更新检查 | GitHub API 经打包 HTTP 策略（D-143 逐跳钉扎）真实可达 → `已是最新版本（0.3.1）`（0.3.1 未发布，判定正确）；说明 `(current, latest]` 聚合链路活着 |
+| 2 | 应用更新检查 | GitHub API 经打包 HTTP 策略（D-143 逐跳钉扎）真实可达 → `已是最新版本（0.3.1）`（0.3.1 未发布，判定正确——0.3.1 发布前记录；0.3.1 已于发布补记中转正）；说明 `(current, latest]` 聚合链路活着 |
 | 3 | 组件状态 | yt-dlp `2026.10.26` / aria2c `1.35.0`，`updateAvailable:false` |
 | 4 | 真实下载（可达源） | w3schools `mov_bbb.mp4` → **Completed**（产物在 `%USERVIDEOS%\YTVDLT`）；GitHub release zip 经 generic 入队成功（预检 INDETERMINATE → fail-open，D-134 语义） |
 | 5 | 打开文件夹 | `task:action open-folder` → `OK`，`fileStatus: present`（弹出的资源管理器窗口即本验证） |
@@ -67,18 +71,18 @@
 
 ## 五、已知问题与未验证项
 
-1. **【P2 · 存量】打包版关闭窗口直接退出，「关闭到托盘」未生效**：空载与下载中各实测（共 4 次，含决定性进程表验证），关窗 1.2 s 内进程退出，stderr/应用日志零线索。已逐环节排除：捆绑 close handler 逐字节正确（asar 内 main.cjs 与源构建一致）、asar 图标路径 `new Tray()` 在同版本二进制上实测可成（正/反斜杠路径都 OK）、surface 键名对齐（无坑 38 断键）、`trayStats` 未接线但有 `EMPTY_STATS` 兜底。定位结论：打包运行时托盘创建 try 块内**静默失败**（D-60 的 catch 无日志，掩盖现场）→ `trayReady=false` → close 按设计兜底放行为退出。**0.3.0 及之前从未真机验证过此行为（§10 本就登记「IPC/导航未做真机窗口验证」；D-197 只有假 Electron 单测——坑 37 明说这类回归单测拦不住），非 0.3.1 增量回归**。影响：下载中点 X → 下载被中断（空载关窗=退出属合理行为）。修复方向：给托盘 catch 补日志 + 复现定位；已在 `AI-MAINTENANCE.md` §10 登记。
-2. **YouTube 真实下载未验证（环境所限）**：本机直连 YouTube 被远端重置（`ConnectionResetError 10054`，代理未通），两条 YouTube 用例在 probe 阶段失败——属网络环境而非应用缺陷（同轮 GitHub/w3schools 真源下载全部成功，引擎 argv/进度/校验链路已验证）。业主可在代理环境复测。
-3. **NSIS 安装向导本体未执行**：未在本机跑安装/静默安装（避免动业主系统）；安装版与 win-unpacked 布局一致（同 `resources/app.asar`）。干净机验收维持 §10 登记。
-4. **GitHub Release 与更新上传链路未执行**（按任务约束不发布）：发布时按手册 §11 REST API 流程 + 坑 18 资产名规范化 + 三条硬校验执行。
-5. **测试残留**：`dist-0.3.1/win-unpacked/config|logs` 含验证测试数据（不影响 Setup.exe）；`dist-0.3.1-failed-partial/` 失败构建残留；两者均可回收站清理。
-6. §10 既有存量项不变（主进程拒绝文案 en 显示中文、更新器信任根、TOCTOU 边界等）。
+1. **【P2 · 存量】打包版关闭窗口直接退出，「关闭到托盘」未生效**：空载与下载中各实测（共 4 次，含决定性进程表验证），关窗 1.2 s 内进程退出，stderr/应用日志零线索。已逐环节排除：捆绑 close handler 逐字节正确（asar 内 main.cjs 与源构建一致）、asar 图标路径 `new Tray()` 在同版本二进制上实测可成（正/反斜杠路径都 OK）、surface 键名对齐（无坑 38 断键）、`trayStats` 未接线但有 `EMPTY_STATS` 兜底。定位结论：打包运行时托盘创建 try 块内**静默失败**（D-60 的 catch 无日志，掩盖现场）→ `trayReady=false` → close 按设计兜底放行为退出。**0.3.0 及之前从未真机验证过此行为（§10 本就登记「IPC/导航未做真机窗口验证」；D-197 只有假 Electron 单测——坑 37 明说这类回归单测拦不住），非 0.3.1 增量回归**。影响：下载中点 X → 下载被中断（空载关窗=退出属合理行为）。修复方向：给托盘 catch 补日志 + 复现定位；已在 `AI-MAINTENANCE.md` §10 登记。（2026-11-15 更新：dev 分支已落代码层修复——托盘创建失败不再静默，改为 JSONL 错误日志 + exe 图标回退重试；真机根因定位与行为复核待新构建。）
+2. **YouTube 真实下载未验证（环境所限）**：本机直连 YouTube 被远端重置（`ConnectionResetError 10054`，代理未通），两条 YouTube 用例在 probe 阶段失败——属网络环境而非应用缺陷（同轮 GitHub/w3schools 真源下载全部成功，引擎 argv/进度/校验链路已验证）。业主可在代理环境复测。（0.3.1-RC 时点记录）
+3. **NSIS 安装向导本体未执行**：未在本机跑安装/静默安装（避免动业主系统）；安装版与 win-unpacked 布局一致（同 `resources/app.asar`）。干净机验收维持 §10 登记。（0.3.1-RC 时点记录）
+4. **GitHub Release 与更新上传链路未执行**（按任务约束不发布）（0.3.1 发布前记录；0.3.1 已于发布补记中转正）：发布时按手册 §11 REST API 流程 + 坑 18 资产名规范化 + 三条硬校验执行。
+5. **测试残留**：`dist-0.3.1/win-unpacked/config|logs` 含验证测试数据（不影响 Setup.exe）；`dist-0.3.1-failed-partial/` 失败构建残留；两者均可回收站清理。（0.3.1-RC 时点记录）
+6. §10 既有存量项不变（主进程拒绝文案 en 显示中文、更新器信任根、TOCTOU 边界等）。（0.3.1-RC 时点记录）
 
 ## 六、发版判断
 
-**结论：可以正式发布（GO）**——无 P0/P1；真机验证 8 项核心链路全通过；唯一未通过项为 P2 存量缺陷（close→tray），0.3.0 及所有历史版本行为相同，建议随 Release 的 Known Issues 如实披露（英文说明，铁律 14），修复排入下一轮。
+**结论：可以正式发布（GO）**（0.3.1 发布前记录；0.3.1 已于发布补记中转正）——无 P0/P1；真机验证 8 项核心链路全通过；唯一未通过项为 P2 存量缺陷（close→tray），0.3.0 及所有历史版本行为相同，建议随 Release 的 Known Issues 如实披露（英文说明，铁律 14），修复排入下一轮。
 
-**发布操作清单（等业主指令逐项执行）**：
+**发布操作清单（等业主指令逐项执行）**（0.3.1 发布前记录；0.3.1 已于发布补记中转正）：
 1. 合并发版准备提交：`dev` → PR → `main`（PR 由业主创建）。
 2. 建 Release v0.3.1（target=`main`，英文说明 + Known Issues 披露 close→tray 与 YouTube 需代理）。
 3. 上传资产：`latest.yml` → blockmap → exe（小文件先上），**资产名空格规范化为点号（`YTVDLT.Setup.0.3.1.exe`）并同步改 latest.yml 的 url/path 再上传**（坑 18）。
