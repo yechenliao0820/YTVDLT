@@ -71,8 +71,13 @@ export interface M4HostOptions {
    * D-131: recycle-bin hook for `keepSubtitleFile=false` cleanup. Wired by
    * `createM5Host()` from the existing D-120 `TrashFilesPort`; absent in the
    * M4-only unit tests, which keep the pre-D-131 behaviour.
+   * D-209: the second argument carries the task's own trusted output roots so
+   * the adapter can run the D-207 realpath pre-flight before trashing.
    */
-  recycleSubtitleFiles?: (paths: readonly string[]) => Promise<readonly string[]>;
+  recycleSubtitleFiles?: (
+    paths: readonly string[],
+    roots: readonly string[],
+  ) => Promise<readonly string[]>;
 }
 
 export interface PlaylistEnqueueInput {

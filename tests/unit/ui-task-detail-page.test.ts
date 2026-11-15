@@ -174,7 +174,14 @@ describe('D-187 · 世界 A：静态 SAMPLE 基线（file:// 截图路径，无�
     expect(availability({ state: 'FetchingInfo', artifacts: [] }, true).cancel).toBe(true);
     expect(availability({ state: 'Idle', pending: true, artifacts: [] }, true).cancel).toBe(true);
     expect(availability({ state: 'Idle', artifacts: [] }, true).cancel).toBe(false);
-    expect(availability({ state: 'ReadyWithInfo', artifacts: [] }, true).cancel).toBe(false);
+    // D-209：D-200 之后 ReadyWithInfo 有真实的取消路径（无句柄记账 + run 在
+    // spawn 前消费），live 分支与后端/静态分支对齐；它同时是「快照恢复、
+    // 没排进 FIFO」的形态 → 重试入口必须存在（D-199 的 restart 支持两态）。
+    expect(availability({ state: 'ReadyWithInfo', artifacts: [] }, true).cancel).toBe(true);
+    expect(availability({ state: 'ReadyWithInfo', artifacts: [] }, true).retry).toBe(true);
+    expect(availability({ state: 'Idle', artifacts: [] }, true).retry).toBe(true);
+    // 仍在 FIFO 里排队的记录不给重试（否则等于二次入队）。
+    expect(availability({ state: 'Idle', pending: true, artifacts: [] }, true).retry).toBe(false);
     expect(availability({ state: 'Completed', artifacts: ['C:/x.mp4'] }, true)).toMatchObject({
       'open-file': true, 'open-folder': true, cancel: false, remove: true, retry: false,
     });
@@ -462,18 +469,20 @@ describe('D-187 · 世界 C：live 模式（D-141 不闪夹具 / D-146 取消矩
     expect(callsOn('ytvdlt:task:detail').length).toBe(detailCallsBefore); // 失败不刷新
   });
 
-  it('D-146：ReadyWithInfo 无下载句柄 → cancel 禁用且点击零派发；Running 可取消', async () => {
+  it('D-209：ReadyWithInfo 与 Running 都可取消（D-200 的真实取消路径），点击即派发', async () => {
     bridgeState.detailQueue = [{
       found: true,
       task: { id: 't9', state: 'ReadyWithInfo', percent: null, errorCode: null, artifacts: [], url: 'https://example.org/real' },
     }];
     actionNode('copy-url').dispatch('click'); // copy-url 恒可用：借成功动作触发 load 换状态
     await tick();
-    expect(ariaOf('cancel')).toBe('true');
-    const before = callsOn('ytvdlt:task:action').length;
+    // D-200 给 ReadyWithInfo 补了真实取消路径（无句柄 → 队列记账并自行转
+    // Canceled，run 在 spawn 前消费），所以 D-146 时代「禁用」的契约已过时。
+    expect(ariaOf('cancel')).toBe('false');
     actionNode('cancel').dispatch('click');
-    expect(callsOn('ytvdlt:task:action').length).toBe(before); // 守卫吞掉
-    // Running：cancel 可用并派发
+    await tick();
+    expect(callsOn('ytvdlt:task:action').at(-1)?.payload).toEqual({ taskId: 't9', action: 'cancel' });
+    // Running：同样可用并派发
     bridgeState.detailQueue = [{
       found: true,
       task: { id: 't9', state: 'Running', percent: 3, errorCode: null, artifacts: [], url: 'https://example.org/real' },

@@ -628,7 +628,7 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
   });
 
   app.on('second-instance', ((...args: never[]) => {
-    const argv = Array.isArray(args[2]) ? (args[2] as unknown as readonly string[]) : [];
+    const argv = Array.isArray(args[1]) ? (args[1] as unknown as readonly string[]) : [];
     showWindow();
     const url = deepLinkFromArgv(argv);
     if (url !== null) void window.webContents.loadURL(pageUrlWithPrefill(withLocale(options.pageUrl, menuLocale), url));

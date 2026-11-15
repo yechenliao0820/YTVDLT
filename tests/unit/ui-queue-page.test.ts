@@ -403,8 +403,13 @@ describe('D-187 · live 列表投影与卡片渲染纪律', () => {
     expect(buttonOf(cardById('b-fetch'), 'remove')).toBeNull();
     // D-164：FIFO 排队（pending 标记）可取消。
     expect(buttonOf(cardById('c-parked'), 'cancel')).toBeTruthy();
-    // ReadyWithInfo 是零长度相位，没有可杀的句柄；已停转 → 可删。
-    expect(buttonOf(cardById('d-ready'), 'cancel')).toBeNull();
+    // …但它已经在队列里排着，重试入口必须不存在（否则等于二次入队）。
+    expect(buttonOf(cardById('c-parked'), 'retry')).toBeNull();
+    // D-209：ReadyWithInfo 自 D-200 起有真实的取消路径（无句柄 → 队列记账
+    // 并自行转 Canceled，run 在 spawn 前消费），live 分支不再漏掉按钮；
+    // 它同样是「没在队列里、没开跑」的记录 → 给重试入口。已停转 → 可删。
+    expect(buttonOf(cardById('d-ready'), 'cancel')).toBeTruthy();
+    expect(buttonOf(cardById('d-ready'), 'retry')).toBeTruthy();
     expect(buttonOf(cardById('d-ready'), 'remove')).toBeTruthy();
     // 终态：Error/Canceled 可重试，Completed 有 file/folder 入口。
     expect(buttonOf(cardById('e-error'), 'retry')).toBeTruthy();

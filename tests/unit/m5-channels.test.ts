@@ -701,6 +701,55 @@ describe('m5 ipc · download location (D-98)', () => {
     expect(deps.config.get('paths', 'videoDir')).toBe('%USERVIDEOS%/YTVDLT');
   });
 
+  // P2-2 (D-193 未覆盖③): the containment gate trusts only specific roots, so
+  // a drive root stored here would fail every later download. The pick boundary
+  // refuses it with the SAME predicate (`isSpecificRoot`) and a stable code.
+  it('refuses a drive root picked as the download directory and writes nothing', async () => {
+    const picker = withPicker({ path: 'C:\\', error: null });
+    const { handlers, deps } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });
+    const result = await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'video' }) as {
+      ok: boolean; canceled: boolean; code: string; error: string | null;
+    };
+    expect(result.ok).toBe(false);
+    expect(result.canceled).toBe(false);
+    expect(result.code).toBe('PATH_ROOT_NOT_SPECIFIC');
+    expect(result.error).toContain('盘符根');
+    expect(deps.config.get('paths', 'videoDir')).toBe('%USERVIDEOS%/YTVDLT');
+  });
+
+  it('refuses every drive-root spelling, on either kind, without touching the config', async () => {
+    for (const spelling of ['C:', 'C:/']) {
+      const picker = withPicker({ path: spelling, error: null });
+      const { handlers, deps } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });
+      const result = await handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'audio' }) as {
+        ok: boolean; code: string;
+      };
+      expect(result.ok).toBe(false);
+      expect(result.code).toBe('PATH_ROOT_NOT_SPECIFIC');
+      expect(deps.config.get('paths', 'audioDir')).toBe('%USERVIDEOS%/YTVDLT/Audio');
+    }
+  });
+
+  it('still saves a normal folder — a bare UNC share root is refused, a share subfolder is not', async () => {
+    const refused = withPicker({ path: '\\\\host\\share', error: null });
+    const first = await harness(undefined, { expandPath: expand, pathPicker: refused.port });
+    const result = await first.handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'video' }) as {
+      ok: boolean; code: string;
+    };
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('PATH_ROOT_NOT_SPECIFIC');
+    expect(first.deps.config.get('paths', 'videoDir')).toBe('%USERVIDEOS%/YTVDLT');
+
+    const saved = withPicker({ path: '\\\\host\\share\\videos', error: null });
+    const second = await harness(undefined, { expandPath: expand, pathPicker: saved.port });
+    const ok = await second.handlers.get(IPC_CHANNELS.PATH_ACTION)?.({ action: 'pick', kind: 'video' }) as {
+      ok: boolean; path: string;
+    };
+    expect(ok.ok).toBe(true);
+    expect(ok.path).toBe('\\\\host\\share\\videos');
+    expect(second.deps.config.get('paths', 'videoDir')).toBe('\\\\host\\share\\videos');
+  });
+
   it('resets to the shipped default token', async () => {
     const picker = withPicker({ path: 'D:/Video', error: null });
     const { handlers, deps } = await harness(undefined, { expandPath: expand, pathPicker: picker.port });

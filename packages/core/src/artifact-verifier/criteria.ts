@@ -6,7 +6,10 @@
  * `node:*`, so the whole engine is offline-unit-testable.
  *
  * The three误判-prone rules are implemented exactly as the doc demands:
- *  - C4 judges `stderr === ''` only (never the exit code);
+ *  - C4 judges `stderr === ''` only (never the exit code) — for runs that
+ *    COMPLETED; a probe killed at its time budget is neither a clean decode
+ *    nor a proven defect, so probe-based criteria SKIP on timeout instead
+ *    (indeterminate, never a false PASS / false FAIL);
  *  - C5 degrades to `expectedManifest.durationSec` when `duration === null`,
  *    and SKIPs (never FAILs) when neither is known;
  *  - C2 and C8 are mutually exclusive, selected by `postprocessed`.
@@ -59,6 +62,8 @@ interface FfprobeOutcome {
   ok: boolean;
   stderr: string;
   exitCode: number | null;
+  /** True when the probe was killed at its time budget (verdict indeterminate). */
+  timedOut: boolean;
   json: Record<string, unknown> | null;
 }
 
@@ -77,25 +82,25 @@ async function runFfprobe(ctx: CheckContext, file: string): Promise<FfprobeOutco
   } catch {
     json = null;
   }
-  return { ok: result.exitCode === 0 && result.stderr.trim() === '', stderr: result.stderr, exitCode: result.exitCode, json };
+  return { ok: result.exitCode === 0 && result.stderr.trim() === '', stderr: result.stderr, exitCode: result.exitCode, timedOut: result.timedOut, json };
 }
 
-async function runFfmpegDecode(ctx: CheckContext, file: string): Promise<{ stderr: string; exitCode: number | null }> {
+async function runFfmpegDecode(ctx: CheckContext, file: string): Promise<{ stderr: string; exitCode: number | null; timedOut: boolean }> {
   const result = await ctx.ports.process.spawn(
     ctx.ffmpegPath,
     ['-v', 'error', '-i', file, '-f', 'null', '-'],
     { shell: false, windowsHide: true, timeoutMs: 60_000 },
   );
-  return { stderr: result.stderr, exitCode: result.exitCode };
+  return { stderr: result.stderr, exitCode: result.exitCode, timedOut: result.timedOut };
 }
 
-async function runFramemd5(ctx: CheckContext, file: string, streamMap: '0:v' | '0:a'): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+async function runFramemd5(ctx: CheckContext, file: string, streamMap: '0:v' | '0:a'): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
   const result = await ctx.ports.process.spawn(
     ctx.ffmpegPath,
     ['-v', 'error', '-i', file, '-map', streamMap, '-f', 'framemd5', '-'],
     { shell: false, windowsHide: true, timeoutMs: 60_000 },
   );
-  return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+  return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, timedOut: result.timedOut };
 }
 
 function streamsOf(json: Record<string, unknown> | null): Array<Record<string, unknown>> {
@@ -188,24 +193,38 @@ export async function checkC2(ctx: CheckContext): Promise<ArtifactVerification> 
   }
 }
 
-/** C3 — container is parseable (exit 0 AND empty stderr AND valid JSON). */
+/**
+ * C3 — container is parseable (exit 0 AND empty stderr AND valid JSON).
+ * A probe killed at its time budget proves nothing about the container
+ * (exitCode null + empty stdout are truncation, not a parse failure): SKIP
+ * instead of misreporting a good file as ARTIFACT_INCOMPLETE.
+ */
 export async function checkC3(ctx: CheckContext): Promise<ArtifactVerification> {
   const primary = primaryArtifact(ctx.artifacts);
   if (primary === null) return fail('C3', 'no primary artifact');
   const probe = await runFfprobe(ctx, primary);
   const actual = { exitCode: probe.exitCode, stderrEmpty: probe.stderr.trim() === '', json: probe.json !== null };
+  if (probe.timedOut) return skip('C3', 'ffprobe probe timed out; container verdict is indeterminate', actual);
   return probe.ok && probe.json !== null
     ? pass('C3', 'ffprobe exit 0, stderr empty, JSON parsed', actual)
     : fail('C3', 'ffprobe failed (exit!=0 / stderr not empty / bad JSON)', actual);
 }
 
-/** C4 — full-frame decode. Verdict is stderr emptiness ONLY (never exit code). */
+/**
+ * C4 — full-frame decode. Verdict is stderr emptiness ONLY (never exit code).
+ * D-20 refined (original rule kept): "only stderr" constrains how a COMPLETED
+ * run's exitCode is read — it does not make a timeout kill look like a clean
+ * decode. A decode killed at its time budget has an empty stderr only because
+ * the output was truncated: that is INDETERMINATE, so the criterion SKIPs
+ * (neither the false PASS nor a false FAIL).
+ */
 export async function checkC4(ctx: CheckContext): Promise<ArtifactVerification> {
   const primary = primaryArtifact(ctx.artifacts);
   if (primary === null) return fail('C4', 'no primary artifact');
   const decode = await runFfmpegDecode(ctx, primary);
   const stderrEmpty = decode.stderr.trim() === '';
   const actual = { exitCode: decode.exitCode, stderrEmpty };
+  if (decode.timedOut) return skip('C4', 'full decode timed out; verdict is indeterminate', actual);
   // Even with exitCode 0, any decode warning means a half-broken artifact.
   return stderrEmpty
     ? pass('C4', 'full decode produced no stderr output', actual)
@@ -217,6 +236,7 @@ export async function checkC5(ctx: CheckContext): Promise<ArtifactVerification> 
   const primary = primaryArtifact(ctx.artifacts);
   if (primary === null) return fail('C5', 'no primary artifact');
   const probe = await runFfprobe(ctx, primary);
+  if (probe.timedOut) return skip('C5', 'ffprobe probe timed out; duration unknown (not a mismatch)');
   const actualDuration = formatDuration(probe.json);
   const expectedDuration = ctx.expected?.duration ?? ctx.expectedManifest?.durationSec ?? null;
 
@@ -242,6 +262,7 @@ export async function checkC6(ctx: CheckContext): Promise<ArtifactVerification> 
   const primary = primaryArtifact(ctx.artifacts);
   if (primary === null) return fail('C6', 'no primary artifact');
   const probe = await runFfprobe(ctx, primary);
+  if (probe.timedOut) return skip('C6', 'ffprobe probe timed out; stream layout unknown (not a failure)');
   const types = codecTypes(probe.json);
   // D-84: judge real content streams — an attached cover is not video.
   const hasVideo = hasRealVideoStream(probe.json);
@@ -266,6 +287,7 @@ export async function checkC7(ctx: CheckContext): Promise<ArtifactVerification> 
   const primary = primaryArtifact(ctx.artifacts);
   if (primary === null) return fail('C7', 'no primary artifact');
   const probe = await runFfprobe(ctx, primary);
+  if (probe.timedOut) return skip('C7', 'ffprobe probe timed out; measured specs unknown');
   const video = streamsOf(probe.json).find((stream) => stream['codec_type'] === 'video');
   const measured = {
     width: video?.['width'] ?? null,
@@ -301,6 +323,7 @@ export async function checkC8(ctx: CheckContext): Promise<ArtifactVerification> 
   // ("Stream map '0:v' matches no streams"), so the hash target follows the task.
   const streamMap: '0:v' | '0:a' = ctx.kind === 'audio' ? '0:a' : '0:v';
   const out = await runFramemd5(ctx, primary, streamMap);
+  if (out.timedOut) return skip('C8', 'framemd5 run timed out; frame hashes unknown (not a mismatch)', { map: streamMap });
   if (out.stderr.trim() !== '') {
     return fail('C8', `framemd5 run emitted stderr (map ${streamMap})`, {
       map: streamMap, stderr: out.stderr.slice(0, 400),

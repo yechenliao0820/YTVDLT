@@ -338,7 +338,8 @@ describe('bootstrap · deep link + tray + lifecycle', () => {
 
     const secondInstance = log.appEvents.get('second-instance');
     expect(secondInstance).toBeDefined();
-    secondInstance?.(undefined as never, undefined as never, ['--url', 'https://example.org/second'] as never);
+    // Real Electron 45 contract: (event, argv, workingDirectory, additionalData).
+    secondInstance?.(undefined as never, ['--url', 'https://example.org/second'] as never, 'C:/second' as never, undefined as never);
     expect(log.focused).toBeGreaterThanOrEqual(1);
     expect(log.urls.at(-1)).toContain('prefill=https%3A%2F%2Fexample.org%2Fsecond');
 

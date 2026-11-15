@@ -249,6 +249,33 @@ describe('M5-5 · rollback', () => {
   });
 });
 
+describe('P3-1 · .bak cleanup failure must not roll back a verified update', () => {
+  it('keeps changed:true when unlink of the .bak throws (EBUSY); old binary is not restored', async () => {
+    const { mem, updater, gate } = await setup({
+      fs: {
+        async unlink(path: string) {
+          if (path === `${ENGINE}.bak`) throw new Error('EBUSY: resource busy or locked');
+          mem.state.files.delete(path);
+          mem.state.bytes.delete(path);
+        },
+      },
+    });
+    const result = await updater.update();
+    // The swap and its post-swap hash check succeeded, so the update stands.
+    expect(result.changed).toBe(true);
+    expect(result.reason).toBeUndefined();
+    expect(result.rolledBack).toBeUndefined();
+    expect(textOf(mem, ENGINE)).toBe('new-engine');
+    // The locked .bak is kept for manual cleanup, not half-removed.
+    expect(textOf(mem, `${ENGINE}.bak`)).toBe('old-engine');
+    // A warn explains the leftover backup; no rollback noise, gate resumes once.
+    expect(mem.state.logLines.some((line) => line.includes('.bak cleanup failed'))).toBe(true);
+    expect(mem.state.logLines.some((line) => line.includes('rolling back'))).toBe(false);
+    expect(gate.calls).toEqual(['pause', 'resume']);
+    expect(gate.isPaused()).toBe(false);
+  });
+});
+
 describe('D-171 · queue idle gate (waitForIdle)', () => {
   it('defers the swap and still resumes intake when the queue never goes idle', async () => {
     const { mem, updater, gate } = await setup({ intakeGate: gateWithIdleOf(false) });

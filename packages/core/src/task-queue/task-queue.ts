@@ -61,8 +61,20 @@ export interface TaskQueueDeps {
    *
    * Never a permanent unlink: projects' §0 rule sends every deletion through
    * the recycle bin so a file that turns out to be pre-existing is recoverable.
+   *
+   * D-209 (append-only): `roots` are the task's own trusted output roots
+   * (`trustedArtifactRoots()` of the request that drove THIS run). The
+   * adapter needs them to run the SAME D-207 realpath pre-flight the
+   * `withFiles` deletion branch runs — the intake gate is a STRING gate, and
+   * on Windows a junction in a middle path component lets
+   * `<videoDir>/link/clip.en.srt` resolve outside the output directory while
+   * every name-level check passes. A recycler that ignores the argument keeps
+   * the pre-D-209 behaviour (end-component lstat guard only).
    */
-  recycleSubtitleFiles?: (paths: readonly string[]) => Promise<readonly string[]>;
+  recycleSubtitleFiles?: (
+    paths: readonly string[],
+    roots: readonly string[],
+  ) => Promise<readonly string[]>;
 }
 
 /** Hard ceiling: more slots than this only thrashes the network + disk. */
@@ -468,6 +480,18 @@ export class TaskQueue implements ITaskQueue {
         links: subtitleFiles,
         ...(report.attachments === undefined ? {} : { attachments: report.attachments }),
       });
+      // D-209: a cancel that landed DURING verification WINS. The transfer is
+      // over but the engine handle is still registered, so `cancel()` finds a
+      // live handle, answers `true` (nothing is alive to kill) and moves the
+      // record to `Canceled`. Everything below used to run anyway: history was
+      // written for a canceled task, the failed-verification branch then tried
+      // `Canceled -> Error` and the success branch `Canceled -> Completed` —
+      // neither edge exists, so `runSafely` caught the throw and pinned a bogus
+      // UNKNOWN error on a task whose cancel had succeeded ("file is on disk
+      // but the card says canceled/failed"). Returning here is the same
+      // "cancel is final" contract D-162 / D-200 already implement for the
+      // probe and pre-spawn windows: no history row, no Completed, no error.
+      if (this.canceledMeanwhile(record)) return;
       if (!report.ok) {
         record.error = {
           code: report.failureCode ?? 'ARTIFACT_INCOMPLETE',
@@ -498,6 +522,11 @@ export class TaskQueue implements ITaskQueue {
       // --- 4) history then Completed ---
       const entry = buildHistoryEntry(record, kept.artifacts, outcome.sizes, this.deps.ports);
       const addResult = await this.deps.history.add(entry, { privateMode: record.privateMode });
+      // D-209: the same "cancel wins" rule for the two writes above (subtitle
+      // cleanup + history). A cancel that lands while either awaits must not
+      // be flushed by a terminal transition the machine does not even allow
+      // (`Canceled -> Completed`), which is what produced the UNKNOWN error.
+      if (this.canceledMeanwhile(record)) return;
       if (addResult.added === false && addResult.reason === 'duplicate') {
         // D-101: the artifact passed every verification criterion and exists on
         // disk — failing the task here told the user "download failed" when the
@@ -518,6 +547,20 @@ export class TaskQueue implements ITaskQueue {
   }
 
   /**
+   * D-209 · "Did a cancel land while the awaited step was still running?"
+   *
+   * A method, not an inline comparison, on purpose: `TaskQueue.cancel()` can
+   * mutate `record.state` at any await boundary, but TypeScript's control-flow
+   * narrowing keeps treating the record as non-`Canceled` for the rest of the
+   * block after the first guard — an inline second comparison is reported as
+   * "no overlap" even though it is exactly what has to be checked. Keeping the
+   * read inside a call also documents that the state may have moved.
+   */
+  private canceledMeanwhile(record: TaskRecord): boolean {
+    return record.state === 'Canceled';
+  }
+
+  /**
    * D-131: remove the throw-away standalone subtitle files produced for an
    * embedded-subtitle download when the user unchecked "keep standalone files".
    *
@@ -534,6 +577,13 @@ export class TaskQueue implements ITaskQueue {
    *  5. The caller-side adapter moves to the OS recycle bin, never unlinks.
    *     `error` outcomes keep the file AND the record; a cleanup failure can
    *     never fail a download that already passed verification.
+   *  6. D-209: the same D-207 realpath pre-flight as the `withFiles` chain.
+   *     Rules 1–4 are all NAME-level (and the artifact intake gate is too), so
+   *     a mid-path junction inside `videoDir` could make a subtitle path that
+   *     looks contained resolve outside the output roots. The adapter gets the
+   *     task's trusted roots and refuses the WHOLE batch when it cannot prove
+   *     ownership; `null` roots mean "unprovable" and skip cleanup entirely
+   *     (nothing is deleted, the artifact list is untouched).
    */
   private async discardEmbeddedSubtitleArtifacts(
     record: TaskRecord,
@@ -545,6 +595,10 @@ export class TaskQueue implements ITaskQueue {
     const recycle = this.deps.recycleSubtitleFiles;
     if (recycle === undefined || !plan.embedSubs || plan.keepSubtitleFile) return unchanged;
     if (links.length === 0) return unchanged;
+    // D-209: fail closed when the record's own roots are unprovable. The
+    // recycler must be able to re-check every path against them for real.
+    const roots = trustedArtifactRoots(record.request?.paths ?? {});
+    if (roots === null) return unchanged;
 
     const ownMedia = new Set(mediaArtifactsOf(artifacts));
     const candidates = links
@@ -556,7 +610,7 @@ export class TaskQueue implements ITaskQueue {
 
     let removed: readonly string[];
     try {
-      removed = await recycle(candidates);
+      removed = await recycle(candidates, roots);
     } catch {
       // Cleanup is cosmetic; the verified media is already on disk.
       return unchanged;

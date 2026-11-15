@@ -29,8 +29,14 @@ export interface TaskHostOptions {
   /** Test/CLI override; when absent `general.concurrency` wins. */
   concurrency?: number;
   history?: IHistoryStore;
-  /** D-131: recycle-bin hook for embedded-subtitle cleanup. Absent = no cleanup. */
-  recycleSubtitleFiles?: (paths: readonly string[]) => Promise<readonly string[]>;
+  /**
+   * D-131: recycle-bin hook for embedded-subtitle cleanup. Absent = no cleanup.
+   * D-209: receives the record's trusted output roots (D-207 pre-flight scope).
+   */
+  recycleSubtitleFiles?: (
+    paths: readonly string[],
+    roots: readonly string[],
+  ) => Promise<readonly string[]>;
 }
 
 export interface TaskHost {

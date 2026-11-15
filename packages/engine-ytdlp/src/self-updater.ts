@@ -243,7 +243,20 @@ export class SelfUpdater {
         return this.result(fromVersion, fromVersion, false, 'checksum-mismatch', rolledBack);
       }
 
-      await ports.fs.unlink(`${enginePath}.bak`);
+      // P3-1: the swap and its post-swap hash check have already succeeded, so
+      // the update is committed — deleting the `.bak` is housekeeping only. On
+      // Windows AV/indexers routinely hold a freshly written exe's neighbour
+      // locked (EBUSY/EPERM); letting that error reach the catch below would
+      // roll back a verified-good binary and misreport `swap-failed`. Keep the
+      // `.bak` for manual cleanup and continue on the success path.
+      try {
+        await ports.fs.unlink(`${enginePath}.bak`);
+      } catch (cleanupError) {
+        await logger.warn('self-update', 'update succeeded but .bak cleanup failed; backup kept', {
+          enginePath,
+          detail: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      }
       const toVersion = await this.installedVersion();
       await logger.info('self-update', 'component updated', {
         component: this.label(), fromVersion, toVersion, channel,

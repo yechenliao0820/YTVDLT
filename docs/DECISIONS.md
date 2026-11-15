@@ -2252,3 +2252,53 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① `containment.ts` 新增 `canonicalContainmentRoots(roots, realpath)`（core 纯函数，realpath 注入）：返回字符串根 + 每根 best-effort realpath 别名（按归一化形态去重；根不可解析时保留字符串形态）。canonical 别名是**同一个可信目录**，不扩权。② D-207 预检（`preflightTrashPaths`）与 D-204 打开判定（`resolveRealPath`）改为对 canonical 根列表判定；字符串门保持不变。③ B-10/B-14 测试断言两侧都取 canonical 形态。④ 新增回归测试（注入 fake realpath 模拟短名根形态，修复前必红）：preflight 3 例（ok / missing / 拒绝不放宽）+ open 门 1 例。⑤ UNC 探测依次尝试 `\\localhost\X$` 与 `\\127.0.0.1\X$`（`capabilities.uncHost` 记录可用形态，A-8a/A-8b 随动）；CI 守卫改为「符号链接权限跳过零容忍 + UNC 跳过显式 allowlist 大声报告」——run#14 实测 runner `fileSymlink=true`（符号链接用例实跑全过）、UNC SMB 回环不可达属环境属性，覆盖缺口按 D-206/D-208 登记留真机。 |
 | 验证 | 本机定向 9 套件全绿（210 用例）；全量 2764 / 0 failed（覆盖最低 86.95%）；M1 17/17、M5 10/10 gates allGreen；安全套件按 CI 口径实跑 134 passed / 5 skipped，守卫本地正确 exit 1（3 个符号链接跳过非 allowlist——本机无符号链接权限属预期），CI 预期仅剩 2 个 UNC allowlist 跳过 → exit 0。 |
 | 未覆盖 | UNC 真实共享场景在 runner 上仍 skip（allowlist 登记的覆盖缺口，留真机）；TOCTOU 依旧不测（D-206/D-207 边界）。 |
+
+## D-209 · 2026-11-14 · 字幕回收接入 D-207 预检 / canonical 别名不扩权 / 验证期取消以取消为准 / 恢复任务可重启（外部审计 P1×2 + P2×2 + P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 外部审计逐条复核后**全部属实**：① 内嵌字幕清理直接 `port.trash(paths)`，绕过 D-207 的 realpath 整批预检 —— 输出目录里若有中间 junction，`<videoDir>/link/clip.en.srt` 字符串在根内、真实文件在根外，会被移入回收站（本地条件风险，非远程可达，但属真实文件破坏）；② `canonicalContainmentRoots` 无条件把 `realpath(root)` 加入判定列表 —— 配置根本身是指向盘符根的 junction 时，`C:/` 成为可信根，realpath 判定把「下载目录」放大成「整盘」；③ 验证阶段取消：转移已结束但 handle 仍注册，`killTree` 对已退出进程返回 true → `Running→Canceled`，随后流程继续写历史并尝试 `Canceled→Completed` / `Canceled→Error`（两条都不是合法边）→ `runSafely` 把 `UNKNOWN` 错误钉在已取消任务上（文件在盘上、卡片显示取消+失败、历史已写入）；④ `restore()` 不把 `Idle` / `ReadyWithInfo` 放回 FIFO，而 UI 只给 Error/Canceled 重试 → 队列满载时退出再启动，等待中的任务永久停滞，只能删除重建；⑤ live 分支漏掉 `ReadyWithInfo` 的取消按钮，静态分支与后端都支持（P3，UI 契约漂移）。 |
+| 根因 | ① 字幕清理只继承了 D-203 的**末段** lstat 守卫，没复用 D-207 的整批 realpath 预检（D-207 当时明确把「字幕 recycler 等 legacy 调用方」排除在外）；② canonical 别名只做了「归一化去重」，没做「是否仍是具体根」的二次校验 —— D-193 在字符串侧关掉的扩权，从别名侧重新打开；③ 完成路径没把「取消」当终态看待：verify / 字幕清理 / history 三处 await 之后都没有复查状态；④ 恢复语义只保证「不自动开跑」（M4-3 口径），没保证「之后能手动开跑」，UI 与 D-199 的 `restart()` 能力脱节；⑤ D-146 的规则写于 D-200 之前，D-200 给 `ReadyWithInfo` 补了真实取消路径后 UI 未跟随。 |
+| 决策 | ① `recycleSubtitleFiles` 增加第二个参数 `roots`（append-only；单参实现仍可赋值），队列侧用 `trustedArtifactRoots(record.request.paths)` 给出作用域，`null` 时整批跳过清理（fail closed）；`m5-host.ts::makeSubtitleRecycler` 在 `trash` 前跑 `TrashFilesPort.preflight`（与 withFiles 同一个 D-207 门）：`refused` → 回收站零调用、产物与字幕链接全保留、下载仍算 Completed；`ok` 的 `missingPaths` 计入「已移除」（D-120 幂等语义不变）；无 `preflight` 的旧假件行为完全不变。② `canonicalContainmentRoots` 只接受仍是 `isSpecificRoot` 的别名（盘符根 / POSIX 根 / 裸 UNC 共享根一律不收），字符串根不受影响，D-208 的 8.3 短名收口不回退。③ 新增 `canceledMeanwhile()` 守卫，在 verify 之后、history 之前各查一次：取消一旦发生即为终态 —— 不写历史、不转 Completed/Error、不留 UNKNOWN。④ 后端保持「启动不自动开跑」（不回填 FIFO，M4-3 验收口径不变），把入口交回用户：`queue.js` / `task-detail.js` 的 live 分支对「不在 FIFO（`pending !== true`）且未起跑（`Idle` / `ReadyWithInfo`）」的记录提供重试（`restart()` 自 D-199 起支持这两态）；FIFO 里的记录不给重试，避免二次入队。⑤ live 分支取消条件补 `ReadyWithInfo`，与静态分支及后端（D-200）对齐；既有 D-146 断言随之改为「可用」，测试意图（UI 与后端能力对齐）不变。 |
+| 验证 | 定向：`path-containment` 34（+5）、`subtitle-discard` 15（+4）、`task-queue-cancel-failure` 12（+3）、`task-recovery` 10（+3）、`ui-queue-page` 67、`ui-task-detail-page` 20、`task-detail-live-fixture` 8 全绿。**修复前必红已实测**：把 `task-queue.ts` 还原成 HEAD 版本后，D-209 两例失败，报错正是审计描述的「已取消任务被钉 `UNKNOWN` 错误」。全量 `npm test`：2779 用例 / 0 failed / 5 skipped（既有能力跳过），四维覆盖 93.51 / 86.74 / 93.61 / 93.51（均 ≥70）。`npm run typecheck` 5/5；`check-layering` 0 violations；`frozen-gate` PASS；`run-e2e` 31/31 用例 + 5/5 反例全绿（live-only 改动，静态截图基线零变化）。 |
+| 未覆盖 | ① 真实 junction 环境下的字幕回收端到端（本机 TEMP 无 8.3 别名、无现成 junction 输出目录；预检本体由 A-D206/D-207/D-208 的真实 fs 套件覆盖，本轮只补「适配器确实调用预检」的接线证据）；② TOCTOU（预检后、trash 前文件被换）仍是既有边界，按 D-206/D-207 惯例不加抖动测试；③ 验证阶段取消后磁盘上会留下完整媒体文件但没有历史记录 —— 这是「取消即终态」的诚实结果，产品不做自动回收（用户取消之后再去删文件比留下文件更危险），用户可重试或手动处理；④ 队列满载退出后等待任务仍需逐个点「重试」，不做自动续跑（自动开跑会违背 M4-3「启动不偷偷下载」的验收口径）。 |
+
+## D-210 · 2026-11-15 · second-instance 深链预填读错 argv 下标（发版前审计 P2-1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 应用已运行时二次启动/深链（`YTVDLT.exe --url=…`），窗口聚焦正常但 URL 预填 100% 静默失效。发版前三方审计定位：`bootstrap.ts` 的 second-instance handler 读 `args[2]`，而 Electron 45 权威签名（`electron.d.ts:828-838`）是 `(event, argv, workingDirectory, additionalData)` —— argv 在 index 1，index 2 是字符串 workingDirectory；`Array.isArray(args[2])` 恒 false → argv 恒 `[]` → `deepLinkFromArgv` 恒 null。 |
+| 根因 | 参数下标按记忆书写、未对照 electron.d.ts；单测 emit 把 argv 塞在 index 2，**复刻了同一错误契约**——假 Electron 全绿、真机必坏（§9 坑 37/38 同族：假运行时不模拟真实契约，测试钉不住这类回归）。 |
+| 决策 | ① `args[2]` → `args[1]`（一行，`(...args: never[])` 与 cast 风格原样）。② `bootstrap.test.ts` 的 emit 改为真实四参签名，断言「argv 中的 `--url` 被提取且 loadURL 带 prefill」——旧形状配新码或新形状配旧码都必红，测试真实钉住修复。③ 全仓 grep 确认 second-instance 监听/emit 点仅此一处；argv 唯一消费点 `deepLinkFromArgv` 只认 `--url` 且值过 `^https?://`，无注入面变化。 |
+| 验证 | 三方终审（主进程域）逐字节核对 diff 仅 1 行；防假绿实证（回退 `args[2]` 测试必红）；全量 vitest 168 文件 / 2781 passed / 0 failed；tsc 5 包全绿。 |
+| 未覆盖 | 真机二次启动点一遍（铁律 9）；`apps/desktop/dist` 仍是旧编译产物，发版打包自然带上。 |
+
+## D-211 · 2026-11-15 · PATH_ACTION pick 拒绝盘符根/裸 UNC 共享根，与 containment 门同谓词（发版前审计 P2-2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 用户用原生对话框把下载目录选成盘符根（`C:\`/`D:\`）：pick 校验只查空/长度/控制字符，配置照写；之后每个下载任务产物在 `acceptContainedArtifacts` 全部被拒（`isSpecificRoot` 有意判定 `c:` 不是可信根，D-193 防篡改快照扩权）→ 该配置下功能 100% 不可用，且报错文案「产物路径超出任务输出目录」把用户引向「路径越界」这个错误方向。 |
+| 根因 | D-193「盘符根必是畸形/篡改」的假设对**合法用户输入**不成立——盘符根是目录对话框能正常选出的真实配置；pick 入口的校验与产物封链门的谓词没有对齐。 |
+| 决策 | PATH_ACTION pick 成功分支在写配置**之前**用**同一个谓词** `isSpecificRoot`（core 已导出，零新逻辑）校验：盘符根 / POSIX 根 / 段数≤2 的裸 UNC 共享根当场拒绝，回通道本地稳定码 `PATH_ROOT_NOT_SPECIFIC` + 中文文案「所选目录是盘符根或共享根（如 C:\），不能作为下载目录，请选择其中的具体文件夹」。不动 `containment.ts` / `task-queue.ts` / `shared/src/errors.ts`（17 码契约被两份测试钉死且全是下载阶段语义，此处复用任何码语义都不对）；UI 复用既有 `settings.paths.failed` 插值显示，zh/en 键集合零变化。`reset` / 默认 token 路径 / `open` / 取消 / 不可写失败分支全部不经过该门，行为逐字节不变。 |
+| 验证 | `m5-channels.test.ts` 新增 3 用例（`C:\` 两 kind 拒绝且**真实 ConfigStore 状态回读**确认零写入；`C:`/`C:/` 拼写全覆盖；`\\host\share` 拒 / `\\host\share\videos` 放行——顺带钉住 D-193「未覆盖③」）；终审确认正常目录（盘符下至少一层子目录）行为不变、settings.js 消费面（ok/canceled/error/paths）不受新增 `code` 字段影响、门与存储同源无 TOCTOU 错位；全量 vitest 2781/0；tsc 5 包全绿。 |
+| 未覆盖 | 真机对话框选 `D:\` 点一遍（铁律 9）；en 界面 reason 为主进程中文句（§10 既有模式，未在本轮扩 i18n）；POSIX `/` 拼写代码已处理但无 Windows picker 可产出，未单测。 |
+
+## D-212 · 2026-11-15 · self-updater 成功后的 .bak 清理失败不再误回滚（发版前审计 P3-1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 组件更新换文件成功且换后 sha256 复核通过之后，`unlink(enginePath.bak)` 在主 try 内——`.bak` 被 AV/索引器锁定（Windows 对新写出 exe 的旁文件常见 EBUSY/EPERM）→ 进入 `catch`「swap failed; rolling back」→ 用**旧二进制覆盖刚验证成功的新二进制**并误报 `swap-failed`：一次成功的更新被静默撤销，下次检查再走全流程，可反复横跳。 |
+| 根因 | 「housekeeping 清理」与「swap 成败」共用同一个 try/catch 边界——清理失败被当成交换失败。 |
+| 决策 | unlink 单独 try/catch：失败记 `logger.warn('self-update', 'update succeeded but .bak cleanup failed; backup kept', {enginePath, detail})`，继续成功路径 `changed:true`；`.bak` 残留无害（下次成功更新会重新覆写）。外层 catch/rollback、换后哈希校验、pause/resume（D-174/D-196）一字未动——rename 失败 / 换后哈希不匹配 / waitForIdle reject / queue-busy 的既有终态全部保持。 |
+| 验证 | `self-updater.test.ts` 新增 1 用例（fs override 对 `.bak` 抛 EBUSY → `changed:true`、无 `rolledBack`、旧二进制不回写、`.bak` 保留、日志无 rolling back、gate 恰好 `['pause','resume']`）；既有 15 用例零改动全绿；终审状态机六路径（成功+清理成功/失败、rename 失败、哈希不匹配、waitForIdle reject、queue-busy）逐一复核终态正确；全量 vitest 2781/0。 |
+| 未覆盖 | 真机用句柄锁 `.bak` 复现一遍；终审 P4 顺带登记：残留 `.bak` 使「写新 `.bak` 时被锁 → rollback 换回更陈旧二进制」的既有分支更易触达（版本可自愈），后续可在写前先清陈旧 `.bak` 或 `.bak` 写失败时跳过 rollback。 |
+
+## D-213 · 2026-11-15 · 产物校验判据超时 = SKIPPED（既非 PASS 也非 FAIL）（发版前审计 P3-2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 校验子进程被超时 kill 的信号被丢弃：C4（全帧解码 60s）判决只看 stderr 空 → 超时 kill 后 stderr 为空被记 **PASS**（长视频校验静默失效，60s 之后的坏帧永不检出，证据失真）；C3/C5/C6/C7（ffprobe 30s）要求 exit 0 → 超时 exitCode null → 好文件误判 **ARTIFACT_INCOMPLETE**。且修复前 C4 是**竞态相关**的：close 事件先到 → 误 PASS；超时路径先到（带 termination note）→ 误 FAIL——两个误向都不稳定。 |
+| 根因 | D-20 口径「C4 只看 stderr、never exit code」约束的是对**已完成 run** 的 exitCode 解释，实现把「超时被杀」也当成了已完成 run；core 层此前没有把 `SpawnResult.timedOut`（契约已有必填字段）透传出来。 |
+| 决策 | `runFfprobe` / `runFfmpegDecode` / `runFramemd5` 透传 `timedOut`；C3–C8 各加一行 `if (X.timedOut) return skip(...)`（严格前置守卫，**非超时判决逐字节不变**；skipReason 进证据，模块头注释写明 D-20 的精确化：只看 stderr 限于已完成的 run）。超时 = 不确定：编排器只聚合 FAIL，SKIPPED 不进 failures、不影响 ok / failureCode / C12 计数；超时数值（30s/60s）不动。硬性行为约束：**长视频（解码超 60s）仍正常 Completed**，只有证据记录更诚实。 |
+| 验证 | `artifact-verifier.test.ts` 新增 3 用例（C4 超时 → SKIPPED + 整体 ok + failureCode null；ffprobe 超时 → C3/C5/C6/C7 全 SKIPPED 且 ≠ARTIFACT_INCOMPLETE；C8 framemd5 超时 → SKIPPED，golden 比对不跑在截断哈希上）；既有 41 用例零断言改动（输入均 `timedOut:false`）；终审反证检查：普通假媒体必然快速失败仍被非超时路径拦截，进入 skip 通道需「探测挂起而非报错」（parser 挂起向量在本 bundle 未证实）——残余为 P3 纵深缺口（生产 `expectedManifestFor` 未接线 → C2/C10 哈希门结构性 SKIP，**既有缺口本轮未恶化**），后续接线即可彻底封死；全量 vitest 2781/0；tsc 5 包全绿。 |
+| 未覆盖 | 「Completed 且有 SKIPPED」与全 PASS 在 record 上不可区分（建议后续落一条校验摘要进历史记录）；反证残余（P3）随 `expectedManifestFor` 接线关闭，本轮按「审计建议未动，留决策」惯例不扩范围；真机长视频（>60s 解码）验证待打包后。 |

@@ -25,7 +25,8 @@ import type {
 } from '@ytvdlt/shared';
 import {
   ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES, STAR_PROMPT_ACTIONS,
-  buildTaskListSnapshot, classifyFailure, isPathInsideRoots, maskUrlSecrets, trustedArtifactRoots,
+  buildTaskListSnapshot, classifyFailure, isPathInsideRoots, isSpecificRoot, maskUrlSecrets,
+  trustedArtifactRoots,
   mergeSubtitleChoice,
   normalizeHexColor, normalizeLanguageCode, normalizeThemeMode, normalizeMotionMode, parseAccent,
   type SubtitleChoice,
@@ -1852,6 +1853,20 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       return {
         ok: false, action, kind, canceled: false,
         error: '所选路径无效', path: null, paths: before,
+      };
+    }
+    // D-193 (P2-2): the artifact containment gate trusts only SPECIFIC roots
+    // (`isSpecificRoot`), so a drive root (`C:\`), the POSIX root or a bare UNC
+    // share stored here would make every later download fail containment with
+    // a misleading message. Refuse at the pick boundary with the SAME predicate
+    // the gate uses, so the user gets the feedback now instead of at download
+    // time. `reset` and the default tokens never pass through this branch.
+    if (!isSpecificRoot(next)) {
+      return {
+        ok: false, action, kind, canceled: false,
+        code: 'PATH_ROOT_NOT_SPECIFIC',
+        error: '所选目录是盘符根或共享根（如 C:\\），不能作为下载目录，请选择其中的具体文件夹',
+        path: null, paths: before,
       };
     }
     await deps.config.setDomain('paths', { [key]: next });
