@@ -17,7 +17,7 @@ import { IPC_CHANNELS, MAX_PLAYLIST_ITEMS, blocksEnqueue } from '@ytvdlt/shared'
 import type {
   AppUpdateAction, AppUpdateActionResult, AppUpdateState, DownloadKind, FormatDomain, TaskRecord,
   MediaInfo, SubtitleDomain, SubtitlePreviewConsumeResult, SubtitlePreviewResult,
-  SubtitleArtifactSource, SubtitleOutcome, PlaylistInfo, PlaylistPreviewCode,
+  PlaylistInfo, PlaylistPreviewCode,
   PlaylistPreviewDto, PlaylistPreviewCancelDto, PlaylistBatchEnqueueDto,
   PlaylistPrecheckReport,
   ExtractorCatalogResult, UrlSupportResult, ExtractorCatalogFailure,
@@ -25,7 +25,7 @@ import type {
 } from '@ytvdlt/shared';
 import {
   ACCENT_PRESETS, DEFAULT_PATH_TOKENS, MAX_SUBTITLE_LANGUAGES, STAR_PROMPT_ACTIONS,
-  buildTaskListSnapshot, classifyFailure, isPathInsideRoots, isSpecificRoot, maskUrlSecrets,
+  buildTaskListSnapshot, isPathInsideRoots, isSpecificRoot,
   trustedArtifactRoots,
   mergeSubtitleChoice,
   normalizeHexColor, normalizeLanguageCode, normalizeThemeMode, normalizeMotionMode, parseAccent,
@@ -33,11 +33,11 @@ import {
 } from '@ytvdlt/core';
 import type {
   AccentChoice, ClipboardPort, CommandTemplateInput, CommandTemplateStore, IConfigStore,
-  FailureKind, MotionMode, TaskDetailAction, TaskDetailResult, TaskTab, ThemeMode,
+  MotionMode, TaskDetailAction, TaskDetailResult, TaskTab, ThemeMode,
 } from '@ytvdlt/core';
 import type { ThumbnailCacheStatus, ThumbnailPruneReport } from './thumbnail-cache.js';
 import type {
-  LocalFileState, LocalFileStatusPort, LocalFileStatus as FileStatusBucket,
+  LocalFileState, LocalFileStatusPort,
 } from './local-file-status.js';
 import type {
   TxtImportServicePort, TxtImportEnqueueDto, TxtImportPickDto,
@@ -49,6 +49,21 @@ import {
 import type { PlaylistBatchReport, PlaylistEnqueueInput } from './m4-host.js';
 import { blockedEntriesByUrl, precheckBatch } from './site-precheck-gate.js';
 import type { StarPromptPort } from './star-prompt-service.js';
+// Task-3 pure-logic extraction (2026-11-15): the payload whitelist, the M5
+// channel list, the URL-free task DTO projections and the trash-outcome
+// normalisation moved VERBATIM to `./m5-contracts.js`. Everything below
+// re-exports the ORIGINAL surface — m5-host, main/index and the 16 test
+// files import these symbols from HERE, and that contract must survive.
+import {
+  normalizeTrashOutcomes, samePathKey, toTaskDetail, toTaskListItem, validateM5Payload,
+  type TrashFileOutcome,
+} from './m5-contracts.js';
+export {
+  M5_CHANNELS, normalizeTrashOutcomes, samePathKey, toTaskDetail, toTaskListItem, validateM5Payload,
+} from './m5-contracts.js';
+export type {
+  TaskDetailDto, TaskListItemDto, TrashFileOutcome, TrashFileStatus,
+} from './m5-contracts.js';
 
 /** Minimal slice of the queue this layer needs (tests inject a fake). */
 export interface TaskListPort {
@@ -115,26 +130,6 @@ export interface SubtitlePreviewPortLike {
    * stay inside the main process — it is never an IPC payload.
    */
   consume(previewId: string, url: unknown): SubtitlePreviewConsumeResult;
-}
-
-/**
- * D-120: one answer per requested path, so "already gone" can never be
- * mistaken for "could not be deleted".
- *
- *   trashed — existed and was moved to the OS recycle bin
- *   missing — ENOENT/ENOTDIR: local cleanup is already complete (idempotent)
- *   error   — a real failure (locked, no permission, volume unavailable…)
- *
- * Legacy adapters may still return plain path strings; those count as
- * `trashed`, preserving the D-87 contract and every existing fake port.
- */
-export type TrashFileStatus = 'trashed' | 'missing' | 'error';
-
-export interface TrashFileOutcome {
-  readonly path: string;
-  readonly status: TrashFileStatus;
-  /** The real OS reason; only present for `error`, never a guessed cause. */
-  readonly reason?: string;
 }
 
 /**
@@ -218,15 +213,6 @@ export interface TrashFilesPort {
   preflight?(paths: readonly string[], roots: readonly string[]): Promise<TrashPreflightVerdict>;
 }
 
-/** Normalise D-87 string replies and D-120 structured replies into one shape. */
-export function normalizeTrashOutcomes(
-  results: readonly (string | TrashFileOutcome)[],
-): readonly TrashFileOutcome[] {
-  return results.map((entry) => (typeof entry === 'string'
-    ? { path: entry, status: 'trashed' as const }
-    : entry));
-}
-
 /**
  * D-134: the supported-site surface this layer needs.
  *
@@ -239,11 +225,6 @@ export interface SiteSupportPortLike {
   catalog(force?: boolean): Promise<ExtractorCatalogResult>;
   /** T5: the optional signal is the caller's cancellation (see SiteSupportService). */
   check(url: string, force?: boolean, signal?: SpawnAbortSignal): Promise<UrlSupportResult>;
-}
-
-/** Windows path equality: case-insensitive, slash-insensitive. */
-export function samePathKey(path: string): string {
-  return path.replace(/\\/g, '/').toLowerCase();
 }
 
 /**
@@ -393,83 +374,6 @@ export interface AppInfoDto {
   readonly packaged: boolean;
 }
 
-export interface TaskListItemDto {
-  readonly id: string;
-  readonly state: string;
-  /** D-164: parked in the FIFO; present only when true (old snapshots stay lean). */
-  readonly pending?: boolean;
-  readonly kind: string;
-  readonly title: string;
-  readonly uploader: string | null;
-  readonly duration: number | null;
-  readonly percent: number | null;
-  readonly errorCode: string | null;
-  /**
-   * D-109: stable bucket for the one-line failure brief. `null` when the task
-   * holds no error at all; the human sentence is resolved by the renderer from
-   * `queue.failure.<kind>`, so switching language needs no new IPC round trip.
-   */
-  readonly failureKind: FailureKind | null;
-  readonly artifactCount: number;
-  /** 0.2.1 (D-95): transfer numbers; `null` = unknown, never "zero". */
-  readonly downloadedBytes: number | null;
-  readonly totalBytes: number | null;
-  readonly speedBps: number | null;
-  readonly etaSec: number | null;
-  /**
-   * D-115: how far the run has actually got. `null` / absent means "no reliable
-   * information" — the renderer then keeps the previous behaviour rather than
-   * assuming a merge. Values: `fetching|downloading|merging|postprocess|verifying`.
-   */
-  readonly stage?: string | null;
-  /** 0.2.1 (D-96): absolute local cover path, or null for the letter badge. */
-  readonly thumbPath: string | null;
-  /**
-   * D-120: stable bucket, never a sentence. Absent when the build has no
-   * probe or the task is not `Completed` — the renderer then paints nothing.
-   * It is a FILE-system observation and must never change the download state.
-   */
-  readonly fileStatus?: FileStatusBucket | null;
-  /** D-120: same buckets for the containing directory (open-folder branch). */
-  readonly dirStatus?: FileStatusBucket | null;
-  /**
-   * Stage 4: how many subtitle files this run produced. Additive; absent on
-   * records that predate subtitle artifacts.
-   */
-  readonly subtitleCount?: number;
-  /** Stage 4: requested-vs-produced verdict (`none|ok|partial|missing`). */
-  readonly subtitleOutcome?: SubtitleOutcome;
-  /** Stage 4: language tags actually produced, in artifact order, de-duplicated. */
-  readonly subtitleLanguages?: readonly string[];
-}
-
-export interface TaskDetailDto {
-  readonly id: string;
-  readonly state: string;
-  /** D-164: parked in the FIFO; present only when true. */
-  readonly pending?: boolean;
-  readonly kind: string;
-  readonly title: string;
-  /** Masked: `token=***REDACTED***`, never the raw signed URL. */
-  readonly url: string;
-  readonly artifacts: readonly string[];
-  readonly percent: number | null;
-  readonly errorCode: string | null;
-  readonly errorMessage: string | null;
-  /**
-   * Stage 4: subtitle files with their language / format / source. Paths are
-   * already exposed through `artifacts`, so this adds no new exposure — it adds
-   * the classification the renderer must not try to derive from a file name.
-   */
-  readonly subtitleFiles?: readonly {
-    readonly path: string;
-    readonly language: string;
-    readonly ext: string;
-    readonly source: SubtitleArtifactSource;
-  }[];
-  readonly subtitleOutcome?: SubtitleOutcome;
-}
-
 export interface AppearanceDto {
   readonly theme: ThemeMode;
   readonly accent: AccentChoice;
@@ -506,91 +410,6 @@ const MAX_ARG_LENGTH = 400;
  * truncated here, the cap only refuses absurd payloads before they reach the OS.
  */
 const MAX_CLIPBOARD_TEXT_CHARS = 1_000_000;
-
-const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
-  // D-120: `refreshFileStatus` only asks for a fresh stat; it grants no path
-  // access and cannot widen any deletion.
-  [IPC_CHANNELS.TASK_LIST]: ['tab', 'query', 'refreshFileStatus'],
-  [IPC_CHANNELS.TASK_DETAIL]: ['taskId'],
-  // D-87: `withFiles: true` asks the host to recycle the task's artifacts
-  // before removing the record. Only valid together with `action: 'remove'`.
-  [IPC_CHANNELS.TASK_ACTION]: ['taskId', 'action', 'withFiles'],
-  [IPC_CHANNELS.TEMPLATE_LIST]: [],
-  [IPC_CHANNELS.TEMPLATE_SAVE]: ['id', 'name', 'args'],
-  [IPC_CHANNELS.TEMPLATE_DELETE]: ['id'],
-  [IPC_CHANNELS.SETTINGS_GET]: [],
-  [IPC_CHANNELS.SETTINGS_SET]: [
-    'theme', 'accent', 'motion', 'language', 'privateMode',
-    'autoCheckAppUpdate', 'autoCheckEngineUpdate', 'autostart',
-  ],
-  [IPC_CHANNELS.COMPONENT_STATUS]: [],
-  [IPC_CHANNELS.COMPONENT_UPDATE]: [],
-  [IPC_CHANNELS.COMPONENT_CHECK]: [],
-  [IPC_CHANNELS.APP_UPDATE_STATUS]: [],
-  [IPC_CHANNELS.APP_UPDATE_ACTION]: ['action'],
-  [IPC_CHANNELS.PATH_ACTION]: ['action', 'kind'],
-  [IPC_CHANNELS.DOWNLOAD_START]: [
-    'url', 'kind', 'quality', 'audioQuality', 'audioFormat',
-    // D-160: opaque id of THIS user submission; the main process binds every
-    // pre-check controller of the submission to it. Not a URL / path / ticket.
-    'operationId',
-    // Stage 3: the subtitle ticket + the per-task subtitle intent. Flat keys on
-    // purpose — `validateM5Payload` only sees the top level, so a nested
-    // `subtitle: {...}` object would smuggle unvalidated fields past it.
-    'previewId', 'subtitleLanguages', 'subtitleAutoCaptions',
-    'subtitleConvertTo', 'subtitleEmbed', 'subtitleKeepFile',
-  ],
-  // D-103: the renderer may read occupancy, ask for a manual prune, or change
-  // two policy values. It can NEVER pass a file path to this channel.
-  [IPC_CHANNELS.THUMBNAIL_CACHE]: ['action', 'enabled', 'maxBytes'],
-  // D-114: read-only identity; no input at all.
-  [IPC_CHANNELS.APP_INFO]: [],
-  // Subtitle preview (stage 2): a link, plus the ticket it replaces (optional).
-  // Deliberately NOT accepted: mediaInfo, tracks, formats, paths, argv — the
-  // renderer proposes a URL, the main process decides what may be known about
-  // it. `previousPreviewId` only releases the superseded ticket.
-  [IPC_CHANNELS.SUBTITLE_PREVIEW]: ['url', 'previousPreviewId'],
-  [IPC_CHANNELS.SUBTITLE_PREVIEW_CANCEL]: ['previewId'],
-  // TXT import: PICK accepts NOTHING (no path, ever). ENQUEUE accepts an opaque
-  // single-use id plus the three download enums — never a URL or a file name.
-  [IPC_CHANNELS.TXT_IMPORT_PICK]: [],
-  [IPC_CHANNELS.TXT_IMPORT_ENQUEUE]: [
-    'importId', 'kind', 'quality', 'audioQuality', 'audioFormat', 'operationId',
-  ],
-  // Playlist batch import: the renderer may name a URL and a ticket, never a
-  // PlaylistInfo, an entry URL, a path or an argv token.
-  [IPC_CHANNELS.PLAYLIST_PREVIEW]: ['url', 'previousPreviewId'],
-  [IPC_CHANNELS.PLAYLIST_PREVIEW_CANCEL]: ['previewId'],
-  [IPC_CHANNELS.PLAYLIST_BATCH_ENQUEUE]: [
-    'previewId', 'url', 'selectedIds', 'kind', 'quality', 'audioQuality', 'audioFormat',
-    'operationId',
-  ],
-  // D-134: supported-site discovery. LIST takes an optional `refresh` boolean
-  // and NOTHING else — the renderer can ask "ask the engine again", never
-  // "here is the list". CHECK takes the url being submitted (or, for a batch
-  // entry, the one line about to be enqueued) plus an optional `refresh`.
-  // Deliberately absent: enginePath, engineVersion, argv, cookies, a format
-  // selection, an extractor name — none of them are the renderer's to choose.
-  [IPC_CHANNELS.SUPPORTED_SITES]: ['refresh'],
-  [IPC_CHANNELS.URL_SUPPORT_CHECK]: ['url', 'refresh', 'operationId'],
-  // D-160: CANCEL / STATUS take ONE opaque `operationId` — the id the renderer
-  // minted for its own submission. It is NOT a batch id, URL list or preview
-  // ticket: the main process only ever cancels / reports the controllers it
-  // registered under that exact id, so two live dialogs can no longer stop
-  // each other. Omitting the id keeps the LEGACY scope (pre-D-160 callers):
-  // such a cancel can only reach controllers that were also registered
-  // without an id — never an isolated submission.
-  [IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL]: ['operationId'],
-  [IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS]: ['operationId'],
-  // D-148: CHECK takes NOTHING (same zero-input rule as APP_INFO) so the page
-  // cannot forge a frequency decision; ACTION takes ONLY the action enum —
-  // never a URL (the repo page is resolved inside the main process).
-  [IPC_CHANNELS.STAR_PROMPT_CHECK]: [],
-  [IPC_CHANNELS.STAR_PROMPT_ACTION]: ['action'],
-  // D-173: exactly ONE key, `text`, and nothing else — no paths, no argv, no
-  // html. The value itself is length-capped below.
-  [IPC_CHANNELS.CLIPBOARD_WRITE]: ['text'],
-};
 
 /** Opaque, main-process-issued import ticket. */
 const IMPORT_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
@@ -685,96 +504,6 @@ function readSubtitleChoice(record: Record<string, unknown>): SubtitleChoice | n
     convertTo: convertTo as SubtitleDomain['convertTo'],
     embed: flag('subtitleEmbed'),
     keepSubtitleFile: flag('subtitleKeepFile'),
-  };
-}
-
-export function validateM5Payload(channel: string, payload: unknown): Record<string, unknown> {
-  const allowed = PAYLOAD_KEYS[channel];
-  if (allowed === undefined) throw new Error(`[m5-ipc] unregistered channel: ${channel}`);
-  const record = payload ?? {};
-  if (typeof record !== 'object' || Array.isArray(record)) {
-    throw new Error(`[m5-ipc] payload must be an object for ${channel}`);
-  }
-  for (const key of Object.keys(record as Record<string, unknown>)) {
-    if (!allowed.includes(key)) throw new Error(`[m5-ipc] payload key not allowed: ${key}`);
-  }
-  return record as Record<string, unknown>;
-}
-
-/** URL-free projection: the list never needs a link to render a card. */
-export function toTaskListItem(
-  record: TaskRecord,
-  thumbnailPath: string | null = null,
-  fileState?: LocalFileState,
-  pending = false,
-): TaskListItemDto {
-  return {
-    id: record.id,
-    state: record.state,
-    // D-164: `state` alone cannot express "waiting for a slot" — a parked task
-    // is `Idle`, exactly like a restored task that will never start on its own.
-    // The UI needs the distinction to offer a cancel that actually works.
-    ...(pending ? { pending: true } : {}),
-    kind: record.kind,
-    title: record.mediaInfo?.title ?? record.id,
-    uploader: record.mediaInfo?.uploader ?? null,
-    duration: record.mediaInfo?.duration ?? null,
-    percent: record.lastPercent,
-    errorCode: record.error?.code ?? null,
-    // D-109: derived from the stable code only — never from yt-dlp text, and
-    // never a localized string (the renderer owns the copy).
-    failureKind: record.error === null ? null : classifyFailure(record.error.code),
-    artifactCount: record.artifacts.length,
-    downloadedBytes: record.lastDownloadedBytes ?? null,
-    totalBytes: record.lastTotalBytes ?? null,
-    speedBps: record.lastSpeedBps ?? null,
-    etaSec: record.lastEtaSec ?? null,
-    // D-115: only the queue knows how far the run got; the renderer must not
-    // infer a phase from `percent === 100` (two streams each reach 100%).
-    stage: record.lastStage ?? null,
-    thumbPath: thumbnailPath,
-    // D-120: only a real observation is sent. `undefined` keeps old snapshots
-    // byte-identical (no invented "all present" state for unprobed builds).
-    ...(fileState === undefined ? {} : { fileStatus: fileState.status, dirStatus: fileState.dirStatus }),
-    // Stage 4: subtitle bookkeeping is derived from the task's own manifest;
-    // absent (not `0`) when the record predates it, so old snapshots keep
-    // painting exactly what they painted before.
-    ...(record.subtitleFiles === undefined
-      ? {}
-      : {
-        subtitleCount: record.subtitleFiles.length,
-        subtitleLanguages: [...new Set(record.subtitleFiles
-          .map((file) => file.language)
-          .filter((language) => language !== ''))],
-        ...(record.subtitleOutcome === undefined ? {} : { subtitleOutcome: record.subtitleOutcome }),
-      }),
-  };
-}
-
-/** Detail view keeps the URL but masked — same rule as the error report. */
-export function toTaskDetail(record: TaskRecord, pending = false): TaskDetailDto {
-  return {
-    id: record.id,
-    state: record.state,
-    ...(pending ? { pending: true } : {}),
-    kind: record.kind,
-    title: record.mediaInfo?.title ?? record.id,
-    url: maskUrlSecrets(record.url),
-    artifacts: [...record.artifacts],
-    percent: record.lastPercent,
-    errorCode: record.error?.code ?? null,
-    errorMessage: record.error?.message ?? null,
-    ...(record.subtitleFiles === undefined
-      ? {}
-      : {
-        subtitleFiles: record.subtitleFiles.map((file) => ({
-          path: file.path,
-          language: file.language,
-          ext: file.ext,
-          source: file.source,
-        })),
-      }),
-    ...(record.subtitleOutcome === undefined ? {} : { subtitleOutcome: record.subtitleOutcome }),
   };
 }
 
@@ -2239,45 +1968,3 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
   return handlers;
 }
 
-/** Channel list the preload whitelist must expose (asserted by the tests). */
-export const M5_CHANNELS: readonly string[] = [
-  IPC_CHANNELS.TASK_LIST,
-  IPC_CHANNELS.TASK_DETAIL,
-  IPC_CHANNELS.TASK_ACTION,
-  IPC_CHANNELS.TEMPLATE_LIST,
-  IPC_CHANNELS.TEMPLATE_SAVE,
-  IPC_CHANNELS.TEMPLATE_DELETE,
-  IPC_CHANNELS.SETTINGS_GET,
-  IPC_CHANNELS.COMPONENT_STATUS,
-  IPC_CHANNELS.COMPONENT_UPDATE,
-  IPC_CHANNELS.COMPONENT_CHECK,
-  IPC_CHANNELS.APP_UPDATE_STATUS,
-  IPC_CHANNELS.APP_UPDATE_ACTION,
-  IPC_CHANNELS.PATH_ACTION,
-  IPC_CHANNELS.SETTINGS_SET,
-  IPC_CHANNELS.DOWNLOAD_START,
-  IPC_CHANNELS.THUMBNAIL_CACHE,
-  IPC_CHANNELS.APP_INFO,
-  // Subtitle preview (stage 2, append-only; the fixture PROBE is untouched).
-  IPC_CHANNELS.SUBTITLE_PREVIEW,
-  IPC_CHANNELS.SUBTITLE_PREVIEW_CANCEL,
-  // TXT batch import (append-only).
-  IPC_CHANNELS.TXT_IMPORT_PICK,
-  IPC_CHANNELS.TXT_IMPORT_ENQUEUE,
-  // Playlist batch import (append-only; M3 PLAYLIST_ENQUEUE stays in the
-  // fixture gateway and is NOT part of this list).
-  IPC_CHANNELS.PLAYLIST_PREVIEW,
-  IPC_CHANNELS.PLAYLIST_PREVIEW_CANCEL,
-  IPC_CHANNELS.PLAYLIST_BATCH_ENQUEUE,
-  // D-134 (append-only): supported-site discovery + per-url pre-check.
-  IPC_CHANNELS.SUPPORTED_SITES,
-  IPC_CHANNELS.URL_SUPPORT_CHECK,
-  // T5 (append-only): user-level pre-check cancellation + batch progress.
-  IPC_CHANNELS.URL_SUPPORT_CHECK_CANCEL,
-  IPC_CHANNELS.URL_SUPPORT_CHECK_STATUS,
-  // D-148 (append-only): the "Star on GitHub" nudge.
-  IPC_CHANNELS.STAR_PROMPT_CHECK,
-  IPC_CHANNELS.STAR_PROMPT_ACTION,
-  // D-173 (append-only): main-process clipboard write (bounded text only).
-  IPC_CHANNELS.CLIPBOARD_WRITE,
-];
