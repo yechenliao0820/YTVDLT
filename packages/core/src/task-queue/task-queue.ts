@@ -11,7 +11,7 @@
  */
 import type {
   DownloadEngine, EngineEvent, EngineStage, TaskRecord, TaskEvent, TaskState, AppError,
-  CorePorts, HistoryEntry, MediaInfo, ExpectedArtifactManifest, TaskSnapshot,
+  CorePorts, ExpectedArtifactManifest, TaskSnapshot,
   SubtitleFileLink,
 } from '@ytvdlt/shared';
 import { isForwardStage } from '@ytvdlt/shared';
@@ -21,12 +21,19 @@ import { resolveDownloadPlan } from '../decision/download-plan.js';
 import { applyCopySuffix, nextCopySuffix } from '../path-resolver/copy-suffix.js';
 import { splitArtifactsByRoots, trustedArtifactRoots } from '../path-resolver/containment.js';
 import {
-  buildSubtitleLinks, classifyArtifact, evaluateSubtitleOutcome,
-  primaryMediaArtifact, subtitleArtifactsOf, mediaArtifactsOf,
+  buildSubtitleLinks, evaluateSubtitleOutcome, mediaArtifactsOf,
 } from '../artifact-classify/index.js';
 import { assertTransition } from './state-machine.js';
-import { stripCredentialUrls } from './snapshot-media.js';
 import { createProbeAbort } from './probe-abort.js';
+import { normalizeConcurrency, DEFAULT_CONCURRENCY } from './concurrency.js';
+import { snapshotFingerprint, buildPersistProjection } from './snapshot-projection.js';
+import { buildHistoryEntry } from './history-entry.js';
+import { toAppError } from './app-error.js';
+
+// Task-6 split compat: the concurrency rule moved verbatim to
+// `./concurrency.js` — these re-exports keep every old import path working
+// (deep `task-queue.js` importers and the `@ytvdlt/core` barrel alike).
+export { MAX_CONCURRENCY, DEFAULT_CONCURRENCY, normalizeConcurrency } from './concurrency.js';
 
 export interface TaskQueueDeps {
   ports: CorePorts;
@@ -77,45 +84,7 @@ export interface TaskQueueDeps {
   ) => Promise<readonly string[]>;
 }
 
-/** Hard ceiling: more slots than this only thrashes the network + disk. */
-export const MAX_CONCURRENCY = 8;
-export const DEFAULT_CONCURRENCY = 3;
-
-/** Pure clamp used by the queue AND by the config layer (single rule). */
-export function normalizeConcurrency(value: unknown): number {
-  const numeric = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(numeric)) return DEFAULT_CONCURRENCY;
-  return Math.min(MAX_CONCURRENCY, Math.max(1, Math.trunc(numeric)));
-}
-
 const nowIso = (ports: CorePorts): string => ports.clock.nowIso();
-
-/**
- * D-163: cheap, observable-change fingerprint of the snapshot.
- *
- * Deliberately NOT a hash of the serialised JSON: the point is to skip the
- * stringify + full-file rewrite, so the comparison must not cost one itself.
- * Every structural field the task list / detail view can display is included,
- * and nothing else — a change that is invisible to the user does not deserve a
- * disk write.
- *
- * Progress numbers (`lastPercent` / bytes / speed / ETA) are deliberately NOT
- * fingerprinted: every progress tick moves them, so including them made
- * `tasks.json` a twice-a-second full rewrite for the whole download. A crash
- * does not need fresh numbers there — `restore()` rewrites every interrupted
- * state to `Canceled` and `restart()` clears progress anyway (D-107), and the
- * resume credentials live in `<dataDir>/work/<taskId>` (D-118), never in this
- * file. Progress values ARE still serialised whenever a structural change
- * writes the file, so the snapshot stays internally consistent.
- */
-function snapshotFingerprint(tasks: readonly TaskRecord[]): string {
-  return tasks.map((task) => [
-    task.id, task.state, task.updatedAt, task.kind,
-    task.lastStage ?? '', task.error?.code ?? '', task.artifacts.length,
-    task.subtitleFiles?.length ?? '', task.subtitleOutcome ?? '',
-    task.mediaInfo?.id ?? '',
-  ].join('|')).join('\n');
-}
 
 /** Windows path equality: case-insensitive, slash-insensitive. */
 function pathKeyOf(path: string): string {
@@ -1059,13 +1028,10 @@ export class TaskQueue implements ITaskQueue {
     const fingerprint = snapshotFingerprint([...this.records.values()]);
     if (fingerprint === this.lastPersistedFingerprint) return;
     // D-163: minimise before serialising — signed CDN links never touch disk.
-    const tasks: TaskRecord[] = this.list().map((record) => (record.mediaInfo === null
-      ? { ...record, artifacts: [...record.artifacts] }
-      : {
-        ...record,
-        artifacts: [...record.artifacts],
-        mediaInfo: stripCredentialUrls(record.mediaInfo),
-      }));
+    // (Task-6 split: the projection build moved verbatim to
+    // `./snapshot-projection.js`; the fingerprint gate, the write queue and the
+    // failure semantics stay HERE — this class remains the only state owner.)
+    const tasks = buildPersistProjection(this.list());
     // Reserve the fingerprint BEFORE the awaited save: further progress events
     // fire while the write is still in flight, and each of them compares
     // against this field — updating it only after the save resolved would let
@@ -1103,68 +1069,4 @@ export class TaskQueue implements ITaskQueue {
     this.snapshotWriteQueue = write.then(() => undefined, () => undefined);
     await write;
   }
-}
-
-function toAppError(error: unknown): AppError {
-  const candidate = error as Partial<AppError>;
-  if (typeof candidate?.code === 'string' && typeof candidate.message === 'string') {
-    return {
-      code: candidate.code,
-      message: candidate.message,
-      detail: candidate.detail ?? '',
-      retryable: candidate.retryable ?? true,
-      report: candidate.report ?? `${candidate.code}: ${candidate.message}`,
-    };
-  }
-  return {
-    code: 'UNKNOWN', message: '未知错误', detail: String(error), retryable: true,
-    report: `UNKNOWN: ${String(error)}`,
-  };
-}
-
-function buildHistoryEntry(
-  record: TaskRecord,
-  artifacts: readonly string[],
-  sizes: ReadonlyMap<string, number | null>,
-  ports: CorePorts,
-): HistoryEntry {
-  const info: MediaInfo | null = record.mediaInfo;
-  // Stage 4: `artifacts[0]` is a thumbnail or a subtitle often enough that it
-  // must never be the history's `videoPath` — C11 verifies that path and the UI
-  // opens it. Fall back to index 0 only when no media file exists at all, so a
-  // degenerate run still produces an honest (and correctly failing) record.
-  const primary = primaryMediaArtifact(artifacts) ?? artifacts[0] ?? '';
-  const audio = artifacts.find((path) => classifyArtifact(path) === 'audio') ?? null;
-  const thumb = artifacts.find((path) => classifyArtifact(path) === 'thumbnail') ?? null;
-  const subs = subtitleArtifactsOf(artifacts);
-  const timestamp = ports.clock.nowIso();
-  // The engine fs.stat'd every artifact when the completed event was emitted;
-  // the primary media file IS the product, so its measured size is the honest
-  // history value. For a merged video+audio download that file is the merged
-  // output — the per-stream progress totals (`record.lastTotalBytes`) describe
-  // only the LAST stream and would under-report the product. `0` stays the
-  // "unknown" sentinel (engine could not stat): an unknown size is never
-  // fabricated into a non-zero number (D-107 spirit).
-  const reported = sizes.get(primary);
-  const sizeBytes = typeof reported === 'number' && Number.isFinite(reported) && reported > 0
-    ? reported
-    : 0;
-  return {
-    id: record.id,
-    taskId: record.id,
-    url: record.url,
-    title: info?.title ?? '',
-    uploader: info?.uploader ?? null,
-    durationSec: info?.duration ?? null,
-    videoPath: primary,
-    audioPath: audio,
-    thumbnailPath: thumb,
-    subtitlePaths: subs,
-    sizeBytes,
-    extractorKey: info?.extractor_key ?? '',
-    downloadType: record.kind,
-    formatId: record.request?.format.formatId ?? null,
-    createdAt: record.createdAt,
-    completedAt: timestamp,
-  };
 }
