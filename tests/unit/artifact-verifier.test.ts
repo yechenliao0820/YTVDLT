@@ -32,7 +32,7 @@ const MANIFEST: ExpectedArtifactManifest = {
   c8Golden: null,
 };
 
-function seed(overrides: { ffprobe?: string; ffprobeStderr?: string; ffprobeExit?: number; decodeStderr?: string; decodeExit?: number; framemd5?: string; framemd5Stderr?: string } = {}) {
+function seed(overrides: { ffprobe?: string; ffprobeStderr?: string; ffprobeExit?: number; decodeStderr?: string; decodeExit?: number; framemd5?: string; framemd5Stderr?: string; ffprobeTimedOut?: boolean; decodeTimedOut?: boolean; framemd5TimedOut?: boolean } = {}) {
   const { ports, state } = createInMemoryPorts();
   state.env.runtimeDir = RUNTIME;
   state.files.set(PRIMARY, 'video-bytes');
@@ -40,19 +40,19 @@ function seed(overrides: { ffprobe?: string; ffprobeStderr?: string; ffprobeExit
     exitCode: overrides.ffprobeExit ?? 0,
     stdout: overrides.ffprobe ?? FFPROBE_OK,
     stderr: overrides.ffprobeStderr ?? '',
-    timedOut: false,
+    timedOut: overrides.ffprobeTimedOut ?? false,
   });
   state.spawnResults.set('-f null -', {
     exitCode: overrides.decodeExit ?? 0,
     stdout: '',
     stderr: overrides.decodeStderr ?? '',
-    timedOut: false,
+    timedOut: overrides.decodeTimedOut ?? false,
   });
   state.spawnResults.set('framemd5', {
     exitCode: 0,
     stdout: overrides.framemd5 ?? 'framemd5-line\n',
     stderr: overrides.framemd5Stderr ?? '',
-    timedOut: false,
+    timedOut: overrides.framemd5TimedOut ?? false,
   });
   const verifier = new ArtifactVerifier({ ports });
   return { verifier, ports, state };
@@ -412,5 +412,43 @@ describe('C6/C8 · D-84 audio post-processing regressions', () => {
     const s = seed({ ffprobe: withVideo });
     const report = await s.verifier.verify({ ...baseInput, kind: 'audio' });
     expect(byId(report, 'C6')?.status).toBe('FAIL');
+  });
+});
+
+describe('C3–C8 probe timeout regressions (a killed probe is indeterminate: SKIPPED, never PASS / FAIL)', () => {
+  it('C4 decode timeout SKIPS the criterion and the overall verdict still passes', async () => {
+    const { verifier, ports } = seed({ decodeTimedOut: true });
+    const sha = await ports.hash.sha256File(PRIMARY);
+    const report = await verifier.verify({ ...baseInput, expectedManifest: { ...MANIFEST, sha256: sha } });
+    expect(byId(report, 'C4')?.status).toBe('SKIPPED');
+    expect(byId(report, 'C4')?.skipReason).toContain('timed out');
+    expect(byId(report, 'C12')?.status).toBe('PASS');
+    expect(report.ok).toBe(true);
+    expect(report.failureCode).toBeNull();
+  });
+
+  it('ffprobe timeout SKIPS C3/C5/C6/C7 instead of failing ARTIFACT_INCOMPLETE', async () => {
+    const { verifier, ports } = seed({ ffprobeTimedOut: true });
+    const sha = await ports.hash.sha256File(PRIMARY);
+    const report = await verifier.verify({ ...baseInput, expectedManifest: { ...MANIFEST, sha256: sha } });
+    expect(byId(report, 'C3')?.status).toBe('SKIPPED');
+    expect(byId(report, 'C5')?.status).toBe('SKIPPED');
+    expect(byId(report, 'C6')?.status).toBe('SKIPPED');
+    expect(byId(report, 'C7')?.status).toBe('SKIPPED');
+    expect(byId(report, 'C12')?.status).toBe('PASS');
+    expect(report.ok).toBe(true);
+    expect(report.failureCode).not.toBe('ARTIFACT_INCOMPLETE');
+  });
+
+  it('C8 framemd5 timeout SKIPS (the golden compare must not run on a truncated hash)', async () => {
+    const { verifier, ports } = seed({ framemd5TimedOut: true });
+    const sha = await ports.hash.sha256File(PRIMARY);
+    const report = await verifier.verify({
+      ...baseInput, postprocessed: true,
+      expectedManifest: { ...MANIFEST, sha256: sha, c8Golden: 'abc123' },
+    });
+    expect(byId(report, 'C8')?.status).toBe('SKIPPED');
+    expect(byId(report, 'C12')?.status).toBe('PASS');
+    expect(report.ok).toBe(true);
   });
 });
