@@ -227,6 +227,8 @@ beforeAll(async () => {
   await loadUiModule('ipc-bridge.js', globals);
   await loadUiModule('shortcuts/shortcuts.js', globals);
   await loadUiModule('app-shell.js', globals);
+  // Task 5：index.html 在 queue.js 之前装载纯显示模型，导入路线保持一致。
+  await loadUiModule('pages/queue/queue-model.js', globals);
   await loadUiModule('pages/queue/queue.js', globals);
   queue = win().YTVDLTQueue;
   harnessBridge = win().ytvdltBridge;

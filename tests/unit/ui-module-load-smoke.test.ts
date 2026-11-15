@@ -31,6 +31,7 @@ const MODULES: string[] = [
   'dialogs/format-selector.js',
   'dialogs/subtitle-selector.js',
   'dialogs/playlist-selector.js',
+  'pages/queue/queue-model.js',
   'pages/queue/queue.js',
   'pages/queue/playlist-batch.js',
   'pages/settings/settings.js',

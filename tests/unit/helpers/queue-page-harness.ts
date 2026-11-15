@@ -23,6 +23,9 @@ const UI_SRC = join(ROOT, 'packages', 'ui', 'src');
 const sources = {
   messages: readFileSync(join(UI_SRC, 'i18n', 'messages.js'), 'utf8'),
   shell: readFileSync(join(UI_SRC, 'app-shell.js'), 'utf8'),
+  // Task 5: the pure display model loads BEFORE the page, exactly like
+  // index.html does (`<script src="./queue-model.js">` precedes `queue.js`).
+  model: readFileSync(join(UI_SRC, 'pages', 'queue', 'queue-model.js'), 'utf8'),
   queue: readFileSync(join(UI_SRC, 'pages', 'queue', 'queue.js'), 'utf8'),
 };
 
@@ -210,6 +213,7 @@ export function harness(options: {
     (sandbox.YTVDLT as Record<string, unknown>).playlists = options.playlistFactory;
   }
   new Function('window', sources.shell)(sandbox);
+  new Function('window', sources.model)(sandbox);
 
   if (options.live === true) {
     sandbox.ytvdltBridge = {
