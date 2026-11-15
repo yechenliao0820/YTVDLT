@@ -328,6 +328,16 @@ export class TaskQueue implements ITaskQueue {
       if (record.state !== 'Error' && record.state !== 'Completed') {
         try { this.transition(record, 'Error'); } catch { /* already terminal */ }
       }
+      // Audit fix ("错误设置发生在快照之后"): `run()`'s `finally` persists the
+      // snapshot BEFORE the exception reaches this catch, so the persisted
+      // tasks.json still showed the pre-error record (state Running, no error)
+      // and the pinned error detail was lost on restart. `transition()` only
+      // mutates + emits — it never persists — so re-persist here, AFTER the
+      // error and terminal state are final, to get them into tasks.json. The
+      // D-163 fingerprint covers `error.code` and `updatedAt`, so this second
+      // attempt really writes instead of being skipped as a no-op. Best
+      // effort: a failing snapshot write must not mask the original error.
+      try { await this.persistSnapshot(); } catch { /* best effort */ }
     }
   }
 
@@ -535,12 +545,14 @@ export class TaskQueue implements ITaskQueue {
       // (`Canceled -> Completed`), which is what produced the UNKNOWN error.
       if (this.canceledMeanwhile(record)) {
         // D-209 (取消即终态、不写历史): a cancel that landed while history.add()
-        // was awaiting may already have PERSISTED the row — add() updates the
-        // store's in-memory list before awaiting its write queue. Leaving it
-        // behind turns the canceled task into a successful history entry, so
-        // compensate by removing exactly this row WITHOUT `deleteFile` (the
-        // media files belong to the user; a cancel never deletes them). A
-        // duplicate (added === false) wrote nothing and needs no compensation.
+        // was awaiting may already have PERSISTED the row — add() persists the
+        // would-be state first and commits memory only after the write
+        // succeeds, so by the time `added === true` the row is on disk AND in
+        // memory. Leaving it behind turns the canceled task into a successful
+        // history entry, so compensate by removing exactly this row WITHOUT
+        // `deleteFile` (the media files belong to the user; a cancel never
+        // deletes them). A duplicate (added === false) wrote nothing and needs
+        // no compensation.
         // The removal failure is deliberately NOT swallowed: a leftover row is
         // the real state, so the error must surface via runSafely (which pins
         // the reason on the record; the state stays Canceled because the

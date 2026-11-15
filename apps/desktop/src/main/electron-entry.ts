@@ -582,6 +582,18 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
 
   // Delivery report 五-1: forward the tray-failure log to the real Logger once
   // createHost has built it; console fallback before that (and in unit tests).
+  //
+  // Post-D-220 review audit: the real Logger's error/warn/info return
+  // `Promise<void>` whose rejection (Logger -> logSink.appendJsonl: disk full,
+  // locked file, ...) used to escape as an UNHANDLED REJECTION and the record
+  // was lost anyway; a partial/fake Logger that throws synchronously would
+  // abort the caller outright. Design tradeoff: a log line is never worth a
+  // crash — losing this one record and printing a console hint is strictly
+  // better than breaking the start-up / tray path the log call is only a
+  // bystander to. The console summary carries ONLY scope, message and the
+  // sink's own error message: `fields` is deliberately NOT re-printed, since
+  // it can hold paths and other sensitive context that is only safe after the
+  // Logger's redact pipeline — which, in this failure mode, never ran.
   function forwardLog(
     level: 'error' | 'warn' | 'info',
     scope: string,
@@ -593,7 +605,18 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       console[level](`[${scope}]`, message, fields ?? '');
       return;
     }
-    void target[level](scope, message, fields);
+    try {
+      void Promise.resolve(target[level](scope, message, fields)).catch((cause: unknown) => {
+        console.error('[log] sink failure:', {
+          scope, message, reason: cause instanceof Error ? cause.message : String(cause),
+        });
+      });
+    } catch (cause: unknown) {
+      // Same minimal summary for a synchronous throw from the logger itself.
+      console.error('[log] sink failure:', {
+        scope, message, reason: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
   }
 
   const handle = await bootstrap(electronSurface(), {

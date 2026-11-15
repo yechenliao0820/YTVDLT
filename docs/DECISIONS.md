@@ -2380,3 +2380,32 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① `TrashFilesPort.trash` 增加可选第二参数 `roots?`（append-only 可选参数契约；该接口实际定义在 `m5-channels.ts`，shared/ports.ts 无此接口——审计外勘误）；② 执行器每批解析一次 `canonicalContainmentRoots`（D-208 短名别名同预检），每个条目在 stat 探测通过后、**紧贴 `trashItem` 前**逐条 realpath 重校验：根外 → error 拒收不调 trashItem；ENOENT/ENOTDIR → 既有 missing 幂等语义（不双报）；EACCES/ELOOP 等 → fail-closed；**空 roots 显式 fail-closed**（挡住 `isPathInsideRoots` 对空 roots 的 fail-open 设计）；roots 缺省 → 逐字节走旧路径（兼容旧调用方）；③ 两处生产调用方接线（withFiles 用该请求 trusted roots、字幕回收用 trustedArtifactRoots）；预检门本身一行未动，执行器复检是第二道线。 |
 | 验证 | `local-file-status-adapter.test.ts` 新增 8 用例（竞态拦截 trashItem 零调用 / ENOENT 幂等 / EACCES fail-closed / 根内不误伤 / 短名别名 / 混合批次 / 不传 roots 则 realpath 不被调用 / 空 roots fail-closed），17 passed；调用方回归 m5-channels + subtitle-discard + task-removal + queue-delete + restore-chain 共 116 passed；能力门既有 skip 保持原样。 |
 | 未覆盖 | realpath 与 trashItem 仍是两次独立路径级调用，竞态窗口从「预检后任意时刻」收窄到「相邻系统调用间的微秒级间隙」，用户态无法归零（需句柄级回收语义，Electron `shell.trashItem` 不提供）——已在代码内诚实注释；真实 junction 竞态未实测（§10 既登记）。 |
+
+## D-222 · 2026-11-15 · 历史提交串行化：persist-first commit-after（外部审计复核 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-218 交付后的复核审计发现、主控核实：① `history-store.add()` 先改内存再持久化——持久化失败时 add 向上抛，D-218 的补偿删除**不可达**，残留行被写队列后续任务的 persist 冲到磁盘（Canceled 卡片 + 落盘成功行，比 D-218 修的窗口更糟）；② `remove()` 同构——持久化失败时内存已删、磁盘还在（内存/磁盘分歧）；③ `runSafely` 在 `run()` 的 finally（persistSnapshot）**之后**才钉 `record.error`，错误细节不落 tasks.json。 |
+| 根因 | 内存提交与持久化是两步、内存先行：失败路径没有任何回滚，而写队列的后续任务序列化的是**当前**内存（含残留）；快照在错误钉住之前持久化是 `run()`→`finally`→`runSafely` 的控制流顺序所致。 |
+| 决策 | ① **persist-first commit-after**：`add()`/`remove()`/`importJson()`（importJson 与 add 是同一缺陷类，顺手同模式改造）的「读-去重-构建 next-持久化-提交」整体移入写队列任务内；`persist(payload)` 序列化**将要变成的状态**，成功才 `this.entries = next`——失败时内存零变更、磁盘零变更（writeTextAtomic 原子写不留半截文件），**失败路径没有回滚代码**（不存在需要回滚的内存变更，天然规避审计警告的「恢复旧数组覆盖并发记录」）；写队列本身串行，队列内读-改-持久化-提交即原子；`enqueue<T>` 泛型化透传返回值（链延续 `next.then(()=>undefined,()=>undefined)`，调用方拿原始 reject）。② `runSafely` catch 钉错误 + transition 后追加 best-effort `persistSnapshot()`（已核实 `transition()` 不持久化，现状确实漏；与 finally 的持久化严格先后、TaskStore.save 内部队列按调用序串行，无竞态）。 |
+| 验证 | history-store.test.ts +3（add 失败无残留且磁盘干净 / remove 失败双侧不动+重试一致 / 并发 add 双落盘）；task-queue.test.ts +1（错误进持久化快照）；**stash 红→绿验证**（还原 src 修复恰 4 新用例失败）；D-218 窗口 A/B 零回归；独立校验员动态验证并发 5 add 同 dedupe key 恰 1 added 4 duplicate、交错失败+成功无残留。全量 2821 passed / 0 failed。 |
+| 未覆盖 | history-store `init()` 的 loaded 短路使新库第二个写入可能先于首个 init 入队（队列仍串行自愈、旧代码行为完全相同、生产不可达）——校验员记录在案不改；错误钉住后的重持久化若磁盘仍故障则错误细节仍只在内存（best-effort 上限，原错误不被遮蔽）。 |
+
+## D-223 · 2026-11-15 · 回收站执行期绑定预检确认的信任根（外部审计复核 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-221 交付后的复核审计发现、主控核实：`trash()` 执行期**现算** canonical roots——输出根本身在预检后、执行前被替换（换 junction 指向别处）时，复检会顺着**新身份**重新判「根内」，预检确认的信任基线与执行阶段脱钩。 |
+| 决策 | ① `TrashPreflightVerdict` ok 变体新增可选 `verificationRoots`（append-only，refused 不带）；② `TrashFilesPort.trash` 追加可选第三参 `expectedCanonicalRoots`：提供时用**同一原语**（`canonicalContainmentRoots`）从同一字符串根重推导并与预检基线**双向集合比对**——出现预检未记录的新解析（根被换身份）→ 整批拒绝、trashItem 零调用；记录中的已确认别名不再可推导 → 按 errno 诊断（ENOENT/ENOTDIR 拒、EACCES/ELOOP fail-closed）；绑定的基线根同时用于逐条复检。③ 两处生产调用链全部绑定（withFiles 从裁决取、字幕回收闭包本就持有裁决——审计前假设回收链拿不到裁决，与现实不符，如实接线）。 |
+| 关键替代 | 字面实现「根 realpath ENOENT → 整批拒」会**误拒合法批次**：真实 withFiles 用例的 `tempDir` 预检时可能尚未建盘（canonical 按语义保留字符串形态）→ 实测撞红既有用例。改为基线比对语义后，同身份的良性创建（tempDir 被 mkdir）不拒；校验员以真实文件系统 junction 对抗实验验证：稳态无误拒、换根拒绝、未建盘根预检后被指别处拒绝、junction 重定向旧目标存活拒绝——全部 trashItem 零调用。 |
+| 验证 | local-file-status-adapter.test.ts +15 用例（含 refused 不带 verificationRoots、append-only 旧 fake 旧行为钉死）；既有 D-221 8 用例零回归；调用方回归 74 + 15 passed；独立校验员实盘 junction 五场景对抗通过。 |
+| 未覆盖 | 「预检后换根→换回原身份再回收」仍只剩 realpath→trashItem 微秒级窗口（代码明文登记的既有残余，本修复不弱化也不宣称消除）；被 D-209 丢弃别名的根在基线比对中不可见（条目级复检仍守每一条目）。 |
+
+## D-224 · 2026-11-15 · 托盘异常分支加固：日志 sink 双保险 + 半成品清理（外部审计复核 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-220 交付后的复核审计点名两个未验证分支：① `forwardLog` 用 `void` 转发——JSONL sink 抛出/拒绝时 unhandled rejection 且丢日志；② `buildTray` 中途抛错（构造成功后 menu/tooltip 失败）→ 半成品 Tray 无人销毁，exe 重试可能产生双图标。 |
+| 决策 | ① `forwardLog`（electron-entry）与 `logTrayFailure`（bootstrap，可测接缝——electron-entry 顶层 import 真 electron 不可被 vitest 导入）同款双保险：同步 throw 走 try/catch、异步拒绝走 `Promise.resolve(...).catch(...)`，console 兜底摘要**不含 fields**（未经 redact 管道，泄漏面关闭）；日志失败宁丢一条绝不影响启动/托盘。② `buildTray` 构造成功后的全部步骤包进 try/catch：失败先 guard `tray.destroy()`（destroy 再抛被吞、不覆盖原错误）再**重抛原错误**——exe 重试面对干净状态，无双图标；`createTrayWithFallback`/`logTrayFailure`/D-60 兜底语义未动。 |
+| 验证 | bootstrap.test.ts +4 用例（sink 拒绝型 + 同步抛型：无 unhandled rejection、console 摘要无 fields 泄漏、D-60 不变；中途失败：trayDestroyed 恰 1 + 重试成功 + 原错误入日志；destroy 再抛：三连 guard 不阻断）；bootstrap 29 条全绿；独立校验员确认两分支被真实用例钉住。 |
+| 未覆盖 | 真机托盘根因本身仍待新构建复现（D-220 既登记）；两条 P4 观察项维持登记（buildTray 构造器成功后 destroy 失败的极端三重故障、forwardLog 丢条不重试的设计取舍）。 |

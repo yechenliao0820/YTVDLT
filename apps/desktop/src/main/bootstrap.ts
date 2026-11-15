@@ -141,6 +141,12 @@ export interface ElectronLike {
  * without any adapter; the `void` returns keep every call fire-and-forget here
  * — a broken log sink must never abort start-up — while the real Logger's
  * `Promise<void>` returns stay structurally assignable.
+ *
+ * That "never abort start-up" promise is ENFORCED at the call site, not
+ * assumed from the types: `logTrayFailure` guards both a synchronous throw and
+ * a rejected-promise return, degrading to a minimal console.error (post-D-220
+ * review audit — the same contract electron-entry's `forwardLog` upholds for
+ * the real Logger). Unit-tested with a rejecting and a throwing fake.
  */
 export interface TrayLogger {
   error(scope: string, message: string, fields?: Record<string, unknown>): void;
@@ -615,23 +621,38 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
   // resource (the same fallback `main.ts` already uses for the window icon).
   function buildTray(iconPath: string): TrayLike {
     const instance = new Tray(iconPath);
-    const template: MenuItemLike[] = buildTrayMenu(stats()).map((item) => ({
-      ...(item.type === 'separator' ? {} : { id: item.id }),
-      label: item.label,
-      type: item.type,
-      enabled: item.enabled,
-      ...(item.id === 'show' ? { click: () => { window.show(); window.focus(); } } : {}),
-      ...(item.id === 'quit' ? {
-        click: () => {
-          if (!canQuit(stats())) return;
-          quitting = true;
-          app.quit();
-        },
-      } : {}),
-    }));
-    instance.setToolTip(trayTooltip(stats()));
-    instance.setContextMenu(Menu.buildFromTemplate(template));
-    return instance;
+    try {
+      const template: MenuItemLike[] = buildTrayMenu(stats()).map((item) => ({
+        ...(item.type === 'separator' ? {} : { id: item.id }),
+        label: item.label,
+        type: item.type,
+        enabled: item.enabled,
+        ...(item.id === 'show' ? { click: () => { window.show(); window.focus(); } } : {}),
+        ...(item.id === 'quit' ? {
+          click: () => {
+            if (!canQuit(stats())) return;
+            quitting = true;
+            app.quit();
+          },
+        } : {}),
+      }));
+      instance.setToolTip(trayTooltip(stats()));
+      instance.setContextMenu(Menu.buildFromTemplate(template));
+      return instance;
+    } catch (error) {
+      // Post-D-220 review audit: a failure AFTER the constructor (menu
+      // mapping / setToolTip / setContextMenu) must not leak the half-built
+      // native Tray — the exe retry in `createTrayWithFallback` would
+      // otherwise run next to a live orphan and produce a SECOND tray icon.
+      // destroy() is itself guarded: a dying Tray may throw again, and that
+      // secondary error must neither escape nor replace the original one.
+      try {
+        instance.destroy();
+      } catch {
+        // Nothing further to clean; the original error below is what matters.
+      }
+      throw error;
+    }
   }
   /** One log line per failed attempt — never silent, never fatal. */
   function logTrayFailure(attempt: 'icon' | 'exe', error: unknown): void {
@@ -640,7 +661,26 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
       console.error('[tray] creation failed:', { attempt, detail });
       return;
     }
-    options.logger.error('tray', 'tray creation failed', { attempt, detail });
+    // Post-D-220 review audit: the injected logger is fire-and-forget by
+    // contract, but a broken sink (rejected-promise return) or a throwing
+    // fake must not turn the log call itself into an unhandled rejection or
+    // abort the tray fallback. Same tradeoff as electron-entry's forwardLog:
+    // drop the record and print a MINIMAL console hint — scope, message and
+    // the sink's own error message only. `fields` (here the tray error detail
+    // with its stack) is never re-printed to console.
+    const reportSinkFailure = (cause: unknown): void => {
+      console.error('[log] sink failure:', {
+        scope: 'tray',
+        message: 'tray creation failed',
+        reason: cause instanceof Error ? cause.message : String(cause),
+      });
+    };
+    try {
+      const reported: unknown = options.logger.error('tray', 'tray creation failed', { attempt, detail });
+      void Promise.resolve(reported).catch(reportSinkFailure);
+    } catch (cause) {
+      reportSinkFailure(cause);
+    }
   }
   function createTrayWithFallback(): TrayLike | null {
     try {

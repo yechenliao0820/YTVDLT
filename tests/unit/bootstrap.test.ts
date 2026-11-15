@@ -56,6 +56,18 @@ function fakeElectron(options: {
    * path as `trayIconPath`.
    */
   trayIconFails?: boolean;
+  /**
+   * Post-D-220 review audit: the icon-path Tray constructor SUCCEEDS but a
+   * later buildTray step (`setContextMenu`) throws — the "half-built tray"
+   * scenario. Non-icon paths behave like FakeTray, so the exe retry wins.
+   */
+  trayIconBreaksLater?: boolean;
+  /**
+   * With `trayIconBreaksLater`: the half-built tray's destroy() ALSO throws —
+   * the triple-guard scenario (attempt fails -> cleanup fails -> the retry
+   * must still go on, with no unhandled rejection).
+   */
+  laterBreakDestroyThrows?: boolean;
 } = {}): Harness {
   const log: Harness['log'] = {
     quit: 0, handlers: [], windows: [], urls: [], trayToolTip: [], trayMenus: [],
@@ -103,6 +115,23 @@ function fakeElectron(options: {
     destroy(): void { log.trayDestroyed += 1; }
   }
 
+  /**
+   * Post-D-220 review audit: constructed fine, dies halfway through the
+   * buildTray follow-ups. `setToolTip` works (the attempt really got halfway,
+   * like a real native Tray would), `setContextMenu` throws, and — when
+   * `laterBreakDestroyThrows` is set — even `destroy()` throws, exercising the
+   * guarded-destroy path in `buildTray`.
+   */
+  class HalfBrokenTray implements TrayLike {
+    setToolTip(text: string): void { log.trayToolTip.push(text); }
+    setContextMenu(_menu: unknown): void { throw new Error('tray context menu exploded'); }
+    on(): void { /* no-op */ }
+    destroy(): void {
+      if (options.laterBreakDestroyThrows === true) throw new Error('tray destroy exploded');
+      log.trayDestroyed += 1;
+    }
+  }
+
   const electron: ElectronLike = {
     app: {
       whenReady: async () => {},
@@ -132,7 +161,11 @@ function fakeElectron(options: {
             if (/\.ico$/i.test(iconPath)) throw new Error('packaged icon path rejected');
             return new FakeTray();
           }
-        : FakeTray) as unknown as ElectronLike['Tray'],
+        : options.trayIconBreaksLater === true
+          ? function HalfBrokenTrayFactory(iconPath: string): TrayLike {
+              return /\.ico$/i.test(iconPath) ? new HalfBrokenTray() : new FakeTray();
+            }
+          : FakeTray) as unknown as ElectronLike['Tray'],
     Menu: {
       buildFromTemplate: (template: readonly MenuItemLike[]) => Object.assign([...template], {
         popup: () => { log.contextMenus.push([...template]); },
@@ -486,6 +519,153 @@ describe('bootstrap · tray fallback + failure logging (delivery report 五-1)',
       detail: expect.stringContaining('tray unavailable'),
     });
     handle?.dispose();
+  });
+
+  // Post-D-220 review audit — 用例 2: the tray constructor succeeds but a
+  // LATER buildTray step throws. The half-built instance must be destroyed
+  // before the error reaches `createTrayWithFallback`, so the exe retry runs
+  // against a clean slate instead of leaving a second tray icon behind.
+  it('destroys the half-built tray when a post-construction step throws, and the exe retry still succeeds', async () => {
+    const { electron, log } = fakeElectron({ trayIconBreaksLater: true });
+    const { host } = fakeHost();
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
+    const handle = await bootstrap(electron, {
+      ...baseOptions,
+      // `.ico` again: the fake makes exactly that shape reach the constructor
+      // and THEN fail inside `setContextMenu` — after `new Tray()` succeeded.
+      trayIconPath: 'C:/app/tray.ico',
+      createHost: async () => host,
+      logger,
+    });
+    // The icon attempt got halfway (tooltip installed), then died on the menu;
+    // the exe retry delivered a complete tray.
+    expect(log.trayToolTip).toHaveLength(2);
+    expect(log.trayMenus).toHaveLength(1);
+    expect(handle?.tray).not.toBeNull();
+    // The half-built instance was destroyed EXACTLY once (no leaked icon, no
+    // double icon); dispose() then destroys the live (exe) tray on top of it.
+    expect(log.trayDestroyed).toBe(1);
+    handle?.dispose();
+    expect(log.trayDestroyed).toBe(2);
+    // The ORIGINAL post-construction error reached the logger as the 'icon'
+    // attempt — the fallback flow and its per-attempt logging are unchanged.
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith('tray', 'tray creation failed', {
+      attempt: 'icon',
+      detail: expect.stringContaining('tray context menu exploded'),
+    });
+  });
+
+  // Post-D-220 review audit — 用例 3: even the cleanup itself fails. The
+  // destroy() guard must swallow the secondary throw and re-raise the ORIGINAL
+  // error, so the retry/fallback flow continues and nothing becomes an
+  // unhandled rejection (vitest fails the run when one escapes).
+  it('a half-built tray whose destroy() also throws still flows into the exe retry without an unhandled rejection', async () => {
+    const { electron, log } = fakeElectron({ trayIconBreaksLater: true, laterBreakDestroyThrows: true });
+    const { host } = fakeHost();
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
+    const handle = await bootstrap(electron, {
+      ...baseOptions,
+      trayIconPath: 'C:/app/tray.ico',
+      createHost: async () => host,
+      logger,
+    });
+    // The guarded destroy swallowed the secondary throw; the retry ran and
+    // bootstrap completed with a working (exe-built) tray.
+    expect(handle).not.toBeNull();
+    expect(log.trayMenus).toHaveLength(1);
+    // The ORIGINAL error — not the destroy failure — is what got logged.
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith('tray', 'tray creation failed', {
+      attempt: 'icon',
+      detail: expect.stringContaining('tray context menu exploded'),
+    });
+    // The doomed half-built tray could not be destroyed (its destroy throws
+    // before counting), so only the live exe tray is destroyed on dispose.
+    handle?.dispose();
+    expect(log.trayDestroyed).toBe(1);
+  });
+});
+
+// Post-D-220 review audit — 用例 1: the injected logger is the seam the audit
+// named ("日志异步失败"). electron-entry's `forwardLog` is module-internal and
+// its file imports the real `electron` binary, so it is not unit-testable here
+// (D-39); the SAME never-throw contract is enforced bootstrap-side in
+// `logTrayFailure` and pinned by these two tests — a rejected promise (the
+// real Logger -> JSONL sink failure mode) and a synchronous throw (a broken
+// fake). Vitest fails the whole run on any unhandled rejection, so these
+// tests staying green IS the no-unhandled-rejection assertion.
+describe('bootstrap · logger sink failure never breaks start-up (post-D-220 review)', () => {
+  it('a logger whose error() returns a rejected promise: bootstrap completes and console gets a minimal hint', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { electron, log } = fakeElectron({ trayFails: true });
+      const { host } = fakeHost();
+      // The JSONL-sink failure mode: the call itself "succeeds" but returns a
+      // promise that rejects (Logger.error -> logSink.appendJsonl rejected).
+      const logger = {
+        error: vi.fn(() => Promise.reject(new Error('jsonl sink rejected'))),
+        warn: vi.fn(),
+        info: vi.fn(),
+      };
+      const handle = await bootstrap(electron, {
+        ...baseOptions,
+        createHost: async () => host,
+        logger,
+      });
+      expect(handle).not.toBeNull();
+      // Both failed tray attempts were reported through the broken sink...
+      expect(logger.error).toHaveBeenCalledTimes(2);
+      // ...and each degraded to the console fallback: minimal summary only.
+      expect(consoleError).toHaveBeenCalledTimes(2);
+      expect(consoleError).toHaveBeenCalledWith('[log] sink failure:', expect.objectContaining({
+        scope: 'tray',
+        message: 'tray creation failed',
+        reason: 'jsonl sink rejected',
+      }));
+      // The fields object (attempt + the tray error detail with its stack) is
+      // NOT re-printed: console only ever sees the minimal summary.
+      const printed = JSON.stringify(consoleError.mock.calls);
+      expect(printed).not.toContain('"attempt"');
+      expect(printed).not.toContain('tray unavailable');
+      // The D-60 fallback semantics are untouched by the broken logger:
+      // no tray -> close NOT prevented -> the real close quits.
+      expect(emitClose(log)).toBe(false);
+      expect(log.hidden).toBe(0);
+      expect(log.quit).toBe(1);
+      handle?.dispose();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('a logger whose error() throws synchronously: bootstrap still completes and degrades to console', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { electron, log } = fakeElectron({ trayFails: true });
+      const { host } = fakeHost();
+      const logger = {
+        error: vi.fn(() => { throw new Error('logger exploded synchronously'); }),
+        warn: vi.fn(),
+        info: vi.fn(),
+      };
+      const handle = await bootstrap(electron, {
+        ...baseOptions,
+        createHost: async () => host,
+        logger,
+      });
+      expect(handle).not.toBeNull();
+      expect(logger.error).toHaveBeenCalledTimes(2);
+      expect(consoleError).toHaveBeenCalledTimes(2);
+      expect(consoleError).toHaveBeenCalledWith('[log] sink failure:', expect.objectContaining({
+        scope: 'tray',
+        message: 'tray creation failed',
+        reason: 'logger exploded synchronously',
+      }));
+      handle?.dispose();
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });
 

@@ -8,7 +8,7 @@ import {
   LEGAL_TRANSITIONS, IllegalTaskTransitionError, TaskQueue, HistoryStore, TaskStore,
 } from '@ytvdlt/core';
 import type {
-  DownloadEngine, EngineEvent, DownloadRequest, HistoryEntry, MediaInfo, TaskRecord,
+  DownloadEngine, EngineEvent, DownloadRequest, HistoryEntry, HistoryQuery, MediaInfo, TaskRecord,
 } from '@ytvdlt/shared';
 import { createInMemoryPorts } from './helpers/in-memory-ports.js';
 
@@ -660,6 +660,66 @@ describe('T2 · persistSnapshot failure is visible but never fatal', () => {
     await tick();
     expect(queue.get('t2')?.state).toBe('Completed');
     expect(warnings(mem)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Audit fix (D-218 复核) · "错误设置发生在快照之后" — a run whose EXCEPTION is
+// pinned by `runSafely` must reach the PERSISTED snapshot. Old sequencing:
+// `run()`'s `finally` (persistSnapshot + pump) executed BEFORE the exception
+// arrived in `runSafely`'s catch, so tasks.json still carried the pre-error
+// record (Running, no error) and the pinned detail was lost on restart.
+// `transition()` never persists (it only mutates + emits), so `runSafely` now
+// re-persists once AFTER the error and terminal state are final.
+// ---------------------------------------------------------------------------
+describe('audit · an error pinned by runSafely reaches the persisted snapshot', () => {
+  it('a throwing history.add() lands the task as Error and the error IS in tasks.json', async () => {
+    const mem = createInMemoryPorts();
+    mem.state.files.set(PRIMARY, 'video-bytes');
+    mem.state.files.set(artifactFor('t1'), 'video-bytes');
+    const engineState = newEngineState('completed');
+    const history = new HistoryStore({ ports: mem.ports });
+    // Gate fake: `add` throws while the flag is set, everything else delegates.
+    let failAdd = false;
+    const gatedHistory = {
+      init: (): Promise<void> => history.init(),
+      add: async (entry: HistoryEntry, opts?: { privateMode?: boolean }) => {
+        if (failAdd) throw new Error('simulated history failure');
+        return history.add(entry, opts);
+      },
+      query: (q: HistoryQuery) => history.query(q),
+      get: (id: string) => history.get(id),
+      remove: (id: string, opts?: { deleteFile?: boolean }) => history.remove(id, opts),
+      exportJson: (): Promise<string> => history.exportJson(),
+      importJson: (json: string): Promise<number> => history.importJson(json),
+    };
+    const queue = new TaskQueue({
+      ports: mem.ports, engine: fakeEngine(engineState), verifier: okVerifier(),
+      history: gatedHistory, jsRuntimePath: 'C:/runtime/node.exe',
+      // Wire a store so the snapshot actually lands in the in-memory "disk".
+      taskStore: new TaskStore({ ports: mem.ports }),
+    });
+
+    failAdd = true;
+    await queue.enqueue(record('t1'));
+    await tick();
+
+    // The in-memory record carries the pinned error...
+    const task = queue.get('t1');
+    expect(task?.state).toBe('Error');
+    expect(task?.error).not.toBeNull();
+    expect(task?.error?.detail).toContain('simulated history failure');
+
+    // ...and so does the PERSISTED tasks.json (the restart-survivable copy).
+    const raw = mem.state.files.get(`${mem.ports.env.configDir()}/tasks.json`);
+    expect(raw).toBeDefined();
+    const persisted = JSON.parse(raw as string) as {
+      tasks: Array<{ id: string; state: string; error: { detail: string } | null }>;
+    };
+    const persistedTask = persisted.tasks.find((candidate) => candidate.id === 't1');
+    expect(persistedTask?.state).toBe('Error');
+    expect(persistedTask?.error).not.toBeNull();
+    expect(persistedTask?.error?.detail).toContain('simulated history failure');
   });
 });
 

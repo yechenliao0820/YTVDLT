@@ -158,9 +158,25 @@ export interface TrashFileOutcome {
  *                 WHOLE batch is refused: the recycle bin is never called,
  *                 the record is kept, `reason` carries the real cause and
  *                 `refusedCount` the honest offender count.
+ *
+ * `verificationRoots` (optional, append-only, carried on `ok` only): the
+ * EXACT canonical roots (`canonicalContainmentRoots` output) this verdict was
+ * judged against. The caller passes them back to `trash()` as its third
+ * argument so the executor binds to the roots the pre-flight CONFIRMED
+ * instead of re-deriving them at execution time — if an output root itself is
+ * swapped between the two calls (e.g. replaced by a junction pointing
+ * elsewhere), re-deriving would silently judge against the NEW identity
+ * (trust-baseline drift); binding turns that into a whole-batch refusal.
+ * Absent on `refused` (nothing may execute anyway) and on legacy fakes that
+ * predate the field; `trash()` keeps its previous behaviour when it is
+ * omitted.
  */
 export type TrashPreflightVerdict =
-  | { readonly kind: 'ok'; readonly missingPaths: readonly string[] }
+  | {
+    readonly kind: 'ok';
+    readonly missingPaths: readonly string[];
+    readonly verificationRoots?: readonly string[];
+  }
   | { readonly kind: 'refused'; readonly reason: string; readonly refusedCount: number };
 
 export interface TrashFilesPort {
@@ -173,8 +189,24 @@ export interface TrashFilesPort {
    * attacker with write access to an output directory can swap a path (or a
    * middle component) for a junction pointing elsewhere. Omitted (undefined)
    * by legacy callers, which keep their exact previous behaviour.
+   *
+   * `expectedCanonicalRoots` (optional third parameter, append-only — D-221
+   * re-audit): the `verificationRoots` carried by the pre-flight's `ok`
+   * verdict, passed back verbatim. When provided, the adapter FIRST re-resolves
+   * every bound root through `realpath` and refuses the WHOLE batch (every
+   * entry `error`, zero `trashItem` calls) when a root's resolution no longer
+   * matches the recorded identity (root swapped for a junction pointing
+   * elsewhere), the root is gone/dangling (ENOENT/ENOTDIR), or the resolution
+   * fails for any other reason (EACCES/ELOOP → fail-closed). The per-entry
+   * re-validation then judges against these pre-flight-confirmed roots, NOT
+   * against roots re-derived at execution time. Omitted → previous behaviour
+   * (canonical roots re-derived from `roots` at execution time).
    */
-  trash(paths: readonly string[], roots?: readonly string[]): Promise<readonly (string | TrashFileOutcome)[]>;
+  trash(
+    paths: readonly string[],
+    roots?: readonly string[],
+    expectedCanonicalRoots?: readonly string[],
+  ): Promise<readonly (string | TrashFileOutcome)[]>;
   /**
    * D-207 (optional, additive): pre-flight the WHOLE batch BEFORE `trash()`.
    *
@@ -1148,6 +1180,15 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
       const preflight = deps.trashFiles.preflight;
       let trashTargets = eligible;
       let preflightMissing: readonly string[] = [];
+      // D-221 re-audit · root binding: the canonical roots the pre-flight
+      // CONFIRMED travel with the verdict (`verificationRoots`) and go into the
+      // executor call unchanged. `trash()` then verifies each bound root's
+      // identity before anything destructive and judges the per-entry
+      // re-validation against THESE roots — a root swapped between the two
+      // calls is refused wholesale instead of silently re-judged under its new
+      // identity. `undefined` for ports without `preflight` (legacy fakes) or
+      // verdicts without the field → previous executor behaviour.
+      let boundVerificationRoots: readonly string[] | undefined;
       if (preflight !== undefined) {
         const verdict = await preflight(eligible, removalRoots);
         if (verdict.kind === 'refused') {
@@ -1159,15 +1200,18 @@ export function createM5Handlers(deps: M5ChannelDeps): Map<string, (payload: unk
           };
         }
         preflightMissing = verdict.missingPaths;
+        boundVerificationRoots = verdict.verificationRoots;
         if (verdict.missingPaths.length > 0) {
           const gone = new Set(verdict.missingPaths);
           trashTargets = eligible.filter((path) => !gone.has(path));
         }
       }
-      // D-207 backstop: the SAME trusted roots the pre-flight gated on go into
-      // the executor call, so `trash()` re-validates every entry's realpath
+      // D-207 backstop: the pre-flight-bound trusted roots go into the
+      // executor call, so `trash()` re-validates every entry's realpath
       // immediately before `trashItem` (the pre-flight→trash swap-in window).
-      const outcomes = normalizeTrashOutcomes(await deps.trashFiles.trash(trashTargets, removalRoots));
+      const outcomes = normalizeTrashOutcomes(
+        await deps.trashFiles.trash(trashTargets, removalRoots, boundVerificationRoots),
+      );
       // A D-87 adapter replies with only the paths it handled. A short reply is
       // a partial failure and must keep the record (existing contract).
       if (outcomes.length < trashTargets.length) {
