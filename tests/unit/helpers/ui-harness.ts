@@ -134,6 +134,16 @@ export function uiNode(tagName = 'div'): UiNode {
         : (c.attrs[key] ?? c.dataset[key.replace(/^data-/i, '').replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())]) === value);
     },
   };
+  // Mirror real DOM: `el.className = x` also makes `getAttribute('class')`
+  // work (same fidelity rule as queue-page-harness's FakeNode).
+  let classNameValue = '';
+  Object.defineProperty(node, 'className', {
+    get: () => classNameValue,
+    set: (value: unknown) => {
+      classNameValue = String(value);
+      node.attrs['class'] = classNameValue;
+    },
+  });
   return node;
 }
 

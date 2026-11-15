@@ -2332,3 +2332,13 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 两处 `switchLocale` 改用 `URLSearchParams` 重建 query（`set('lang')` / `delete('lang')`，其余参数原样保留，与 `app-nav.pageUrl()` 同一风格），不再用会吞分隔符的正则；`settings.js` 保留 D-114 的 `?v=` 版本回补语义；两者都保留无 `URLSearchParams` 环境的 append-only 回退。副产物：重建会剥掉 hash（app-nav.pageUrl 本就如此，页面不用 hash 存状态）。 |
 | 验证 | 新增回归用例：队列页与设置页各一条「lang 位于 query 首位」断言（旧实现产出 `…index.html&v=…` 即红）；ui-harness 假 window 补上真实渲染器必有的 `URLSearchParams`；queue D-85 用例开头把假 location 置成一致状态（真实浏览器 search 恒是 href 的一部分，旧假件 href/search desync 不再被新实现读到）。`typecheck` 5/5；全量 `npm test` 168 文件 / 2783 passed / 5 skipped / 0 failed；e2e 31/31 + 反例 5/5 全 PASS（0 px，静态基线零改动）。 |
 | 未覆盖 | 真机路径「设置页切语言 → 顶栏返回 → 队列页切语言」与反向（顶栏往返后设置页语言键）待业主用新构建复测；打包需业主点名（铁律 9）。 |
+
+## D-217 · 2026-11-15 · 全屏切换「卡住一帧」→ 主题色过渡遮罩（live-only 动画）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主真机：点右上角全屏按钮后先原地卡顿约 0.1 s（此时窗口已是全屏尺寸，旧帧定格拉伸），页面随后才重排放大自适应，观感像「先冻住再猛跳」。 |
+| 根因 | D-106 全屏唯一真相链（渲染层按钮 → `WINDOW_FULLSCREEN` → `setFullScreen` → enter/leave 推送）本身正确；卡顿是 **OS 级窗口翻转与渲染层重排重绘之间的间隙**——`setFullScreen` 立即改变窗口尺寸，Chromium 需要按 layout.css 的 `--ui-step` 全套响应式覆盖在冻结的 1280×800 画布（ytvdlt.css，M3 基线设计）之上整体重排首帧。JS 层无法消除这次重排本身。 |
+| 决策 | 渲染层加 **live-only 过渡遮罩**，把「冻住」变成一次有意的平滑过渡：① `shell/app-nav.js` 在真实全屏变化时向 `body` 挂主题色遮罩（layout.css `.ytv-fs-veil`，`position:fixed; inset:0; background:var(--bg)`），先 240 ms 不透明盖住重排帧、再 180 ms 淡出后从 DOM 移除；② `requestFullscreen` 在 IPC 往返**之前**挂遮罩（点击 → 遮罩先起 → resize 发生在遮罩之下）；③ 主进程唯一推送端点 `setFullscreenState` 只在「真实变化 **且** 已完成基线同步」时挂——`did-finish-load` 的状态同步推送不算过渡，否则全屏状态下每次菜单跳页都会闪一层遮罩；④ 按钮标签仍只按权威应答/推送绘制（乐观绘制会让被拒绝的请求谎报窗口状态，已否决）；⑤ 点击预挂与推送挂载共用同一节点，重入只顺延计时绝不叠层；⑥ 遮罩纯装饰，全程 try/catch best-effort，任何失败静默跳过，全屏操作不依赖它。无桥（静态预览 / e2e）永不挂载 → 冻结基线零改动；`html[data-motion="reduced"]` 经 theme.css 全局 `transition:none` 自动退化为无动画的功能性盖板。测试侧：ui-harness 节点补 `className` 访问器（镜像真实 DOM 的 class 属性联动，queue-page-harness 同款先例），遮罩移除走 `body.removeChild` 而非 `parentNode`（坑 32）。 |
+| 验证 | ui-shell-family 新增 D-217 用例（挂载→淡出→移除、同值同步不挂、无桥不挂、遗留遮罩 600 ms 冲刷）；`typecheck`（ui 包）通过；全量 `npm test` 168 文件 / 2784 passed / 5 skipped / 0 failed（四维 92.04 / 86.71 / 93.78 / 92.04，门限 70）；e2e 31/31 + 反例 5/5 全 PASS（0 px）；`frozen-gate` PASS、`check-layering` 0 violations、`build-desktop` 重跑同步 dist。 |
+| 未覆盖 | 真机手感（0.1 s 卡顿是否被感知为平滑过渡）待业主用新构建确认，打包需业主点名（铁律 9）；240/180 ms 为首版参数，真机偏快/偏慢直接调 `app-nav.js` 的 `FS_VEIL_HOLD_MS` / `FS_VEIL_FADE_MS` 与 layout.css 的 transition 时长。 |
