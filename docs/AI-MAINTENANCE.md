@@ -483,6 +483,22 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
     直连」；`followRedirect()` 必须在 `redirect` 事件里同步调用，所以逐跳判定
     只能是纯函数，不能 await DNS。普通请求继续留在 D-143 的钉扎路径上。
 
+41. **`did-finish-load` 的监听必须注册在 `await loadURL()` 之前**（D-215）：
+    `loadURL` 的 promise 与该事件在同一次事件派发内完成，`await` 的续体要等
+    整个派发结束才执行——注册在 `await` 之后的监听器**永远错过首次加载**。
+    窗口是 `show: false` 时，症状是「启动不弹主窗、只能托盘唤出」（托盘 show
+    与 second-instance 走 `showWindow()`，不经过该监听器）。单测假件若不在
+    `loadURL` 内同步发事件、而是事后手动触发，必然假绿——坑 37 的教训在
+    事件时序上的变体：**假件必须复刻真实派发次序**。
+
+42. **用正则从 URL 里删 query 参数会吞分隔符，改 query 一律走 URLSearchParams 重建**（D-216）：
+    `[?&]lang=[^&]*` 在 `lang` 排第一（`?lang=en&v=…`，正是 `app-nav.pageUrl()`
+    保存跳转参数的形态）时把 `?` 一起吃掉，产出 `…index.html&v=…`——整个
+    `&v=…` 变成文件名，文件不存在，再被 `will-navigate` 信任门的 `\.html?$`
+    校验**静默拒绝**，用户看到的就是「按钮点了没反应」。同类写法（剥参数后
+    再按「有没有 `?`」拼分隔符）在参数顺序变化时全部不可靠；`app-nav.pageUrl`、
+    `queue.js` / `settings.js` 的 `switchLocale` 已统一为 set/delete 重建。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 

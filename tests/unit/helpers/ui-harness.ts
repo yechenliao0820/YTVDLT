@@ -276,6 +276,11 @@ export function installUiGlobals(options: UiGlobalsOptions = {}): UiGlobals {
       for (const fn of winListeners[type] ?? []) fn(event);
     },
     navigator: { userAgent: 'vitest-ui-harness', clipboard: undefined },
+    // Every real renderer (Electron 45 / headless Chrome) ships URLSearchParams,
+    // and page code calls `new global.URLSearchParams(...)` against this fake
+    // window (app-nav.pageUrl, queue/settings locale switch). Without it those
+    // paths silently take their no-URLSearchParams fallback in tests.
+    URLSearchParams: globalThis.URLSearchParams,
     requestAnimationFrame(cb: () => void): number {
       return setTimeout(() => cb(), 0) as unknown as number;
     },

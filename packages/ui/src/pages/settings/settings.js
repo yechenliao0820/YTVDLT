@@ -119,17 +119,31 @@
   /** Language needs a reload: `i18n.js` only translates forward (zh -> en). */
   function switchLocale(locale) {
     THEME_STATE.locale = locale;
-    var url = String(global.location.href).replace(/[?&]lang=[^&]*/g, '');
-    // D-114: keep the version hint across the reload. A reload does not lose
-    // the query by itself, but a page that arrived without `?v=` would stay
-    // without it — and then only the async APP_INFO call keeps the footer right.
-    if (!/[?&]v=/.test(url)) {
-      var registry = global.YTVDLTAppVersion;
-      var known = registry && typeof registry.query === 'function' ? registry.query() : '';
-      if (known !== '') url += (url.indexOf('?') === -1 ? '?' : '&') + 'v=' + known;
+    // D-215: rebuild the query with URLSearchParams instead of regex-stripping
+    // `lang`. The old `[?&]lang=[^&]*` pattern ate the leading `?` when `lang`
+    // was the FIRST parameter (the shape `app-nav.pageUrl()` saves on a page
+    // hop, `?lang=en&v=…`), leaving `…index.html&v=…` — a file name that does
+    // not exist, so the main-process navigation guard refused the reload and
+    // the language buttons went dead after one round trip through the queue.
+    var base = String(global.location.href).split('#')[0].split('?')[0];
+    var next = base;
+    try {
+      var params = new global.URLSearchParams(String(global.location.search || ''));
+      // D-114: keep the version hint across the reload. A reload does not lose
+      // the query by itself, but a page that arrived without `?v=` would stay
+      // without it — and then only the async APP_INFO call keeps the footer right.
+      if (!params.has('v')) {
+        var registry = global.YTVDLTAppVersion;
+        var known = registry && typeof registry.query === 'function' ? registry.query() : '';
+        if (known !== '') params.set('v', known);
+      }
+      if (locale !== 'zh-CN') params.set('lang', locale); else params.delete('lang');
+      var query = params.toString();
+      if (query !== '') next = base + '?' + query;
+    } catch (error) {
+      // No URLSearchParams: append-only fallback (the pre-D-215 zh->en path).
+      if (locale !== 'zh-CN') next = base + '?lang=' + encodeURIComponent(locale);
     }
-    var separator = url.indexOf('?') === -1 ? '?' : '&';
-    var next = locale === 'zh-CN' ? url : url + separator + 'lang=' + encodeURIComponent(locale);
     emit('language', locale);
     // D-85: `CONFIG_SET` is the M3 fixture channel and does not persist the
     // locale. Write the real setting as well, so a restart keeps the language

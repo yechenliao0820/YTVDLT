@@ -1175,17 +1175,44 @@ describe('D-187 · 语言切换整页重载语义与视图持久化', () => {
   });
 
   it('switchLocale：持久化 + SETTINGS_SET + location.replace 整页重载（D-85）', () => {
+    // D-215：switchLocale 现在同时读 location.search 重建 query（真实浏览器里
+    // search 恒是 href 的一部分）。引导期注入的 ?prefill= 与本用例无关，先把
+    // 假 location 置成一致的干净状态，避免假件 desync 泄进断言。
+    win().location.href = 'file:///C:/app/pages/queue/index.html';
+    win().location.search = '';
     const replaced: string[] = [];
     (win().location as { replace?: (url: string) => void }).replace = (url: string) => { replaced.push(url); };
     queue.switchLocale('en');
     expect(win().localStorage.getItem('ytvdlt.locale')).toBe('en');
     expect(callsTo(SETTINGS_SET).at(-1)?.payload).toEqual({ language: 'en' });
-    const base = String(win().location.href).replace(/[?&]lang=[^&]*/g, '');
+    const base = 'file:///C:/app/pages/queue/index.html';
     expect(replaced.at(-1)).toBe(base + '?lang=en');
     queue.switchLocale('zh-CN');
     expect(replaced.at(-1)).toBe(base); // 中文回到不带 lang 的地址
     queue.switchLocale('什么');
     expect(win().localStorage.getItem('ytvdlt.locale')).toBe('zh-CN');
+  });
+
+  it('switchLocale（D-215 回归）：lang 位于 query 首位时不得吃掉 ?', () => {
+    const replaced: string[] = [];
+    (win().location as { replace?: (url: string) => void }).replace = (url: string) => { replaced.push(url); };
+    // `?lang=en&v=…` 正是 app-nav.pageUrl() 在页面跳转时保存的形态。旧正则
+    // `[?&]lang=[^&]*` 会把 `?` 一起剥掉，留下 `…index.html&v=…` —— 一个不
+    // 存在的文件名，主进程 will-navigate 信任门静默拒绝重载，于是从设置页
+    // 回到队列后两个语言键看起来全部失效。
+    win().location.href = 'file:///C:/app/pages/queue/index.html?lang=en&v=0.3.1';
+    win().location.search = '?lang=en&v=0.3.1';
+    queue.switchLocale('zh-CN');
+    expect(replaced.at(-1)).toBe('file:///C:/app/pages/queue/index.html?v=0.3.1');
+    queue.switchLocale('en');
+    expect(replaced.at(-1)).toBe('file:///C:/app/pages/queue/index.html?lang=en&v=0.3.1');
+    // 其余参数（kind/tab/prefill）原样保留，与旧语义一致。
+    win().location.search = '?lang=en&v=0.3.1&kind=audio';
+    queue.switchLocale('zh-CN');
+    expect(replaced.at(-1)).toBe('file:///C:/app/pages/queue/index.html?v=0.3.1&kind=audio');
+    // 还原引导期状态（href + prefill），不给同文件后续用例留脏 search。
+    win().location.href = 'file:///C:/app/pages/queue/index.html';
+    win().location.search = '?prefill=https%3A%2F%2Fexample.com%2Fwatch%3Fv%3Dabc';
   });
 
   it('saveView：分类切换 / 滚动 / pagehide 都把视图快照交给 nav（D-106）', () => {

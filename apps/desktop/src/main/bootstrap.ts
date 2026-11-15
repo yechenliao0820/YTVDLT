@@ -611,8 +611,16 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
   nativeTheme.on('updated', () => { options.onSystemAppearanceChanged?.(); });
 
   // 7. Launch the queue page; `--url` arrives as a query parameter.
+  //    D-215: the `did-finish-load` listener MUST be attached BEFORE `loadURL()`.
+  //    The loadURL promise resolves inside the same event emission as the event
+  //    itself, and the `await` continuation only runs after that emission has
+  //    fully finished — a listener registered after the `await` therefore never
+  //    sees the FIRST load. The window is created with `show: false`, so
+  //    `window.show()` never ran on launch and the app could only be surfaced
+  //    from the tray (the second-instance path and the tray "show" item were
+  //    the only survivors). Later loads (language switch, menu navigation) hit
+  //    the same listener either way; only the registration point changes.
   const deepLink = deepLinkFromArgv(options.argv);
-  await window.webContents.loadURL(pageUrlWithPrefill(launchUrl, deepLink));
   window.webContents.on('did-finish-load', () => {
     window.show();
     // D-106: a page jump (menu / nav bar) rebuilds the renderer, so re-push
@@ -626,6 +634,7 @@ export async function bootstrap(electron: ElectronLike, options: BootstrapOption
       refreshAppMenu(menuLocale);
     })();
   });
+  await window.webContents.loadURL(pageUrlWithPrefill(launchUrl, deepLink));
 
   app.on('second-instance', ((...args: never[]) => {
     const argv = Array.isArray(args[1]) ? (args[1] as unknown as readonly string[]) : [];

@@ -1312,6 +1312,22 @@ describe('语言切换（重载语义 + D-85 SETTINGS_SET）', () => {
     expect(locationReplace).toHaveBeenLastCalledWith('file:///C:/app/pages/queue/index.html?v=9.9.9');
     expect(lastCall('ytvdlt:settings:set')?.payload).toEqual({ language: 'zh-CN' });
   });
+
+  it('D-215 回归：lang 位于 query 首位（app-nav 保存形态）时不得吃掉 ?', () => {
+    const savedHref = win.location.href;
+    const savedSearch = win.location.search;
+    win.location.href = 'file:///C:/app/pages/queue/index.html?lang=en&v=9.9.9';
+    win.location.search = '?lang=en&v=9.9.9';
+    try {
+      node('settings-language').children.find((b: any) => b.getAttribute('data-locale') === 'zh-CN').click();
+      // 旧正则把 `?` 一起剥掉，留下 `…index.html&v=9.9.9`（不存在的文件名），
+      // 主进程信任门静默拒绝重载 —— 设置页的语言键看起来失效。
+      expect(locationReplace).toHaveBeenLastCalledWith('file:///C:/app/pages/queue/index.html?v=9.9.9');
+    } finally {
+      win.location.href = savedHref;
+      win.location.search = savedSearch;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
