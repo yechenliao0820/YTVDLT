@@ -1,8 +1,15 @@
-# YTVDLT 交付报告（0.3.1 · 发布候选，未发布）
+# YTVDLT 交付报告（0.3.1 · 已发布 2026-11-15）
 
+> **0.3.1 发布补记（2026-11-15）**：GitHub Release **v0.3.1** 已创建
+> （https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.1 ，说明英文，铁律 14），资产
+> `YTVDLT.Setup.0.3.1.exe`（226,400,406 B，GitHub 资产名点号规范化，坑 18）/ `.blockmap` /
+> `latest.yml`（url/path 已同步点号名）全部 `uploaded`，**资产 digest 与本地 SHA-256 逐字符一致**，
+> tag `v0.3.1` 指向 `main` 头 `742a92a`。发布后三条硬校验全过。Known Issues 已在 Release 说明披露
+> （close→tray 存量行为、YouTube 需可达网络）。
+>
 > 交付日期：2026-11-15 ｜ 交付人：ZCode（AI）｜ 接收人：LeoLee
-> 状态：**发布候选已产出并完成真机验证，未创建 GitHub Release、未上传资产**（等业主指令）。
-> 基线：`main` @ `56ff4cd`（PR #6，CI #18 绿）+ 本报告所在发版准备提交；决策追踪 **D-140…D-213**（相对 0.3.0 的全部增量，明细见 `DECISIONS.md` 与 `CHANGELOG.md` 待发版表）。
+> 状态：**已发布**。基线：`main` @ `56ff4cd`（PR #6，CI #18 绿）→ 发版准备 `eec8ff8`（PR #7）；
+> 决策追踪 **D-140…D-213**（相对 0.3.0 的全部增量，明细见 `DECISIONS.md` 与 `CHANGELOG.md` 0.3.1 行）。
 
 ## 一、交付物
 
