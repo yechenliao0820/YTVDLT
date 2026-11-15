@@ -343,3 +343,51 @@ export const M5_CHANNELS: readonly string[] = [
   // D-173 (append-only): main-process clipboard write (bounded text only).
   IPC_CHANNELS.CLIPBOARD_WRITE,
 ];
+
+/** Longest URL the preview endpoint will look at (matches the service). */
+export const MAX_PREVIEW_URL_LENGTH = 2048;
+/**
+ * Longest URL the renderer-submitted download channels accept — ONE shared
+ * bound for `DOWNLOAD_START` and `URL_SUPPORT_CHECK`, so the pre-check can
+ * never hard-reject a URL the enqueue path would have taken. 4096 UTF-16 code
+ * units is ~4x the preview-probe bound and far above any real video or
+ * playlist URL (long signed CDN tokens included), yet well below the Windows
+ * ~32k-char command-line limit the value later reaches through argv — the cap
+ * only bounds what can land in argv, logs and the task snapshot. Counted in
+ * code units like `MAX_CLIPBOARD_TEXT_CHARS` (D-173): the string is not
+ * decoded or truncated here, and the over-limit rejection never echoes the
+ * value back.
+ */
+export const MAX_URL_CHARS = 4096;
+/**
+ * Opaque ticket shape. `crypto.randomUUID()` is 36 chars of `[0-9a-f-]`, and
+ * the classes stay open enough for a future id scheme while still refusing
+ * paths, dots, slashes and anything a caller could mistake for a filename.
+ */
+export const PREVIEW_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
+/**
+ * Subtitle preview URL: http(s), trimmed, bounded, printable.
+ *
+ * This is the transport guard only — the service re-validates with the engine's
+ * own whitelist (credentials, host, scheme) before anything is spawned.
+ */
+export function assertPreviewUrl(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('[m5-ipc] subtitle preview requires a string url');
+  const url = value.trim();
+  if (url.length === 0 || url.length > MAX_PREVIEW_URL_LENGTH || /[\u0000-\u001f\u007f]/.test(url)) {
+    throw new Error('[m5-ipc] invalid subtitle preview url');
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error('[m5-ipc] subtitle preview requires an http(s) url');
+  }
+  return url;
+}
+
+/** `''` is accepted by the caller as "no previous ticket", never as an id. */
+export function assertPreviewId(value: unknown): string {
+  if (typeof value !== 'string' || !PREVIEW_ID_RE.test(value)) {
+    throw new Error('[m5-ipc] invalid previewId');
+  }
+  return value;
+}
