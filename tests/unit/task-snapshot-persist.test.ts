@@ -203,3 +203,100 @@ describe('D-163 · 结构性变化仍及时落盘', () => {
     expect(queue.get('t1')?.mediaInfo?.formats[0]?.url).toBe(SIGNED_MEDIA_URL);
   });
 });
+
+/**
+ * Task-2 audit follow-up (checklist §14「同一序列化边界」): a throttled `void`
+ * progress persist (t1, held by the gate) racing another task's awaited
+ * `run().finally` persist (t2). Every snapshot is a full-state view, so the
+ * NEWER snapshot must be the LAST bytes on disk. Before the snapshot write
+ * queue this test was RED: the held write let the t2 snapshot complete first,
+ * leaving the older full snapshot as the final file content until the next
+ * structural change happened to persist again.
+ */
+describe('Task-2 audit · 并发快照按提交顺序落盘（新快照必是最后字节）', () => {
+  it('进度节流写与另一任务的结束写重叠时，较旧快照先落盘、较新快照最后落盘', async () => {
+    const mem = createInMemoryPorts();
+    const rewrites: string[] = [];
+    const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    // 钉住第一份（不含 t2 的）快照写；含 t2 的较新快照不拦。
+    let releaseFirst: () => void = () => {};
+    const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let firstSeen = false;
+    mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (path.endsWith('tasks.json')) {
+        if (!firstSeen) {
+          firstSeen = true;
+          await firstHeld;
+        }
+        rewrites.push(text);
+      }
+      await inner(path, text);
+    };
+
+    // t1 = jitter（六个 tick 后挂在 Running，产生被节流放行的 void 持久化）；
+    // t2 = complete（很快结束，run().finally 触发结束持久化）。
+    const engine: DownloadEngine = {
+      async version() { return 'fake'; },
+      async probe() { return mediaInfo(); },
+      async probePlaylist() { throw new Error('not used'); },
+      download(req: DownloadRequest, onEvent: (e: EngineEvent) => void) {
+        const handle = {
+          pid: 1,
+          cancel: async () => {
+            onEvent({ type: 'canceled', taskId: req.taskId });
+            return true;
+          },
+        };
+        const progress = (percent: number, speedBps: number, etaSec: number): EngineEvent => ({
+          type: 'progress', taskId: req.taskId, percent, downloadedBytes: percent,
+          totalBytes: 100, speedBps, etaSec, rawLine: 'YTVDLT|...',
+        });
+        if (req.taskId === 't1') {
+          for (let i = 1; i <= 6; i += 1) onEvent(progress(i, i * 10, 99 - i));
+          return handle;
+        }
+        onEvent(progress(37, 42, 5));
+        queueMicrotask(() => onEvent({
+          type: 'completed', taskId: req.taskId,
+          artifacts: [{ taskId: req.taskId, path: `C:/out/${req.taskId}.mp4`, kind: 'video', sizeBytes: 1 }],
+        }));
+        return handle;
+      },
+      async selfUpdate() {
+        return { fromVersion: '', toVersion: '', channel: 'stable', changed: false };
+      },
+    };
+    const queue = new TaskQueue({
+      ports: mem.ports,
+      engine,
+      verifier: okVerifier,
+      history: new HistoryStore({ ports: mem.ports }),
+      taskStore: new TaskStore({ ports: mem.ports }),
+      jsRuntimePath: 'C:/runtime/node.exe',
+      persistIntervalMs: 0,
+    });
+
+    await queue.enqueue(record('t1'));
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Running');
+    // W1（t1 的进度快照）此刻被钉在写入口，尚未落地。
+    await queue.enqueue(record('t2'));
+    await tick();
+    expect(queue.get('t2')?.state).toBe('Completed');
+    // 写队列（新）里 W2 排在 W1 之后——两者都还没落盘。
+    // 旧实现这里 rewrites 已有 1 条（W2 抢在 W1 之前完成），本断言即红。
+    expect(rewrites).toHaveLength(0);
+
+    releaseFirst();
+    await tick();
+    // 提交序：W1（t1 进度，无 t2）→ W2（t2 入队，未完成）→ W3（t2 Completed）。
+    // 关键不变量：最新的全量快照必是最后落盘的字节。
+    expect(rewrites).toHaveLength(3);
+    expect(parse(rewrites[0] ?? '{}').tasks.some((task) => task.id === 't2')).toBe(false);
+    const mid = parse(rewrites[1] ?? '{}').tasks.find((task) => task.id === 't2');
+    expect(mid?.state).not.toBe('Completed');
+    const last = parse(rewrites[2] ?? '{}');
+    const t2 = last.tasks.find((task) => task.id === 't2');
+    expect(t2?.state).toBe('Completed');
+  });
+});

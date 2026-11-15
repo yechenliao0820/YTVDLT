@@ -165,6 +165,21 @@ export class TaskQueue implements ITaskQueue {
    * tick (persistIntervalMs can be 0).
    */
   private snapshotPersistFailed = false;
+  /**
+   * Task-2 audit follow-up (checklist §14「同一序列化边界」): the snapshot
+   * write itself. Every `persistSnapshot()` call snapshots the records and
+   * computes its fingerprint SYNCHRONOUSLY, so each snapshot is a consistent
+   * view — but two overlapping calls (a throttled `void` progress persist
+   * racing another task's awaited `finally` persist) could previously complete
+   * OUT OF ORDER, leaving the OLDER full snapshot as the last bytes on disk
+   * until the next structural change. Writes are now chained through this
+   * queue, so the NEWEST snapshot is always the last one written. The
+   * fingerprint gate above is unchanged (identical content still never queues
+   * a rewrite), a failed write still un-reserves the fingerprint, and a
+   * rejected save must not poison later writes — the same chain shape as the
+   * HistoryStore write queue (D-222).
+   */
+  private snapshotWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(deps: TaskQueueDeps) {
     this.deps = deps;
@@ -1056,28 +1071,37 @@ export class TaskQueue implements ITaskQueue {
     // against this field — updating it only after the save resolved would let
     // identical content queue identical full-file rewrites.
     this.lastPersistedFingerprint = fingerprint;
-    try {
-      await this.deps.taskStore.save({
-        schemaVersion: 1,
-        savedAt: nowIso(this.deps.ports),
-        tasks,
-      });
-      this.snapshotPersistFailed = false;
-    } catch (error) {
-      // The write never landed: un-reserve so the next attempt retries.
-      this.lastPersistedFingerprint = null;
-      if (this.snapshotPersistFailed) return;
-      this.snapshotPersistFailed = true;
+    const store = this.deps.taskStore;
+    // Task-2 audit follow-up: the save is chained through `snapshotWriteQueue`
+    // so overlapping persists land in submission order (newest last); see the
+    // field comment. The task itself never rejects — a failed write is logged
+    // (once per episode) and un-reserves the fingerprint for the next attempt.
+    const write = this.snapshotWriteQueue.then(async () => {
       try {
-        await this.deps.ports.logSink.appendJsonl(JSON.stringify({
-          ts: nowIso(this.deps.ports),
-          level: 'WARNING',
-          scope: 'task-queue',
-          event: 'snapshot.persist.failed',
-          payload: { error: error instanceof Error ? error.message : String(error) },
-        }));
-      } catch { /* a dead log sink must not break the queue either */ }
-    }
+        await store.save({
+          schemaVersion: 1,
+          savedAt: nowIso(this.deps.ports),
+          tasks,
+        });
+        this.snapshotPersistFailed = false;
+      } catch (error) {
+        // The write never landed: un-reserve so the next attempt retries.
+        this.lastPersistedFingerprint = null;
+        if (this.snapshotPersistFailed) return;
+        this.snapshotPersistFailed = true;
+        try {
+          await this.deps.ports.logSink.appendJsonl(JSON.stringify({
+            ts: nowIso(this.deps.ports),
+            level: 'WARNING',
+            scope: 'task-queue',
+            event: 'snapshot.persist.failed',
+            payload: { error: error instanceof Error ? error.message : String(error) },
+          }));
+        } catch { /* a dead log sink must not break the queue either */ }
+      }
+    });
+    this.snapshotWriteQueue = write.then(() => undefined, () => undefined);
+    await write;
   }
 }
 
