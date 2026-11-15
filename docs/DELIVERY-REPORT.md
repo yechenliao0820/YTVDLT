@@ -1,3 +1,85 @@
+# YTVDLT 交付报告（0.3.1 · 发布候选，未发布）
+
+> 交付日期：2026-11-15 ｜ 交付人：ZCode（AI）｜ 接收人：LeoLee
+> 状态：**发布候选已产出并完成真机验证，未创建 GitHub Release、未上传资产**（等业主指令）。
+> 基线：`main` @ `56ff4cd`（PR #6，CI #18 绿）+ 本报告所在发版准备提交；决策追踪 **D-140…D-213**（相对 0.3.0 的全部增量，明细见 `DECISIONS.md` 与 `CHANGELOG.md` 待发版表）。
+
+## 一、交付物
+
+| 交付物 | 位置 | 说明 |
+|---|---|---|
+| 安装包 | `dist-0.3.1/YTVDLT Setup 0.3.1.exe` | 226,400,406 B（215.9 MiB），**SHA-256 `cbfdccb1e5885b794806c8ab6b2ff6e5dac2cee65e8f73359706dd5cc07d02d7`**（真机验证前后两次实测一致，交付物未被测试污染） |
+| 差分清单 | `dist-0.3.1/YTVDLT Setup 0.3.1.exe.blockmap` | 237,831 B |
+| 更新清单 | `dist-0.3.1/latest.yml` | `version: 0.3.1`；`url`/`path` 指向 `YTVDLT Setup 0.3.1.exe`；`size` 与实际逐字节一致；`sha512` 与本机实算一致。**发布上传时按坑 18 把资产名规范化为点号并同步改 yml** |
+| 免安装目录 | `dist-0.3.1/win-unpacked/` | 真机验证载体；**注意：验证后在 `config/`、`logs/` 留有测试数据，不影响 Setup.exe（打包在先已封口）** |
+| 目标形态 | 仅 **Windows x64 NSIS** | 无 portable：`electron-builder.yml`（冻结未改）的 portable target 经打包程序**内存覆盖**排除 |
+| 版本号 | 根 `package.json` 与 `apps/desktop/package.json` 均为 **0.3.1** | 两处一致；`pnpm-lock.yaml` 不记录包自身版本（0 处引用），零依赖变更 |
+| 失败构建残留 | `dist-0.3.1-failed-partial/` | 两次失败构建的残留（原因见 BUILD.md 新增坑），可再生，可按铁律 0.1 回收站清理 |
+
+## 二、产物核对（全部实际执行）
+
+| 项 | 结果 |
+|---|---|
+| 安装包文件名 | `YTVDLT Setup 0.3.1.exe` ✓ |
+| exe 版本资源 | FileVersion `0.3.1` / ProductVersion `0.3.1.0` ✓ |
+| asar 内 `package.json` | `version: 0.3.1`、`main: apps/desktop/dist/main/main.cjs`（D-75 钉入口）✓ |
+| asar 关键文件 | `main.cjs` / `preload/bridge.cjs` / `icon.ico` 在位；**main.cjs 与 esbuild 产物逐字节一致（556,262 B）** ✓ |
+| `latest.yml` | version/url/path/size/sha512 全部与实际一致 ✓ |
+| SHA-256 | `cbfdccb1…02d7`；`dist-0.3.0/` 未覆盖（SHA 仍 `5d93f923…40af3`，与 CHANGELOG 记录一致）✓ |
+| 随包运行时 | `resources/runtime/`：yt-dlp.exe / aria2c.exe / ffmpeg（8 文件）/ node.exe / SHA2-256SUMS / runtime-manifest.json 在位，启动自检 `requiredOk:3` ✓ |
+
+## 三、自动化验证（本机实跑；CI 会在推送后复验）
+
+| 门 | 结果 |
+|---|---|
+| vitest（unit+contract+integration） | 168 文件 / **2781 passed / 0 failed** / 5 skipped（既有能力门，未改判） |
+| tsc --noEmit | 5 包全绿（shared/core/engine-ytdlp/ui/apps/desktop） |
+| check-layering / frozen-gate | 0 violations / PASS |
+| run-e2e | 31/31 用例 + 5/5 反例，像素差 0（冻结基线零变化） |
+| M5 验收 | 59/62 PASS + 3 SKIPPED（原有延期项不改判）、10/10 门、allGreen=true、覆盖率最低 86.97% |
+| handoff-check | 全部 fresh，决策编号 D-213 已登记 |
+
+> 运行环境说明：本机 PATH 无独立 node，以上均用**随包真 Node v24.22.2**（`resources/runtime/win-x64/node.exe`）执行。构建环境坑（Electron 当 node 会因 asar 拦截导致 electron-builder 必败、`.bin` 垫片为 WSL 形态、pnpm 9.15.9 经 corepack 缓存可用）已记入 `docs/BUILD.md` 常见坑表。
+
+## 四、真机验证（打包版 win-unpacked，CDP 驱动真实 IPC，无 fixture 通道）
+
+**通过（8 项）**：
+
+| # | 用例 | 结果 |
+|---|---|---|
+| 1 | 启动与版本 | 页面 `?v=0.3.1` 首帧提示 + `APP_INFO` 返回 `version 0.3.1, packaged:true` |
+| 2 | 应用更新检查 | GitHub API 经打包 HTTP 策略（D-143 逐跳钉扎）真实可达 → `已是最新版本（0.3.1）`（0.3.1 未发布，判定正确）；说明 `(current, latest]` 聚合链路活着 |
+| 3 | 组件状态 | yt-dlp `2026.10.26` / aria2c `1.35.0`，`updateAvailable:false` |
+| 4 | 真实下载（可达源） | w3schools `mov_bbb.mp4` → **Completed**（产物在 `%USERVIDEOS%\YTVDLT`）；GitHub release zip 经 generic 入队成功（预检 INDETERMINATE → fail-open，D-134 语义） |
+| 5 | 打开文件夹 | `task:action open-folder` → `OK`，`fileStatus: present`（弹出的资源管理器窗口即本验证） |
+| 6 | 删除记录 + 文件 | `remove withFiles:true` → `filesTrashed:1`、磁盘文件消失、记录移除（D-120/D-131 回收站语义真机验证） |
+| 7 | 下载中取消 | `task:action cancel` → `已取消` → 终态 `Canceled`（D-200/D-209 语义真机验证） |
+| 8 | 二次启动深链 | `YTVDLT.exe --url=…` → 主实例 `loadURL` 带 `prefill=` 参数、`#queue-url` 输入框预填成功 —— **D-210 修复真机验证通过**（修复前该功能 100% 失效） |
+
+**未通过（1 项，存量缺陷）**：close→tray，见五-1。
+
+## 五、已知问题与未验证项
+
+1. **【P2 · 存量】打包版关闭窗口直接退出，「关闭到托盘」未生效**：空载与下载中各实测（共 4 次，含决定性进程表验证），关窗 1.2 s 内进程退出，stderr/应用日志零线索。已逐环节排除：捆绑 close handler 逐字节正确（asar 内 main.cjs 与源构建一致）、asar 图标路径 `new Tray()` 在同版本二进制上实测可成（正/反斜杠路径都 OK）、surface 键名对齐（无坑 38 断键）、`trayStats` 未接线但有 `EMPTY_STATS` 兜底。定位结论：打包运行时托盘创建 try 块内**静默失败**（D-60 的 catch 无日志，掩盖现场）→ `trayReady=false` → close 按设计兜底放行为退出。**0.3.0 及之前从未真机验证过此行为（§10 本就登记「IPC/导航未做真机窗口验证」；D-197 只有假 Electron 单测——坑 37 明说这类回归单测拦不住），非 0.3.1 增量回归**。影响：下载中点 X → 下载被中断（空载关窗=退出属合理行为）。修复方向：给托盘 catch 补日志 + 复现定位；已在 `AI-MAINTENANCE.md` §10 登记。
+2. **YouTube 真实下载未验证（环境所限）**：本机直连 YouTube 被远端重置（`ConnectionResetError 10054`，代理未通），两条 YouTube 用例在 probe 阶段失败——属网络环境而非应用缺陷（同轮 GitHub/w3schools 真源下载全部成功，引擎 argv/进度/校验链路已验证）。业主可在代理环境复测。
+3. **NSIS 安装向导本体未执行**：未在本机跑安装/静默安装（避免动业主系统）；安装版与 win-unpacked 布局一致（同 `resources/app.asar`）。干净机验收维持 §10 登记。
+4. **GitHub Release 与更新上传链路未执行**（按任务约束不发布）：发布时按手册 §11 REST API 流程 + 坑 18 资产名规范化 + 三条硬校验执行。
+5. **测试残留**：`dist-0.3.1/win-unpacked/config|logs` 含验证测试数据（不影响 Setup.exe）；`dist-0.3.1-failed-partial/` 失败构建残留；两者均可回收站清理。
+6. §10 既有存量项不变（主进程拒绝文案 en 显示中文、更新器信任根、TOCTOU 边界等）。
+
+## 六、发版判断
+
+**结论：可以正式发布（GO）**——无 P0/P1；真机验证 8 项核心链路全通过；唯一未通过项为 P2 存量缺陷（close→tray），0.3.0 及所有历史版本行为相同，建议随 Release 的 Known Issues 如实披露（英文说明，铁律 14），修复排入下一轮。
+
+**发布操作清单（等业主指令逐项执行）**：
+1. 合并发版准备提交：`dev` → PR → `main`（PR 由业主创建）。
+2. 建 Release v0.3.1（target=`main`，英文说明 + Known Issues 披露 close→tray 与 YouTube 需代理）。
+3. 上传资产：`latest.yml` → blockmap → exe（小文件先上），**资产名空格规范化为点号（`YTVDLT.Setup.0.3.1.exe`）并同步改 latest.yml 的 url/path 再上传**（坑 18）。
+4. 三条硬校验：`releases/latest` 返回 v0.3.1 且 digest 非空；本地 SHA-256 与资产 digest 逐字符一致；tag 指向 main 头。
+5. 发布后 0.3.0 用户会在「检查更新」看到 0.3.1（说明聚合链路已真机验证）。
+
+---
+
 # YTVDLT 交付报告（0.3.0 · 已发布 2026-11-12）
 
 > **0.3.0 构建与发布补记（2026-11-12）**：安装包已在本地产出
