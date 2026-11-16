@@ -12,7 +12,7 @@
 import type {
   DownloadEngine, EngineEvent, EngineStage, TaskRecord, TaskEvent, TaskState, AppError,
   CorePorts, ExpectedArtifactManifest, TaskSnapshot,
-  SubtitleFileLink,
+  SubtitleFileLink, DownloadRequest,
 } from '@ytvdlt/shared';
 import { isForwardStage } from '@ytvdlt/shared';
 import type { ICancelHandle, IArtifactVerifier, IHistoryStore, ITaskQueue, ITaskStore } from '../ports.js';
@@ -82,6 +82,19 @@ export interface TaskQueueDeps {
     paths: readonly string[],
     roots: readonly string[],
   ) => Promise<readonly string[]>;
+  /**
+   * D-236 (append-only): re-inject the CURRENT config network settings into a
+   * request that just came back from `tasks.json`. The persisted projection
+   * blanks `network.proxy` (a proxy value can carry `http://user:pass@host`,
+   * and the snapshot is the file users attach to bug reports — the same
+   * "never touch disk" principle as D-163's signed CDN links), so a restored
+   * task would otherwise restart WITHOUT its proxy. The host supplies a hook
+   * that re-reads the live config; current config wins, which also means a
+   * proxy the user has since removed is not revived from the old snapshot.
+   * Absent = restored requests are used verbatim (pre-D-236 behaviour, which
+   * keeps core tests side-effect free and a build without config access safe).
+   */
+  repairRestoredRequest?: (request: DownloadRequest) => DownloadRequest;
 }
 
 const nowIso = (ports: CorePorts): string => ports.clock.nowIso();
@@ -157,6 +170,23 @@ export class TaskQueue implements ITaskQueue {
    * before it returns.
    */
   private batchDepth = 0;
+  /**
+   * D-237 (audit P2): copy-suffix reservations for RUNNING tasks, keyed by
+   * task id. `withCopySuffix` detects duplicates by scanning the OUTPUT
+   * directory, but a concurrent twin's partials live in its own `tempDir`
+   * (D-118) — invisible to that scan until the final move. With default
+   * concurrency 3, queuing the same video twice sent two processes at the
+   * SAME final file name (one file under two `Completed` cards, or a bogus
+   * verification failure). A claim is registered the moment a suffix is
+   * computed and released in `run()`'s `finally` — by then the artifact
+   * either sits in the output directory (readdir takes over) or the attempt
+   * produced nothing for a name to collide with. In-memory only: single-
+   * instance (D-60) rules out cross-process twins, and a restored record
+   * re-claims when the user restarts it.
+   */
+  private readonly copySuffixClaims = new Map<
+    string, { dir: string; mediaId: string; suffix: string }
+  >();
 
   constructor(deps: TaskQueueDeps) {
     this.deps = deps;
@@ -602,6 +632,10 @@ export class TaskQueue implements ITaskQueue {
     } finally {
       this.handles.delete(record.id);
       this.running.delete(record.id);
+      // D-237: the copy-suffix reservation dies with the run — by now the
+      // artifact either sits in the output directory (readdir sees it) or
+      // this attempt produced nothing for a name to collide with.
+      this.copySuffixClaims.delete(record.id);
       await this.persistSnapshot();
       // A freed slot is immediately offered to the FIFO (auto-fill, ①).
       this.pump();
@@ -700,7 +734,10 @@ export class TaskQueue implements ITaskQueue {
    *
    * The default template carries `[%(id)s]`, which is what makes detection
    * possible: scan the output directory for names containing `[<id>]`, take the
-   * highest ` (n)` already there, and hand yt-dlp ` (n+1)`. Anything unexpected
+   * highest ` (n)` already there, and hand yt-dlp ` (n+1)`. D-237: the scan
+   * also includes RUNNING twins' claims — their partials sit in their own
+   * tempDir and are invisible to readdir, which let two concurrent downloads
+   * of the same video pick the same final name. Anything unexpected
    * (custom template without the id token, unreadable directory, template with
    * no `%(ext)s`) returns the request untouched — naming is then left exactly as
    * the user configured it, and the duplicate is handled by the history step
@@ -722,14 +759,40 @@ export class TaskQueue implements ITaskQueue {
     try {
       names = await this.deps.ports.fs.readdir(dir);
     } catch {
-      // Not created yet (first download into a new folder) — nothing to collide.
-      return request;
+      // Not created yet (first download into a new folder) — nothing on disk
+      // to collide with; the in-flight twin scan below still applies.
+      names = [];
     }
-    const suffix = nextCopySuffix(names, mediaId);
-    if (suffix === '') return request;
-    const outputTemplate = applyCopySuffix(template, suffix);
-    if (outputTemplate === null) return request;
-    return { ...request, paths: { ...request.paths, outputTemplate } };
+    // D-237: a concurrent twin is invisible to readdir (its partials live in
+    // its own tempDir), so its claim joins the scan before the suffix is chosen.
+    const effectiveNames = [...names, ...this.syntheticCopySuffixNames(dir, mediaId, record.id)];
+    const suffix = nextCopySuffix(effectiveNames, mediaId);
+    const applied = suffix === '' ? template : applyCopySuffix(template, suffix);
+    // D-237: claim BEFORE spawning — the reservation must exist by the time
+    // the next duplicate's withCopySuffix runs, not only once our file lands.
+    // A template that cannot carry the suffix (no `%(ext)s` — applyCopySuffix
+    // null) renders the BASE name, so the honest claim is `''`.
+    this.copySuffixClaims.set(record.id, {
+      dir, mediaId, suffix: applied === null ? '' : suffix,
+    });
+    if (applied === null || applied === template) return request;
+    return { ...request, paths: { ...request.paths, outputTemplate: applied } };
+  }
+
+  /**
+   * D-237: the file names readdir alone cannot see — each RUNNING twin's
+   * claimed suffix encoded as a synthetic name. `nextCopySuffix` only looks
+   * for the `[<id>]` token plus an optional trailing `(n)`, so
+   * `[<id>]` / `[<id>]_(1)` reproduce exactly what the real files will look
+   * like without touching the disk.
+   */
+  private syntheticCopySuffixNames(dir: string, mediaId: string, selfId: string): string[] {
+    const names: string[] = [];
+    for (const [taskId, claim] of this.copySuffixClaims) {
+      if (taskId === selfId || claim.dir !== dir || claim.mediaId !== mediaId) continue;
+      names.push(`[${mediaId}]${claim.suffix === '' ? '' : claim.suffix}.mp4`);
+    }
+    return names;
   }
 
   /** Wrap the engine's callback API into a single awaited outcome. */
@@ -1027,8 +1090,15 @@ export class TaskQueue implements ITaskQueue {
     let restored = 0;
     for (const raw of snapshot.tasks) {
       if (this.records.has(raw.id)) continue;
+      // D-236: the persisted copy carries no proxy (see buildPersistProjection);
+      // the host hook re-injects the CURRENT config value so a restart neither
+      // loses the proxy nor revives a removed one.
+      const request = raw.request !== null && this.deps.repairRestoredRequest !== undefined
+        ? this.deps.repairRestoredRequest(raw.request)
+        : raw.request;
       const record: TaskRecord = {
         ...raw,
+        request,
         state: raw.state === 'Running' || raw.state === 'FetchingInfo' ? 'Canceled' : raw.state,
         artifacts: [...(raw.artifacts ?? [])],
         lastPercent: raw.lastPercent ?? null,

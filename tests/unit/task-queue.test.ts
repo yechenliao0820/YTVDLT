@@ -590,6 +590,64 @@ describe('D-101 · 重复下载：给出独立文件名，而不是报错', () =
     expect(finished?.error).toBeNull();
     expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(title)s.%(ext)s');
   });
+
+  it('D-237 · 并发孪生对 readdir 不可见时也拿到独立名字（A 运行中，B 拿 (1)）', async () => {
+    // A hangs and holds the base-name claim; B starts while A is still
+    // running. A's partials live in its own tempDir (D-118), so readdir
+    // alone sees nothing — the in-memory claim is what B must see. This is
+    // the audited P2-1 window: default concurrency 3 sent two processes at
+    // the SAME final file name.
+    const { queue, engineState } = setup('hang');
+    await queue.enqueue(recordWithIdTemplate('t1'));
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Running');
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(title)s [%(id)s].%(ext)s');
+
+    await queue.enqueue(recordWithIdTemplate('t2'));
+    await tick();
+    expect(queue.get('t2')?.state).toBe('Running');
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(title)s [%(id)s]_(1).%(ext)s');
+    // Both downloads were genuinely in flight at the same time.
+    expect(engineState.active).toBe(2);
+    await queue.cancel('t1');
+    await queue.cancel('t2');
+    await tick();
+  });
+
+  it('D-237 · 三个并发副本按序取基础名 (1) (2)', async () => {
+    const { queue, engineState } = setup('hang');
+    const templates: string[] = [];
+    for (const id of ['t1', 't2', 't3']) {
+      await queue.enqueue(recordWithIdTemplate(id));
+      await tick();
+      templates.push(engineState.lastRequest?.paths.outputTemplate ?? '');
+    }
+    expect(templates).toEqual([
+      '%(title)s [%(id)s].%(ext)s',
+      '%(title)s [%(id)s]_(1).%(ext)s',
+      '%(title)s [%(id)s]_(2).%(ext)s',
+    ]);
+    for (const id of ['t1', 't2', 't3']) await queue.cancel(id);
+    await tick();
+  });
+
+  it('D-237 · 运行结束释放预留：A 取消后，B 重新拿基础名', async () => {
+    const { queue, engineState } = setup('hang');
+    await queue.enqueue(recordWithIdTemplate('t1'));
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Running');
+    await queue.cancel('t1');
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Canceled');
+
+    await queue.enqueue(recordWithIdTemplate('t2'));
+    await tick();
+    // No claim (released in run()'s finally) and no `[id]` file on disk —
+    // the base name is free again.
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(title)s [%(id)s].%(ext)s');
+    await queue.cancel('t2');
+    await tick();
+  });
 });
 
 // --- T2 · persistSnapshot failure is visible, never fatal -------------------
@@ -690,7 +748,7 @@ describe('audit · an error pinned by runSafely reaches the persisted snapshot',
       },
       query: (q: HistoryQuery) => history.query(q),
       get: (id: string) => history.get(id),
-      remove: (id: string, opts?: { deleteFile?: boolean }) => history.remove(id, opts),
+      remove: (id: string) => history.remove(id),
       exportJson: (): Promise<string> => history.exportJson(),
       importJson: (json: string): Promise<number> => history.importJson(json),
     };

@@ -2519,3 +2519,33 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 两处改动，均镜像 node-ports 已评审过的模式，不发明新原语：① **exit 证据看门狗**——`exit` 事件武装、`TERMINATION_GRACE_MS`（=5 s，与 `OVERFLOW_SETTLE_GRACE_MS` 同值导出）后若仍未 settle 且 `childConfirmedExited`（`exitCode`/`signalCode` 已置，D-142 的权威退出证据）则 settle：`exitCode` 语义与 close 分支完全一致（`killRequested` → null），`stderr` 追加中性的 `TERMINATION_UNCONFIRMED_MARKER`（不含错误关键词表触发词）。看门狗只能被子进程自己的 exit 武装，**运行中的下载永远不可达**，D-142「kill 失败保持 Running、不结算、可再取消」的僵尸窗口一字未动——若在「kill 未确认但子进程仍活着」时强制 settle，队列会释放槽位并允许同 taskId 二次 spawn，正是 D-142 修掉的「双进程写同一临时目录」的入口，刻意不做。② **`kill()` 与 killTree 竞速同一宽限**：超时回答诚实的 `false`（D-142「未确认」语义），后台 taskkill 继续执行，绝不伪造成功。`ports.ts` 的 `StreamingSpawn.done` / `kill()` 契约注释同步如实化。 |
 | 验证 | `stream-tail-buffer.test.ts` 新增 3 例：⑤ 健康路径（close 正常到达）无 stall、无 marker（看门狗被 finish 清除，不误触发）；⑥ 请求 kill 的快路径在宽限内返回 `true` 且无 marker（竞速不给健康路径加延迟）；⑦ 触发分支由**能力探测门控**——两次真实子进程探针实测本平台（Windows、随包 node）close 恒随 exit ≤ 4 ms 到达、孙进程继承 stdio 不延迟 EOF，触发分支在本平台不可复现，按 D-206/D-207 先例显式 skip（探测具备的平台会真跑）。全量 170 文件 / 2869 项 0 failed（6 skip 全为能力门）；typecheck 5 包过；check-layering 0 违规；frozen-gate PASS。 |
 | 未覆盖 | ① 看门狗触发分支在本平台无手段复现（Windows 上 exit→close 滞后仅剩内核态不可中断等待一种路径）；② stuck-taskkill 模拟无本地手段（`taskkill` 注入只换可执行路径，不能注入挂死行为），kill 竞速只有快路径与既有 kill 用例覆盖；③ 内核态不可中断等待导致的 done 挂起仍由 D-142 兜底（记录保持 Running、可再取消、进程退出后自愈），不做无条件强制 settle。 |
+
+## D-236 · 2026-11-17 · tasks.json 不再携带代理密码：投影脱 proxy + restore 回填（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 在线审计实测：带密码代理（`http://user:SuperSecretPw@host`）的任务记录经 `buildPersistProjection` 落盘，密码明文进 `tasks.json`。签名 CDN 链接早已脱敏（D-163，注释写明 "never touch disk"），但 `request.network.proxy` 漏了——而 tasks.json 恰是用户报障时最常打包附上的文件。 |
+| 根因 | 投影只对 `mediaInfo` 走 `stripCredentialUrls()`；`TaskRecord.request`（五域快照）整体原样落盘，其中 `network.proxy` 是唯一携带凭据值的字段。配置文件 config.json 里的代理是用户自己填的（设计如此），泄露面在「任务快照复制了一份凭据」。 |
+| 决策 | ① `buildPersistProjection` 把 `request.network.proxy` 置 `null`——内存记录不动，本轮 argv 还要用；② `TaskQueueDeps` 新增可选钩子 `repairRestoredRequest`，`restore()` 对每条恢复记录应用；宿主 `task-host.ts` 用 `config.getDomain('network')['proxy']` 的**现值**回填——当前配置为准：重启既不丢代理，也不复活用户已删除的代理；③ 旧版 tasks.json 里已落盘的明文，在启动恢复后的第一次结构写被同一投影清洗。fingerprint 不读 `request`，D-163 写入门语义不变。渲染层读 network 域此前已被 `CONFIG_GET` 域白名单（D-175）挡住，本次封的是磁盘面。 |
+| 验证 | `task-snapshot-persist.test.ts` 新增 3 例：落盘投影 `proxy === null` 且序列化全文无密码、内存原样保留；restore 经钩子回填 + `restart()` 用回填请求真跑完；无钩子缺省原样（core 层无配置可读，安全缺省）。全量 170 文件 / 2875 项 0 failed；typecheck 5 包过。 |
+| 未覆盖 | `cookiesFile` / `aria2cPath` 等**路径类**字段仍在快照里——它们不是凭据值，泄露面是路径隐私而非密码，本轮按审计点名只处理 proxy；带密码代理的真实下载未在真机跑（离线夹具覆盖全链路语义）。 |
+
+## D-237 · 2026-11-17 · 并发重复下载预留 (n) 副本名：内存 claim 堵住 readdir 盲区（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `withCopySuffix` 的冲突检测 = readdir 输出目录找 `[id]`（D-101），无任何预留；而并发下每个任务的部分文件都在自己的 `tempDir`（D-118），下载中的任务在输出目录**不可见**。默认并发 3，同一视频连入队两次就会两个进程写同一个最终文件名：要么一个文件两张 Completed 卡，要么后者报「产物校验未通过」而文件其实完好。 |
+| 根因 | D-101 的「已存在」判据只看磁盘；进程内没有「这个名字已被一个正在运行的任务占用」的记忆——并发是 D-101 设计时未覆盖的维度。 |
+| 决策 | `TaskQueue` 新增内存预留 `copySuffixClaims`（task id → `{dir, mediaId, suffix}`）：① `withCopySuffix` 把在跑孪生的 claim 合成文件名（`[id]` / `[id]_(n).mp4`，与 `nextCopySuffix` 的扫描规则精确同构）并入扫描再选后缀，**spawn 前**登记 claim——预留必须在下一个孪生的 `withCopySuffix` 运行之前就存在；② `run()` 的 `finally` 释放——此刻产物要么已落输出目录（readdir 自然接管），要么本次没有产出可撞的名字；③ `applyCopySuffix` 失败（模板无 `%(ext)s`）时诚实地 claim `''`（该次实际渲染基础名）；④ 纯内存、不持久化：单实例（D-60）排除跨进程孪生，恢复的记录重启时经 `run()` 重新预留。 |
+| 验证 | `task-queue.test.ts` D-101 块新增 3 例：A `hang` 持基础名 claim、B 在 A 运行中拿到 `_(1)` 且 `active === 2`（证明确实并发）；三连发按序取 基础名/`_(1)`/`_(2)`；取消 A（释放预留）后 B 重新拿基础名。全量 2875 项 0 failed；typecheck 5 包过。 |
+| 未覆盖 | 「自定义模板无 `%(id)s`」的重复仍按 D-101 原语义交给历史步（该分支不进预留，原注释如实保留）；跨进程并发不存在（单实例锁）。 |
+
+## D-238 · 2026-11-17 · 移除 history.remove 的 deleteFile 能力：历史行永不碰文件（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 在线审计指出 `history.remove({deleteFile:true})` 是永久 `fs.unlink`：绕过手册 §0.1 的回收站铁律；没有 containment / realpath 校验；而 `importJson()` 又不校验条目路径。三者叠加，等于引信已埋好，只差一次 UI 接线。审计同时确认：当前无生产调用方（唯一调用点 `task-queue.ts` 不带 `deleteFile`），现在不会出事。 |
+| 根因 | 历史条目没有 request 根——产物封链的信任根（D-203 的 `trustedArtifactRoots()`）对历史存储**不存在**。「无法证明归属就绝不删除」是业主验收红线：在这个红线下该选项**不可能被安全加固**——任何 containment 门都会恒拒绝，等价于能力本身被删除，加固只是多余代码。 |
+| 决策 | 直接**移除** `deleteFile`（`IHistoryStore.remove` 接口 + `HistoryStore` 实现 + 测试），不是加固：`remove` 只删历史行，永不碰文件。文件删除的唯一通道是队列的 `TASK_ACTION withFiles` 链（D-120 入口幂等 + D-207 realpath 预检 + D-221/D-223 执行器复检 + 回收站）。`importJson` 的条目路径保持惰性展示数据——一切破坏性消费方都已被既有门把住。 |
+| 验证 | `history-store.test.ts` 原「deleteFile 删三个文件」用例改写为「remove 永不碰文件」的契约钉（构造 video/audio/subtitle 三个文件，remove 后**全部仍在盘上**）；`task-queue.test.ts` 假 store 的 `remove` 签名同步收敛。全量 2875 项 0 failed；typecheck 5 包过。 |
+| 未覆盖 | 未来若真需要「删历史同时删文件」，必须先给历史条目补 request 根或复用 `TASK_ACTION` 同款门，按新决策立项；本轮不做投机性设计。 |

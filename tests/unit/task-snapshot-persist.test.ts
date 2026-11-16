@@ -457,3 +457,66 @@ describe('D-231 · 排队中的重试同样落盘', () => {
     expect(last.tasks.find((task) => task.id === 'bad')?.error ?? null).toBeNull();
   });
 });
+
+describe('D-236 · tasks.json 不携带代理密码', () => {
+  const PROXY = 'http://user:SuperSecretPw@proxy.local:8080';
+  const BACKFILL = 'http://fresh:BackfilledPw@proxy.local:8080';
+
+  const recordWithProxy = (taskId: string, proxy: string | null): TaskRecord => {
+    const base = record(taskId);
+    const req = base.request;
+    if (req === null) return base;
+    return { ...base, request: { ...req, network: { ...req.network, proxy } } };
+  };
+
+  it('落盘的投影 proxy 置空，内存记录原样保留（本轮 argv 还要用）', async () => {
+    const { queue, rewrites } = session('complete');
+    await queue.enqueue(recordWithProxy('t1', PROXY));
+    await tick();
+
+    expect(queue.get('t1')?.state).toBe('Completed');
+    // The in-memory request keeps the proxy — THIS session's argv needs it.
+    expect(queue.get('t1')?.request?.network.proxy).toBe(PROXY);
+    // The persisted copy never carries it: D-163's "signed links never touch
+    // disk" now covers the one credential-bearing request field. tasks.json
+    // is exactly the file users attach to bug reports.
+    const persisted = parse(rewrites[rewrites.length - 1] ?? '{}');
+    expect(persisted.tasks[0]?.request?.network.proxy).toBeNull();
+    expect(JSON.stringify(persisted)).not.toContain('SuperSecretPw');
+  });
+
+  it('restore 经宿主钩子回填当前配置的 proxy（当前配置为准）', async () => {
+    const mem = createInMemoryPorts();
+    const queue = new TaskQueue({
+      ports: mem.ports,
+      engine: fakeEngine({ mode: 'complete', downloadCalls: 0 }),
+      verifier: okVerifier,
+      history: new HistoryStore({ ports: mem.ports }),
+      taskStore: new TaskStore({ ports: mem.ports }),
+      jsRuntimePath: 'C:/runtime/node.exe',
+      persistIntervalMs: 0,
+      // The production shape of the hook (task-host.ts): re-inject the live
+      // config proxy so a restart neither loses the proxy nor revives a
+      // removed one.
+      repairRestoredRequest: (request) => ({
+        ...request,
+        network: { ...request.network, proxy: BACKFILL },
+      }),
+    });
+    const snapshot = parse(JSON.stringify({ tasks: [recordWithProxy('t1', null)] }));
+    await queue.restore(snapshot);
+    expect(queue.get('t1')?.request?.network.proxy).toBe(BACKFILL);
+    // The rehydrated request is what restart() runs on — the fake engine
+    // completes within the tick, which proves the run actually happened.
+    await queue.restart('t1');
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+
+  it('无钩子时 restore 原样保留（core 层无配置可读，缺省安全）', async () => {
+    const { queue } = session('complete');
+    const snapshot = parse(JSON.stringify({ tasks: [recordWithProxy('t1', null)] }));
+    await queue.restore(snapshot);
+    expect(queue.get('t1')?.request?.network.proxy).toBeNull();
+  });
+});

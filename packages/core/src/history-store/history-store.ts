@@ -195,8 +195,15 @@ export class HistoryStore implements IHistoryStore {
    * committed to memory after the atomic write succeeded. A persist failure
    * leaves the entry in memory AND on disk (no divergence, no compensation
    * needed) and the returned error surfaces to the caller unchanged.
+   *
+   * D-238: removes the history ROW only — never files. The former
+   * `deleteFile` option performed a permanent `fs.unlink` (§0.1 violation)
+   * on entry paths that carry no containment proof (no request roots →
+   * D-203's red line) while `importJson()` accepts paths verbatim. Removed
+   * outright before any UI could wire it; file deletion stays exclusively
+   * with the `TASK_ACTION withFiles` chain and its full pre-flight doors.
    */
-  async remove(id: string, opts: { deleteFile?: boolean } = {}): Promise<boolean> {
+  async remove(id: string): Promise<boolean> {
     await this.init();
     const removed = await this.enqueue(async () => {
       const entry = this.entries.find((candidate) => candidate.id === id);
@@ -206,15 +213,7 @@ export class HistoryStore implements IHistoryStore {
       this.entries = next;      // commit memory only after the write succeeded
       return entry;
     });
-    if (removed === null) return false;
-    if (opts.deleteFile === true) {
-      const targets = [removed.videoPath, removed.audioPath, removed.thumbnailPath, ...removed.subtitlePaths]
-        .filter((value): value is string => typeof value === 'string' && value.length > 0);
-      for (const target of targets) {
-        try { await this.ports.fs.unlink(target); } catch { /* missing file is fine */ }
-      }
-    }
-    return true;
+    return removed !== null;
   }
 
   async exportJson(): Promise<string> {

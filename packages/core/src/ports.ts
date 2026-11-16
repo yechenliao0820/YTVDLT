@@ -123,7 +123,18 @@ export interface IHistoryStore {
   add(entry: HistoryEntry, opts?: { privateMode?: boolean }): Promise<HistoryAddResult>;
   query(q: HistoryQuery): Promise<HistoryEntry[]>;
   get(id: string): Promise<HistoryEntry | null>;
-  remove(id: string, opts?: { deleteFile?: boolean }): Promise<boolean>;
+  /**
+   * Remove one history ENTRY (the record row only). D-238: the former
+   * `deleteFile` option is gone, not hardened — it performed a permanent
+   * `fs.unlink` on paths that carry no containment proof (history entries
+   * have no request roots; D-203's red line says an unprovable path is never
+   * deleted), bypassed the §0.1 recycle-bin rule, and `importJson()` accepts
+   * entry paths verbatim — a fuse only waiting for UI wiring. Media files
+   * belong to the user; the one path that DOES delete files is the queue's
+   * `TASK_ACTION withFiles` chain (D-120/D-207/D-221/D-223), which runs the
+   * full containment + realpath pre-flight against trusted roots.
+   */
+  remove(id: string): Promise<boolean>;
   exportJson(): Promise<string>;
   importJson(json: string): Promise<number>;
 }

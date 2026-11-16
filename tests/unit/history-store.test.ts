@@ -111,7 +111,7 @@ describe('A-4.4-08 · query / search / filter', () => {
   });
 });
 
-describe('A-M2-21 · remove (optionally deleting files) + export/import', () => {
+describe('A-M2-21 · remove (row only — D-238 removed deleteFile) + export/import', () => {
   it('removes the entry and deletes the file only when asked', async () => {
     const { mem, store } = setup();
     const video = 'C:/out/Alpha [id].mp4';
@@ -123,17 +123,23 @@ describe('A-M2-21 · remove (optionally deleting files) + export/import', () => 
     expect(await store.remove('h1')).toBe(false);
   });
 
-  it('deleteFile removes video/audio/subtitle artifacts', async () => {
+  it('D-238 · remove() never touches files, whatever the entry paths say', async () => {
+    // The former `deleteFile` option ran a permanent fs.unlink over paths
+    // that `importJson()` accepts verbatim and that carry no containment
+    // proof — removed outright (see ports.ts IHistoryStore.remove). This
+    // pins the contract: every path a history row mentions survives a row
+    // removal, so a crafted history JSON can never delete a file.
     const { mem, store } = setup();
     const video = 'C:/out/a.mp4';
     const audio = 'C:/out/a.m4a';
     const sub = 'C:/out/a.en.srt';
     for (const path of [video, audio, sub]) mem.state.files.set(path, 'x');
     await store.add(entry({ videoPath: video, audioPath: audio, subtitlePaths: [sub] }));
-    expect(await store.remove('h1', { deleteFile: true })).toBe(true);
-    expect(mem.state.files.has(video)).toBe(false);
-    expect(mem.state.files.has(audio)).toBe(false);
-    expect(mem.state.files.has(sub)).toBe(false);
+    expect(await store.remove('h1')).toBe(true);
+    expect(await store.query({})).toHaveLength(0);
+    expect(mem.state.files.has(video)).toBe(true);
+    expect(mem.state.files.has(audio)).toBe(true);
+    expect(mem.state.files.has(sub)).toBe(true);
   });
 
   it('export/import round-trips and de-duplicates on import', async () => {
