@@ -39,6 +39,7 @@
 12. **维护完成后不要主动推送仓库或发布 Release**。等业主明确说「上传仓库」/「发布 release」再执行；执行后把仓库地址、分支、提交号与上传方法一起交给业主或下一位接手者（见 §11）。推送和发布是对外动作，不是收尾的自动步骤。**`main` 已受分支保护（§7.1）：任何推送只能推分支再开 PR，直推 `main` 会被 GH013 拒绝；不要试图找 API 绕过或临时关规则。所有推送统一走长期分支 `dev`（§7.1），不要为每一轮改动新建带编号的分支；PR 一律由业主自己创建，AI 不代开、不代合并。**
 13. **`README.md` 与 `README.zh-CN.md` 必须同时改**（D-100）：英文是默认门面，中文是镜像，两份章节一一对应、顶部各有语言切换行。只改一份等于制造两种真相；`docs/assets/` 里的截图随之更新时也要确认两份引用一致。
 14. **GitHub Release 说明一律用英文**：Release 页面是仓库门面，面向国际读者；中文只写进 `CHANGELOG.md` / `DECISIONS.md` 这类内部文档。发版时把英文说明贴进 Release，不要把中文正文直接发出去（`DECISIONS.md` 里的 D-xx 编号可以保留，作为可追溯的括注）。
+15. **拆分出来的模块不许回填**（D-225 / D-226）：新增职责一律按 **§3.0 落点表**写进对应模块，**不要图省事写回 `m5-channels.ts` / `queue.js` / `yt-dlp-engine.ts` / `task-queue.ts`**——这四个文件已按职责拆开，现在只承担「兼容入口 + 状态 owner」两项职责；把新逻辑塞回去，下一轮就会重新长回两千行，拆分白做。`settings.js` 与 `subtitle-picker.js` **尚未拆分**（D-225 缓拆），新逻辑照旧写进各自的面板/规则区，但不得把无关职责塞进来、也不得在拆分前继续扩大它们的职责面。判据不是文件大小，是**职责**：一处逻辑同时干两件事就该拆，同一职责散在三个文件就该并。
 
 ### 0.1 删除文件的规定（一次真实事故换来，不可协商）
 
@@ -115,6 +116,28 @@ ui（零依赖） ← preload ← apps/desktop
 ---
 
 ## 3. 功能 → 代码位置（最常改的重点文件）
+
+### 3.0 新代码落点（拆分后不许回填，D-225 / D-226）
+
+一句话判据：**有 DOM / bridge / timer / 进程 / I/O / 隐式全局 / 闭包可变状态 → 留在原 owner；都没有（纯函数、纯 DTO、纯字符串规则）→ 必须进新模块。**
+
+| 要加的东西 | 写到哪 | 不要写回 |
+|---|---|---|
+| M5 新通道的 handler 体 | 按域进 `m5-{task,download,site,settings}-handlers.ts` | `m5-channels.ts`（组合根只做类型 + 合并 + 共享闭包） |
+| 通道名 / payload 白名单 / DTO 投影 / 入参校验 | `m5-contracts.ts`（通道名本体仍只能改 `shared/src/ipc.ts`，append-only） | 组合根或各域文件 |
+| 预检 controller、取消/状态通道、进度映射 | `m5-channels.ts` 的 **D-160 共享闭包（唯一实例）** | 任何域文件；**禁止**新建第二个 scopes registry |
+| 队列页纯显示逻辑（DTO 投影 / 枚举镜像 / 格式化 / 进度模式 / 筛选计数） | `pages/queue/queue-model.js` | `queue.js` |
+| 队列页 DOM、事件、轮询 timer、页面状态 | `pages/queue/queue.js`（**唯一状态 owner**） | `queue-model.js`（必须保持零依赖，不得读 DOM / bridge） |
+| 设置页/字幕组件的新面板、新规则 | 各自文件内既有分区就近扩展（`settings.js` 的 `installXxx()` 面板函数、`subtitle-picker.js` 的选择规则区），**保持一个页面一个状态 owner** | 另建第二个页面状态 owner；把别页职责搬进来（两者尚未拆分，见 D-225 缓拆） |
+| yt-dlp 输出分类、stderr 关键字判定 | `engine-ytdlp/src/precheck-classify.ts` | `yt-dlp-engine.ts` |
+| 路径 / 字符串纯规则（如 aria2c 目录推导） | 同目录单职责文件（`aria2c-dir.ts` 即范例） | 同上 |
+| UTF-8 字节账目 / 尾缓冲 | `engine-ytdlp/src/utf8-tail.ts` | 同上 |
+| task-queue 纯函数（并发规则、快照指纹、历史条目、错误归一） | `core/src/task-queue/{concurrency,snapshot-projection,history-entry,app-error}.ts` | `task-queue.ts`（只留 `TaskQueue` 类与全部可变字段） |
+| 类实例字段 / 进程句柄 / 取消标记 / 写盘队列 | 原类原处（**唯一 owner**），不得复制到新模块 | 任何新拆出的纯函数模块 |
+
+**新增一个要被页面加载的 UI 模块，必须同步四处装载链**（漏一处 = 运行时静默失败或基线漂移）：① 页面 `index.html` 的 `<script>` 插入位置（普通脚本、非 ES module、顺序敏感）；② `tests/unit/ui-module-load-smoke.test.ts` 的 `MODULES` 清单；③ 两个 VM harness（`queue-page-harness.ts` / `subtitle-picker-harness.ts`）的 sources 与执行序；④ `tests/e2e/baselines/*.dom.html` 对应基线（按 §7 的按 case 重建流程）。字幕组件是**唯一**例外：只能由 `queue.js` 动态装载，任何静态 `<script>` 引用都会被 `subtitle-picker.test.ts` 的回归门判违例。
+
+**功能 → 文件对照表**
 
 | 要改的功能 | 先打开 |
 |---|---|
@@ -547,6 +570,7 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 
 | 想了解 | 看哪份 |
 |---|---|
+| **AI 工具入口（为什么接手者应当先读本手册）** | 仓库根 `AGENTS.md`——**只做路由**：指向本手册 + 三条最易踩的规则（不许回填 / 出修改文件清单 / 改行为留决策）。它不承载规则，冲突时以本手册为准 |
 | **版本流水（某版改了什么）** | `docs/CHANGELOG.md` |
 | **给外部看的产品门面（安装 / 构建 / 功能）** | `README.md`（英，默认）与 `README.zh-CN.md`（中，镜像）；截图在 `docs/assets/` |
 | 做过哪些决策、为什么 | `docs/DECISIONS.md`（最新编号看 `handoff-check.mjs` 输出） |
