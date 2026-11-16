@@ -26,15 +26,42 @@ export class HistoryStore implements IHistoryStore {
   private entries: HistoryEntry[] = [];
   private loaded = false;
   private writeQueue: Promise<void> = Promise.resolve();
+  /** Single-flight gate for the first load (D-227). Null until the first init. */
+  private initPromise: Promise<void> | null = null;
 
   constructor(deps: HistoryStoreDeps) {
     this.ports = deps.ports;
     this.filePath = deps.filePath ?? `${deps.ports.env.configDir()}/history.json`;
   }
 
+  /**
+   * D-227: single-flight initialisation. The OLD code set `loaded = true`
+   * BEFORE the first `await`, so a second caller arriving during the load saw
+   * "already loaded" and went straight into the write queue with an EMPTY
+   * `entries` array — its persist then overwrote the seeded history.json on
+   * disk (measured: both seeded rows lost, both new rows kept). Every
+   * concurrent caller now awaits the SAME promise, and `loaded` flips only
+   * after the read has been committed to `this.entries`, so a mutation can
+   * never run against a half-initialised store. A failed load clears the
+   * promise so the next caller retries instead of silently operating on an
+   * empty history forever.
+   */
   async init(): Promise<void> {
     if (this.loaded) return;
-    this.loaded = true;
+    if (this.initPromise === null) {
+      this.initPromise = this.load().then(
+        () => { this.loaded = true; },
+        (error: unknown) => {
+          this.initPromise = null; // allow a retry on the next call
+          throw error;
+        },
+      );
+    }
+    return this.initPromise;
+  }
+
+  /** The actual first read. Only ever runs once, inside {@link init}. */
+  private async load(): Promise<void> {
     await this.ports.fs.mkdir(this.ports.env.configDir());
     if (!(await this.ports.fs.exists(this.filePath))) {
       this.entries = [];

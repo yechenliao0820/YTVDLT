@@ -264,4 +264,91 @@ describe('persist-first, commit-after · history write failures leave no residue
       .entries.map((e) => e.id).sort();
     expect(diskIds).toEqual(['a', 'b']);
   });
+
+  it('D-227 cold start: a concurrent add() during the FIRST load must not drop seeded history', async () => {
+    const mem = createInMemoryPorts();
+    const historyPath = `${mem.ports.env.configDir()}/history.json`;
+    // Pre-existing history on disk (the case the previous test deliberately did not cover).
+    mem.state.files.set(historyPath, JSON.stringify({
+      schemaVersion: 1,
+      entries: [
+        entry({ id: 'old-1', videoPath: 'C:/out/old1.mp4' }),
+        entry({ id: 'old-2', videoPath: 'C:/out/old2.mp4' }),
+      ],
+    }));
+
+    // Block the FIRST read so the second add() arrives while init() is still
+    // loading. Both add() calls are issued before any await, so both enter
+    // init() synchronously — the interleaving is deterministic, not timing-based.
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolveGate) => { releaseRead = resolveGate; });
+    let gated = true;
+    const ports = {
+      ...mem.ports,
+      fs: {
+        ...mem.ports.fs,
+        readText: async (path: string): Promise<string> => {
+          if (gated && path === historyPath) {
+            gated = false;
+            await readGate;
+          }
+          return mem.ports.fs.readText(path);
+        },
+      },
+    };
+    const store = new HistoryStore({ ports });
+
+    const first = store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' }));
+    const second = store.add(entry({ id: 'new-b', videoPath: 'C:/out/b.mp4' }));
+    await Promise.resolve();
+    releaseRead();
+    const [r1, r2] = await Promise.all([first, second]);
+
+    expect(r1.added).toBe(true);
+    expect(r2.added).toBe(true);
+
+    const raw = mem.state.files.get(historyPath);
+    const diskIds = (JSON.parse(raw as string) as { entries: Array<{ id: string }> })
+      .entries.map((e) => e.id).sort();
+    // Seeded rows must survive AND both new rows must be present.
+    expect(diskIds).toEqual(['new-a', 'new-b', 'old-1', 'old-2']);
+    expect((await store.query({})).map((e) => e.id).sort()).toEqual(['new-a', 'new-b', 'old-1', 'old-2']);
+  });
+
+  it('D-227 a failed first load is retried instead of leaving the store permanently empty', async () => {
+    const mem = createInMemoryPorts();
+    const historyPath = `${mem.ports.env.configDir()}/history.json`;
+    mem.state.files.set(historyPath, JSON.stringify({
+      schemaVersion: 1,
+      entries: [entry({ id: 'old-1', videoPath: 'C:/out/old1.mp4' })],
+    }));
+
+    // First mkdir fails (transient EACCES); the OLD code left `loaded = true`
+    // forever, so every later add() would persist against an EMPTY array and
+    // overwrite the seeded row. The fix clears the cached promise and retries.
+    let failures = 1;
+    const ports = {
+      ...mem.ports,
+      fs: {
+        ...mem.ports.fs,
+        mkdir: async (dir: string): Promise<void> => {
+          if (failures > 0) {
+            failures -= 1;
+            throw new Error('EACCES: transient');
+          }
+          return mem.ports.fs.mkdir(dir);
+        },
+      },
+    };
+    const store = new HistoryStore({ ports });
+
+    await expect(store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' }))).rejects.toThrow('EACCES');
+    const retried = await store.add(entry({ id: 'new-b', videoPath: 'C:/out/b.mp4' }));
+    expect(retried.added).toBe(true);
+
+    const raw = mem.state.files.get(historyPath);
+    const diskIds = (JSON.parse(raw as string) as { entries: Array<{ id: string }> })
+      .entries.map((e) => e.id).sort();
+    expect(diskIds).toEqual(['new-b', 'old-1']);
+  });
 });

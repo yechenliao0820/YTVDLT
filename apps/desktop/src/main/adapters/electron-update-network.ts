@@ -223,7 +223,13 @@ export function parseUpdateProxy(raw: string): UpdateProxyConfig {
   if (mapping === undefined || parsed.hostname === '') {
     throw new UpdateProxyConfigError(INVALID_PROXY);
   }
-  if (parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
+  // WHATWG parses http(s) with `pathname === '/'`, but NON-special schemes
+  // (socks, socks4, socks5, socks5h) come back with `pathname === ''`. The old
+  // check only accepted '/', so every SOCKS proxy written the normal way
+  // (`socks5://127.0.0.1:7890`) was rejected as malformed. Both forms are the
+  // same "no path" case; a real path / query / fragment is still refused (D-228).
+  const hasPath = parsed.pathname !== '' && parsed.pathname !== '/';
+  if (hasPath || parsed.search !== '' || parsed.hash !== '') {
     throw new UpdateProxyConfigError(INVALID_PROXY);
   }
   const port = parsed.port === '' ? mapping.defaultPort : Number(parsed.port);
