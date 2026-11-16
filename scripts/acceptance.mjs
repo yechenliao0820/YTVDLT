@@ -546,6 +546,8 @@ const M3_TEST_FILE_MAP = {
   'task-queue-containment.test.ts': ['A-D184'],
   'artifact-containment-actions.test.ts': ['A-D184'],
   'ui-module-load-smoke.test.ts': ['A-D187'],
+  // A-D187 的静态半边：HTML 引用的本地 script/href 必须存在（不构建、不起浏览器）。
+  'ui-asset-references.test.ts': ['A-D187'],
   // D-228 · 更新链路传输层专属离线单测（D-214 缺口补齐）；文件映射到本断言。
   'electron-update-network.test.ts': ['A-D228'],
   'ui-queue-page.test.ts': ['A-D187'],
