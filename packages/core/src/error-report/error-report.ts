@@ -5,9 +5,13 @@
  * the URL, the task state and the FULL stderr — with every credential masked.
  *
  * Redaction happens HERE, not in the UI: `redactText()` covers `Cookie`,
- * `Authorization`, bearer tokens and URL userinfo, and `maskUrlSecrets()` covers
- * signed-query parameters (`token`, `sig`, `expire`, `key`, ...). `MediaFormat.url`
- * is never included because the report only reads the top-level task fields.
+ * `Authorization`, bearer tokens, URL userinfo and — since D-234 — signed-query
+ * VALUES anywhere in a line (`sig=`, `expire=`, `key=`, ...), which is what
+ * masks the verbose `[debug] Invoking http downloader on "…&sig=…&key=…"`
+ * lines the stderr field can carry. `maskUrlSecrets()` additionally keeps
+ * signed URLs READABLE (per-parameter masking, no rest-of-line consumption) —
+ * it is applied to `task.url` and the argv tokens. `MediaFormat.url` is never
+ * included because the report only reads the top-level task fields.
  */
 import type { TaskRecord } from '@ytvdlt/shared';
 import { redactText, REDACTED } from '../logger/redactor.js';

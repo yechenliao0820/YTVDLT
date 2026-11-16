@@ -48,7 +48,16 @@ const VALUE_OPTION_SET = new Map(
   Object.entries(REDACT_VALUE_OPTIONS).map(([option, count]) => [option.toLowerCase(), count]),
 );
 
-const INLINE_SECRET_RE = /(cookie|set-cookie|authorization|bearer|token|po_token|api[_-]?key|secret|password|credential)\s*[:=]\s*([^\r\n]+)/gi;
+// D-234: `sig` / `expire` / `key` classes added. Verbose stderr quotes signed
+// CDN URLs verbatim (`[debug] Invoking http downloader on "...?expire=…&sig=…&key=…"`)
+// and the error-report stderr path only ever runs THIS rule (never
+// maskUrlSecrets), so signed-query values survived into user-copied reports.
+// Longer forms precede their prefixes (signature→sig, expires→expire) so
+// alternation first-match resolves cleanly; bare `key` sits after
+// `api[_-]?key`. The rest-of-line consumption is unchanged: masking the tail
+// of a diagnostic line is the accepted cost (see maskUrlSecrets' note in
+// error-report.ts for why URLs never run this rule directly).
+const INLINE_SECRET_RE = /(cookie|set-cookie|authorization|bearer|token|po_token|api[_-]?key|secret|password|credential|signature|sig|expires|expire|exp|key)\s*[:=]\s*([^\r\n]+)/gi;
 const USERINFO_RE = /https?:\/\/[^/\s:@]+:[^/\s@]+@/gi;
 const COOKIE_LINE_RE = /^[^\s#]+\t[^\t]*\t[^\t]*\t[^\t]*\t[^\t]*\t[^\t]+\t[^\t]+$/;
 

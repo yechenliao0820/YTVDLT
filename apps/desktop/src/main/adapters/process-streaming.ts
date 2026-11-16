@@ -8,7 +8,19 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import type { ProcessPort, SpawnOptions, SpawnResult, StreamingSpawn } from '@ytvdlt/shared';
-import { STREAM_TAIL_MAX_BYTES, STREAM_TAIL_TRUNCATED_MARKER } from '@ytvdlt/shared';
+import {
+  STREAM_TAIL_MAX_BYTES, STREAM_TAIL_TRUNCATED_MARKER, TERMINATION_UNCONFIRMED_MARKER,
+} from '@ytvdlt/shared';
+
+/**
+ * D-235 — the streaming adapter's single termination grace, mirroring
+ * node-ports' OVERFLOW_SETTLE_GRACE_MS (R1-07) by value and by role:
+ * killTree's own taskkill spawn has no deadline, and `close` can lag `exit`
+ * indefinitely when a grandchild (PyInstaller's bootloader child, 手册坑 21)
+ * inherits the stdio pipes. Both waits get the same bound. Exported so tests
+ * can pin the upper limit, like every other ms constant in this repo.
+ */
+export const TERMINATION_GRACE_MS = 5_000;
 
 /** Absolute path of taskkill.exe (never rely on PATH). */
 export function taskkillPath(): string {
@@ -287,29 +299,70 @@ export function createStreamingProcessPort(options: StreamingProcessPortOptions 
       void killTree(pid, child);
     }, opts.timeoutMs);
 
-    const done = new Promise<SpawnResult>((resolve) => {
-      let settled = false;
-      const finish = (value: SpawnResult): void => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        resolve(value);
-      };
-      child.on('error', (error: Error) => finish({
-        exitCode: null, stdout: assembleStreamTail(stdoutTail),
-        stderr: `${assembleStreamTail(stderrTail)}${error.message}`, timedOut,
-      }));
-      child.on('close', (code: number | null) => finish({
-        exitCode: killRequested ? null : code,
-        stdout: assembleStreamTail(stdoutTail),
-        stderr: assembleStreamTail(stderrTail),
-        timedOut,
-      }));
+    // D-235: `settled` lives outside the executor because the exit watchdog
+    // below must be able to check it from its own callback.
+    let settled = false;
+    let exitGraceTimer: NodeJS.Timeout | null = null;
+    let resolveDone!: (value: SpawnResult) => void;
+    const done = new Promise<SpawnResult>((resolve) => { resolveDone = resolve; });
+    const finish = (value: SpawnResult): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (exitGraceTimer !== null) { clearTimeout(exitGraceTimer); exitGraceTimer = null; }
+      resolveDone(value);
+    };
+    child.on('error', (error: Error) => finish({
+      exitCode: null, stdout: assembleStreamTail(stdoutTail),
+      stderr: `${assembleStreamTail(stderrTail)}${error.message}`, timedOut,
+    }));
+    child.on('close', (code: number | null) => finish({
+      exitCode: killRequested ? null : code,
+      stdout: assembleStreamTail(stdoutTail),
+      stderr: assembleStreamTail(stderrTail),
+      timedOut,
+    }));
+
+    // D-235 (R1-07 parity with node-ports): `close` lags `exit` exactly while
+    // the stdio pipes are still open — a grandchild that inherits them
+    // (PyInstaller's bootloader child, 手册坑 21) holds the pipes long after
+    // yt-dlp itself exited, and a hung grandchild holds them forever, leaving
+    // `done` pending no matter how long the caller waits. Once the DIRECT
+    // child is confirmed exited (its own `exit` event armed this watchdog),
+    // waiting is provably pointless, so settle from the exit evidence after
+    // the same grace the bounded path uses. The watchdog can only be armed by
+    // the child dying, so a still-running download never sees it — and the
+    // D-142 window ("kill failed, tree still alive, no exit event") stays
+    // untouched: no settle there, the record keeps Running as designed.
+    child.on('exit', () => {
+      if (settled) return;
+      exitGraceTimer = setTimeout(() => {
+        exitGraceTimer = null;
+        if (settled || !childConfirmedExited(child)) return;
+        finish({
+          exitCode: killRequested ? null : child.exitCode,
+          stdout: assembleStreamTail(stdoutTail),
+          stderr: `${assembleStreamTail(stderrTail)}\n${TERMINATION_UNCONFIRMED_MARKER}`,
+          timedOut,
+        });
+      }, TERMINATION_GRACE_MS);
     });
 
     const kill = async (): Promise<boolean> => {
       killRequested = true;
-      const ok = await killTree(pid, child);
+      // D-235 (R1-07 parity with node-ports.terminate): killTree's own taskkill
+      // spawn has no deadline — a stuck killer would hang every awaiter (the
+      // queue's cancel, the D-142 "cancel again" retry). Race it against the
+      // grace; the taskkill keeps running either way, and a timeout answers
+      // the honest D-142 `false` ("not confirmed"), never a fabricated
+      // success.
+      let raceTimer: NodeJS.Timeout | null = null;
+      const bounded = new Promise<boolean>((resolve) => {
+        raceTimer = setTimeout(() => resolve(false), TERMINATION_GRACE_MS);
+      });
+      const attempt = killTree(pid, child).catch(() => false);
+      const ok = await Promise.race([attempt, bounded]);
+      if (raceTimer !== null) clearTimeout(raceTimer);
       return ok;
     };
 

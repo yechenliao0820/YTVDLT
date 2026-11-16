@@ -130,9 +130,23 @@ export interface SpawnResult {
 export interface StreamingSpawn {
   /** OS process id; may be null when spawn failed. */
   readonly pid: number | null;
-  /** Resolves when the process exits (same shape as SpawnResult). */
+  /**
+   * Resolves when the process exits (same shape as SpawnResult).
+   * D-235: the adapter may settle from EXIT evidence after a bounded grace
+   * when `close` never arrives (stdio held open by an inherited grandchild);
+   * such a result carries TERMINATION_UNCONFIRMED_MARKER in `stderr`. It does
+   * NOT settle while the child is still alive — a failed kill keeps the
+   * caller in the D-142 window (record stays Running, cancel is retryable).
+   */
   readonly done: Promise<SpawnResult>;
-  /** Terminate the process TREE (Windows: taskkill /T /F). Idempotent. */
+  /**
+   * Terminate the process TREE (Windows: taskkill /T /F). Idempotent.
+   * D-235: the answer is bounded — `false` means "termination NOT confirmed"
+   * within the grace (e.g. the killer itself is stuck), never a fabricated
+   * success; the D-142 contract (record stays Running, cancel again is safe)
+   * applies unchanged. A late taskkill that lands afterwards still stops the
+   * tree in the background.
+   */
   kill(): Promise<boolean>;
 }
 

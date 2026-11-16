@@ -2499,3 +2499,23 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① 每次下载写到唯一暂存名 `<asset>.<uuid>.download`，**校验这个文件**；② 校验通过才发布：同名旧文件先 `isolateFile(..., 'replaced')` 移开（沿用「只隔离不删除」），移不动就**放弃发布**、把已验证的暂存文件当安装路径交出去（`install()` 只需要一条路径）；rename 失败则把旧文件放回原名并仍用暂存路径；③ sidecar 写在最终发布的路径上；④ 取消落在「字节完成、尚未校验」的窗口时，暂存文件走 `trashPartial` 回收（回收站，不永久删除）。缓存复用路径（`verifiedCachedFile`）逻辑不动。 |
 | 验证 | `app-update-service-cache.test.ts` 新增 2 例：① 新下载校验失败 → 既有同名文件**逐字未变**、被拒的暂存文件带 `.rejected-` 隔离（旧代码此处旧文件已被覆盖）；② 校验成功 → 同名位置是新包、sidecar 匹配新哈希、旧文件以 `.replaced-` 完整保留、`install()` 打开的正是发布路径。`app-update-service.test.ts` 的 digest 闸门断言由「前缀匹配 `<asset>.rejected-`」改为「含 `.rejected-`」并注明原因（被拒的是暂存文件）。还原旧 `app-update-service.ts` 后两例红。全量同上。 |
 | 未覆盖 | 未在本机做破坏性复现（真去覆盖一个 220 MB 旧包再校验失败），只在临时目录用假下载器复刻；`.replaced-*` 不设自动清理，长期多次换版会在 updates 目录留下旧包（与 `.rejected-*` 同一策略，留给业主决定是否加清理）。 |
+
+## D-234 · 2026-11-16 · redactText 补齐签名 URL 参数类键：verbose stderr 不再把 sig/expire/key 明文带出（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 在线审计指出：verbose 模式的 stderr 行 `[debug] Invoking http downloader on "...?expire=…&sig=…&key=…"` 经 `redactText()` 后原样输出，错误报告的 stderr 字段签名值明文保留。审计同时如实标注了可达性：`--verbose` 只在 `plan.debug` 时加入 argv（`firesForDefaultRequest: false`），默认关闭；触发需用户开 debug + 复制错误报告外贴，P3 定级准确。 |
+| 根因 | `redactor.ts` 的 `INLINE_SECRET_RE` 覆盖 cookie/token/password 等 11 类键，但不含 `sig` / `expire` / `key`；而错误报告链路里 `maskUrlSecrets()` 只应用于 `task.url` 与 argv 令牌，**stderr 只走 `redactText()`**（`error-report.ts::buildErrorReport`）——头注释声称 stderr 已被覆盖与实际不符。同一缺口也影响 `error-mapper.ts::build` 的 `detail`（进 `error.report` 与 JSONL 日志的 stderr 字段），不止单一出口。 |
+| 决策 | `INLINE_SECRET_RE` 追加 `signature|sig|expires|expire|exp|key` 六个键类（长形排在短形前，避免 alternation 前缀语义漂移；裸 `key` 置于 `api[_-]?key` 之后）。「匹配后吞掉整行剩余部分」的既有语义不变——这正是 `maskUrlSecrets` 刻意不把 URL 直接交给该规则的原因，其注释依旧成立；本次只是让**字符串形态**（stderr / 日志正文）也覆盖签名参数。`SENSITIVE_KEYS`（对象键脱敏表）刻意不动：`key` 作为对象字段名过泛，会过度脱敏日志结构，而签名参数在本仓只以字符串形态出现在 stderr / 日志正文里。`error-report.ts` 头注释如实化。 |
+| 验证 | `redactor-m3.test.ts` 新增 4 例：审计复现行（expire/sig/key 三值）经 `redactText` 后明文均不存活；六个新键类逐一脱敏；非敏感 query 参数与纯文本逐字不变（`?v=abc&itag=22`）；`buildErrorReport` 的 stderr 字段无明文签名值、而 url 字段保持 `maskUrlSecrets` 的逐参数可读形态。全量 170 文件 / 2869 项 0 failed；typecheck 5 包过。 |
+| 未覆盖 | verbose 同一条 stderr 也会进 JSONL 日志（logger 同走 `redactText`，本修复同批覆盖），但「开 debug 下载 + 复制日志外贴」未做真机演练；`sp` / `sparams` 等衍生键未纳入——带 `sig=` 的行已被 rest-of-line 规则顺带吞掉，单独出现的场景无证据，待真实样本再扩。 |
+
+## D-235 · 2026-11-16 · 下载路径 settle 与 bounded 路径对齐：exit 证据看门狗 + kill 有界应答（外部在线审计 P4）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 在线审计指出：下载路径的 `spawnStreaming`（`process-streaming.ts`）`done` 只由 child `error` / `close` 两个事件 settle，无第三兜底；对比 `node-ports.ts` 有界路径（R1-07：kill 竞速 + `OVERFLOW_SETTLE_GRACE_MS` 强制 settle）健壮性不对称。审计同时交底：触发「永久卡死」需要 taskkill.exe 自身卡死或进程进入内核态不可中断等待，常规用户态 yt-dlp 会被 `taskkill /F` 杀掉，P4 定级准确。 |
+| 根因 | 下载不传 `timeoutMs` 是**有意设计**（长下载合法运行数小时，杀进程式超时是 D-133 只给有界元数据的待遇），但「kill 已请求 / 子进程已死而 close 未到」的窗口没有任何 settle 兜底；`killTree` 内部的 taskkill spawn 也没有 deadline——卡死会连 cancel 请求一起挂住（`cancel()` 返回 `killTree()`）。 |
+| 决策 | 两处改动，均镜像 node-ports 已评审过的模式，不发明新原语：① **exit 证据看门狗**——`exit` 事件武装、`TERMINATION_GRACE_MS`（=5 s，与 `OVERFLOW_SETTLE_GRACE_MS` 同值导出）后若仍未 settle 且 `childConfirmedExited`（`exitCode`/`signalCode` 已置，D-142 的权威退出证据）则 settle：`exitCode` 语义与 close 分支完全一致（`killRequested` → null），`stderr` 追加中性的 `TERMINATION_UNCONFIRMED_MARKER`（不含错误关键词表触发词）。看门狗只能被子进程自己的 exit 武装，**运行中的下载永远不可达**，D-142「kill 失败保持 Running、不结算、可再取消」的僵尸窗口一字未动——若在「kill 未确认但子进程仍活着」时强制 settle，队列会释放槽位并允许同 taskId 二次 spawn，正是 D-142 修掉的「双进程写同一临时目录」的入口，刻意不做。② **`kill()` 与 killTree 竞速同一宽限**：超时回答诚实的 `false`（D-142「未确认」语义），后台 taskkill 继续执行，绝不伪造成功。`ports.ts` 的 `StreamingSpawn.done` / `kill()` 契约注释同步如实化。 |
+| 验证 | `stream-tail-buffer.test.ts` 新增 3 例：⑤ 健康路径（close 正常到达）无 stall、无 marker（看门狗被 finish 清除，不误触发）；⑥ 请求 kill 的快路径在宽限内返回 `true` 且无 marker（竞速不给健康路径加延迟）；⑦ 触发分支由**能力探测门控**——两次真实子进程探针实测本平台（Windows、随包 node）close 恒随 exit ≤ 4 ms 到达、孙进程继承 stdio 不延迟 EOF，触发分支在本平台不可复现，按 D-206/D-207 先例显式 skip（探测具备的平台会真跑）。全量 170 文件 / 2869 项 0 failed（6 skip 全为能力门）；typecheck 5 包过；check-layering 0 违规；frozen-gate PASS。 |
+| 未覆盖 | ① 看门狗触发分支在本平台无手段复现（Windows 上 exit→close 滞后仅剩内核态不可中断等待一种路径）；② stuck-taskkill 模拟无本地手段（`taskkill` 注入只换可执行路径，不能注入挂死行为），kill 竞速只有快路径与既有 kill 用例覆盖；③ 内核态不可中断等待导致的 done 挂起仍由 D-142 兜底（记录保持 Running、可再取消、进程退出后自愈），不做无条件强制 settle。 |

@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import {
   Logger, redact, redactArgv, redactArgvN, redactText, detectComplianceBlocked,
   REDACT_VALUE_OPTIONS, COMPLIANCE_BLOCKED_TOKENS, SENSITIVE_KEYS, REDACTED,
+  buildErrorReport,
 } from '@ytvdlt/core';
 import { createInMemoryPorts } from './helpers/in-memory-ports.js';
 
@@ -130,5 +131,64 @@ describe('B1 redactor · Logger JSONL + crash report stay fully redacted', () =>
     expect(body).toContain('0.1.0');
     for (const secret of SECRETS) expect(body).not.toContain(secret);
     expect(body).not.toContain('session=secret');
+  });
+});
+
+describe('D-234 redactor · signed-query values no longer survive redactText', () => {
+  // The audited repro: verbose mode quotes signed CDN URLs verbatim, and the
+  // error report's stderr field only ever runs redactText — never
+  // maskUrlSecrets. (--verbose is added only for plan.debug, so the leak
+  // needs debug + a copied report; that reachability note lives in D-234.)
+  const VERBOSE_LINE = '[debug] Invoking http downloader on '
+    + '"https://cdn.example.org/videoplayback?expire=1700000000&ei=abc&sig=ABCDEF123456&key=vt&ip=1.2.3.4"';
+
+  it('the audited verbose line leaks no signed value', () => {
+    const out = redactText(VERBOSE_LINE);
+    for (const secret of ['1700000000', 'ABCDEF123456', 'vt']) {
+      expect(out, `signed value "${secret}" survived redactText`).not.toContain(secret);
+    }
+    expect(out).toContain(REDACTED);
+  });
+
+  it('every newly covered key class masks its value', () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['sig=ABC', 'ABC'], ['signature=ABC', 'ABC'],
+      ['expire=123', '123'], ['expires=123', '123'], ['exp=123', '123'],
+      ['key=vt', 'vt'],
+    ];
+    for (const [line, secret] of cases) {
+      expect(redactText(line), line).not.toContain(secret);
+      expect(redactText(line)).toContain(REDACTED);
+    }
+  });
+
+  it('non-sensitive query parameters and plain text stay untouched', () => {
+    expect(redactText('https://example.org/watch?v=abc&itag=22'))
+      .toBe('https://example.org/watch?v=abc&itag=22');
+    expect(redactText('Downloading webpage https://example.org/v'))
+      .toBe('Downloading webpage https://example.org/v');
+    // api[_-]?key keeps matching exactly as before (ordering: api key first).
+    expect(redactText('apikey=XYZ')).not.toContain('XYZ');
+  });
+
+  it('buildErrorReport masks signed values in the stderr field (the audited path)', () => {
+    const task = {
+      id: 't1',
+      url: 'https://cdn.example.org/videoplayback?expire=1700000000&sig=ABCDEF123456&key=vt',
+      state: 'Error',
+      lastPercent: null,
+      error: null,
+      artifacts: [],
+    } as unknown as Parameters<typeof buildErrorReport>[0]['task'];
+    const report = buildErrorReport({
+      task, appVersion: '0.0.0', engineVersion: '0.0.0', os: 'win32',
+      stderr: VERBOSE_LINE,
+    }, '2026-01-01T00:00:00.000Z');
+    expect(report.stderr).not.toContain('ABCDEF123456');
+    expect(report.stderr).not.toContain('1700000000');
+    expect(report.stderr).toContain(REDACTED);
+    // The URL field keeps maskUrlSecrets' readable per-parameter shape.
+    expect(report.url)
+      .toBe('https://cdn.example.org/videoplayback?expire=***REDACTED***&sig=***REDACTED***&key=***REDACTED***');
   });
 });
