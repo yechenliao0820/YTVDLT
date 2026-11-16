@@ -2429,3 +2429,23 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① 两处锚点改为真实落点（`m5-settings-handlers.ts::readAutostart`、`m5-contracts.ts::MAX_URL_CHARS`），纯证据字符串，判据、门禁逻辑、断言集合零改动。② 手册 §0 追加**铁律 15「拆分出来的模块不许回填」**，并在 §3 前插入 **§3.0 新代码落点表**（10 行：handler 按域进 `m5-*-handlers.ts`；通道名/白名单/DTO/校验进 `m5-contracts.ts`；共享预检闭包只能留组合根且禁止第二个 registry；队列页纯显示进 `queue-model.js`、DOM/timer/页面状态留 `queue.js`；engine 分类/路径/UTF-8 各自落位；task-queue 纯函数进四模块、状态字段留原类），并给出「纯函数 vs 状态 owner」判据与「UI 新模块必须同步四处装载链（index.html / 冒烟 MODULES / 两个 VM harness / e2e 基线）+ 字幕组件唯一动态装载例外」。外层手册副本同步。③ 本轮**未提交、未推送、未打包、未发布**，改动留业主决定。 |
 | 验证 | 有 node/pnpm/无头浏览器（Chrome for Testing 151.0.7922.34，与基线同版本）的机器上，七项门禁 + 冻结门禁全部实跑：typecheck turbo 5/5；layering 0 violations；unit 162 文件 2770 通过（5 skip 全为能力门：文件符号链接 EPERM、UNC 不可构造）；contract 6 文件 53 通过；integration offline 12 文件 40 通过；acceptance M1 17/17 断言 + 5/5 接收项、覆盖率 87.00%；acceptance M5 59/62 断言 + 3 项如实 deferred、10/10 gates、覆盖率 86.98%；e2e 31/31 用例 + 5/5 负向检查、逐例 0px 像素差；frozen-gate PASS。**计数对账**：2770+53=2823（与前七轮基线逐字一致）+40 集成 = 2863 = 全量配置运行的通过数（0 失败、7 pending 全部可解释）。**跨版本**：Node 22.22.2 与 Node 24.22.2 各跑一遍 unit+contract，结果逐字相同。**循环依赖静态扫描**（221 个生产文件）：仅 1 个环且为类型环——组合根与四域模块双向引用全部是 `import type`，编译期擦除，运行时单向。**证据锚点扫描**：94 条路径 + 全部 `::` 符号，改后缺失 0、不可解析 0。 |
 | 未覆盖 | 真机项仍未验证（Windows 托盘、真实下载/取消、NSIS 打包安装、更新器闭环——即 M5 的 A-4.4-28 / A-4.4-29 / A-D118-RESUME 三项 deferred 与 N1/N2/N3）；本机 5 个能力门 skip（文件符号链接需 SeCreateSymbolicLinkPrivilege、UNC 管理员共享不可稳定构造），junction 用例全部实跑；`test:online` 需真实国际网，与 CI 一致排除；settings.js 与 subtitle-picker.js 仍缓拆（与 D-225 同策略）；循环依赖为静态近似，不解析字符串拼接的动态 specifier（全仓动态 import 仅 4 处固定字面量）；外层 `docs/DECISIONS.md` / `DELIVERY-REPORT.md` 副本仍落后于项目内，是否补同步留业主裁决。 |
+
+## D-227 · 2026-11-16 · HistoryStore 冷启动单飞：并发 add 不得覆盖既有历史
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 外部 AI 审计（业主 2026-11-16 转述）指出 `history-store.ts::init()` 在首个 `await` **之前**就把 `loaded` 置为 true，冷启动期间第二个调用者会带着尚未载入的 `entries` 进入写队列。主控未直接采信，先构造确定性用例复现：结果比审计描述更重——**不是丢一条，而是既有历史被整段覆盖**（实测：预置 old-1/old-2，并发两次 add 后磁盘只剩 new-a/new-b，两条旧记录消失）。 |
+| 根因 | `loaded` 语义错位：它表示「已开始初始化」而非「已就绪」。① 第二个调用者（`add`/`remove`/`query` 任一）看到 true 立即返回，其写队列任务用**空数组**作为基线 `persist()`，原子写把磁盘旧历史替换成「仅新记录」；② 第一路 `init` 读完又把 `this.entries` 赋成旧文件内容，内存与磁盘出现第二次分歧；③ 同一缺陷的第二个入口：`mkdir` 抛错时 `loaded` 永久为 true，此后每次写都以空基线落盘，等于把用户历史逐步抹掉。审计只提到 ① 的时序，未提 ③。 |
+| 决策 | 单飞初始化：新增 `initPromise`，并发调用者共享同一个加载 Promise；`loaded` 只在 `load()` 成功**返回后**置位；加载失败清空 `initPromise` 以允许重试（不再永久锁死）；原 `init()` 体内的读取抽成私有 `load()`。对外 API、persist-first/commit-after 契约、写队列串行语义、损坏 JSON 回退空表的行为**一字未改**；未引入锁、未改调用点。 |
+| 验证 | 两条新确定性用例（`history-store.test.ts`）：① 阻塞首次 `readText` 后并发两次 `add()`，断言磁盘与内存同时保留 old-1/old-2/new-a/new-b——修复前**红**（旧历史全失），修复后绿；② `mkdir` 一次性失败后再次 `add()` 成功且旧记录保留——修复前红（旧代码永久空基线，写掉 old-1），修复后绿。全量：unit 162 文件 2792 通过 / 5 skip、contract 53、integration offline 40、`typecheck` 5/5、`layering` 0 violations、M5 验收 10/10 gates。 |
+| 未覆盖 | 真机冷启动极端时序（应用启动瞬间恰有多个下载同时完成）未在打包版构造；HistoryStore 为单例，进程内多实例竞争不在范围；`writeTextAtomic` 的底层原子性未变，跨文件事务仍不存在（与 D-222 同级限制）。 |
+
+## D-228 · 2026-11-16 · 更新链路传输层专属离线单测 + SOCKS 代理无尾斜杠缺陷
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 审计同时指出 `main/adapters/electron-update-network.ts`（703 行）没有专属离线单测——手册 §10 早已登记该缺口，属既有欠账而非拆分回归。主控在补测试的过程中发现一个**真实功能缺陷**：`network.proxy = socks5://127.0.0.1:7890`（SOCKS 家族最常见的写法）会被判为「配置非法」，用户等于无法使用 SOCKS 代理。 |
+| 根因 | WHATWG `URL` 对**非特殊 scheme**（`socks:` / `socks4:` / `socks5:` / `socks5h:`）解析出的 `pathname` 是空串，而只有特殊 scheme（http/https）才是 `'/'`。校验写成 `pathname !== '/'` 抛错，于是整个 SOCKS 家族的标准写法被拒；HTTP(S) 因恒为 `'/'` 而从未暴露。D-214 落地时无专属测试，所以这条路径一直没人跑过。 |
+| 决策 | ① 校验改为「`pathname` 为空或 `'/'` 视为无路径」，真实路径 / `search` / `hash` 仍拒绝（`/x`、`?a=1`、`#f` 保持非法）。② 新增 `tests/unit/electron-update-network.test.ts`（20 例，全部离线、无 electron 依赖）：代理解析 8 例（空配置=system 而非 DIRECT、七种 scheme 与默认端口、凭据不进 `proxyRules`/key/partition、key 随凭据变化、七类非法输入、SOCKS 尾斜杠两种写法等价）；重定向守卫 5 例（相对 Location、跳数上限、HTTPS 降级、策略拒绝、环路/非 http/空 Location）；Session 生命周期 4 例（system 单分区复用、固定代理 rules 无 userinfo、配置变更各自成 Session、建立失败可重试）；请求驱动 6 例（hop 0 策略门在发请求前拒绝、login 只在固定代理模式安装且只答匹配端点、system 模式不装 login、校验通过的相对重定向被 follow、被策略拒绝的重定向不 follow、content-length 超预算即拒）。③ acceptance 增加 `A-D228` 并把测试文件登记进 `M3_TEST_FILE_MAP`（否则 `M5-GATE-file-coverage` 判 unmapped）。 |
+| 验证 | 新文件 20/20 通过（186 ms）；修复前 `socks5://…` 两例红，修复后绿。全量：unit 162 文件 2792 通过 / 5 skip、contract 53、integration 40、`typecheck` 5/5、`layering` 0、M5 验收 63 断言（59 PASS + 3 deferred）+ 10/10 gates、e2e 31/31 + 5/5。**用户可见修复**（SOCKS 代理从此可配置）：`docs/CHANGELOG.md` 按本项目惯例只在发版时成行，故并入下一版（0.3.2）发布行，随版本号一起提交。 |
+| 未覆盖 | 真机代理环境仍全部未验收：系统代理 / PAC / WPAD 自动发现、SOCKS 认证与 407 握手、TUN / Fake-IP、CDN 多跳真实重定向、安装包流式下载与中途取消的真实时序。单测只覆盖本层自己的判定与生命周期，**不能**据此宣称上述场景已验证（手册 §10 与 D-214「未覆盖」的结论保持不变）。 |

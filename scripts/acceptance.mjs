@@ -546,6 +546,8 @@ const M3_TEST_FILE_MAP = {
   'task-queue-containment.test.ts': ['A-D184'],
   'artifact-containment-actions.test.ts': ['A-D184'],
   'ui-module-load-smoke.test.ts': ['A-D187'],
+  // D-228 · 更新链路传输层专属离线单测（D-214 缺口补齐）；文件映射到本断言。
+  'electron-update-network.test.ts': ['A-D228'],
   'ui-queue-page.test.ts': ['A-D187'],
   'ui-subtitle-picker.test.ts': ['A-D187'],
   'ui-txt-import.test.ts': ['A-D187'],
@@ -1448,6 +1450,7 @@ const M5_ASSERTIONS = [
   // ctx.skip（带 reason，输出可数），junction 用例永远执行；「中间 junction」逃逸已由
   // D-207 预检关闭（A-2b/A-2c/A-2d 为严格拒绝断言），TOCTOU 竞态登记为已知边界不做抖动测试。
   { id: 'A-D206', layer: 'L1', subject: 'Windows 真实文件系统链接安全（D-203 删除守卫 + D-204 realpath 打开守卫）：指向根外的目录 junction / 悬空 junction / junction 循环在删除面一律拒绝（符号链接/联接无法验证归属、trashItem spy 零误收、目标文件完好、悬空不误入 missing 幂等分支）；打开面经真实 realpath 解析最终目标后重过 containment——junction 指向根外/循环 → REFUSED（含「符号链接/联接」「无法证明路径安全」），指向根内/大小写变体/\\?\\ 前缀 → OK 且 shell 收到原始路径，悬空链接 → FILE_MISSING/目录回退而非安全拒绝；能力探测（文件符号链接 EPERM、UNC 管理员共享稳定性）驱动受限用例显式 ctx.skip 且每个 describe 保留永远执行的探测用例；删除面「中间 junction」逃逸（产物字符串在根内、末段 lstat 穿透）已由 D-207 预检关闭——realpath 解析到根外/父目录不可解析 → 整批拒绝、回收站零调用、记录保留，stat→trashItem TOCTOU 竞态登记为不测边界', tests: ['win-fs-link-security'], needs: ['vitest'], evidence: ['reports/vitest-results.json::win-fs-link-security.test.ts', 'apps/desktop/src/main/adapters/local-file-status-port.ts::createTrashFilesPort', 'packages/core/src/task-detail/task-detail.ts::resolveRealPath', 'apps/desktop/src/main/adapters/node-ports.ts::realpath'] },
+  { id: 'A-D228', layer: 'L1', subject: '更新链路传输层的专属离线单测（D-214 遗留缺口）：代理解析含 SOCKS 无尾斜杠写法、HTTPS 降级/环路/策略拒绝的重定向守卫、一配置一 Session 与创建 Promise 缓存、session 建立失败可重试、login 只在固定代理模式安装且只答匹配的代理端点、体积上限', tests: ['electron-update-network'], needs: ['vitest'], evidence: ['reports/vitest-results.json::electron-update-network.test.ts', 'apps/desktop/src/main/adapters/electron-update-network.ts::parseUpdateProxy', 'apps/desktop/src/main/adapters/electron-update-network.ts::evaluateRedirectHop', 'docs/DECISIONS.md::D-228'] },
 ];
 
 /** M5 e2e cases that must exist and pass for the visual assertions. */
