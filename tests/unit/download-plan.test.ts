@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  resolveDownloadPlan, PRIVATE_OUTPUT_DIR,
+  resolveDownloadPlan,
 } from '@ytvdlt/core';
 import type {
   DownloadRequest, FormatDomain, SubtitleDomain, PathsDomain,
@@ -384,9 +384,14 @@ describe('B1 · network / advanced / path derivation', () => {
       .toBe('C:/V/%(extractor_key)s/%(playlist)s');
   });
 
-  it('privateMode routes output to the private directory', () => {
-    const plan = resolveDownloadPlan(req({ paths: paths({ privateMode: true }) }));
-    expect(plan.outputDir).toBe(PRIVATE_OUTPUT_DIR);
+  it('D-229: private mode keeps the root the intake resolved (no %VAR% in -P)', () => {
+    // The private directory is expanded and written into request.paths at
+    // intake (`m4-host.ts::readDefaults`); the pure planner must not swap in a
+    // `%LOCALAPPDATA%` token — a spawned yt-dlp never expands it (D-79), and
+    // the artifacts would then land outside the request roots.
+    const plan = resolveDownloadPlan(req({ paths: paths({ privateMode: true, videoDir: 'C:/private' }) }));
+    expect(plan.outputDir).toBe('C:/private');
+    expect(plan.outputDir).not.toContain('%');
     expect(plan.privateMode).toBe(true);
   });
 

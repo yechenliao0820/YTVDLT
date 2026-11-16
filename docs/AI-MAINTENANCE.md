@@ -154,7 +154,7 @@ ui（零依赖） ← preload ← apps/desktop
 | 生产依赖装配、回收站删除、无痕清理、真实入口 | `apps/desktop/src/main/electron-entry.ts` / `main.ts` |
 | IPC 通道白名单、payload 校验、DTO、设置读写 | 组合根 `apps/desktop/src/main/m5-channels.ts`（类型 + `M5ChannelDeps` + D-160 共享预检闭包 + 四域合并）；白名单/DTO 在 `m5-contracts.ts`；四域 handler 在 `m5-{task,download,site,settings}-handlers.ts`（**禁止绕过组合根注册**）；装配在 `m5-host.ts` / `m4-host.ts` |
 | 粘贴入队、格式选择落到下载请求 | `m5-download-handlers.ts::DOWNLOAD_START`（经组合根 `m5-channels.ts`）→ `m4-host.ts::applyFormatChoice` / `enqueueSingle` |
-| 下载计划、清晰度、音频码率、私有模式 | `packages/core/src/decision/download-plan.ts`、`config-store/defaults.ts` |
+| 下载计划、清晰度、音频码率、私有模式 | `packages/core/src/decision/download-plan.ts`、`config-store/defaults.ts`；**无痕路由只在入口做一次**（`m4-host.ts::readDefaults` 展开私有目录写入 `request.paths`，D-229），`buildOutputDir` 不再按 `privateMode` 换根——纯计划器绝不产出 `%VAR%`（D-79 推论）；清理规则在 `core/src/task-queue/private-cleanup.ts`（D-232） |
 | **下载中间文件（`.part` / `.part-FragN.part` / `.ytdl`）落在哪** | `core/src/path-resolver/volume.ts::resolveDownloadTempDir`（同卷才用私有 work 目录，否则 `<outputDir>/.ytvdlt-incomplete/<taskId>`）→ `main/m4-host.ts::resolveTempDirFor`（写进 `request.paths.tempDir`）→ `engine-ytdlp/src/argv-builder-download.ts`（`-P temp:`）+ `yt-dlp-engine.ts`（cwd、manifest、成功后 `rmdir` 空目录） |
 | **子进程 TEMP / `_MEI*`** | `engine-ytdlp/src/yt-dlp-engine.ts::spawnBase` —— cwd 钉在可写目录，**TEMP 一律不再覆盖**（`_MEI` 必须留在系统临时目录，见 §9 坑 20） |
 | yt-dlp 参数、进度、产物清单 | `packages/engine-ytdlp/src/argv-builder-download.ts`、`progress-parser.ts`、`artifact-manifest.ts` |
@@ -255,7 +255,7 @@ ui（零依赖） ← preload ← apps/desktop
 1. **payload 键白名单**：`m5-contracts.ts::PAYLOAD_KEYS` 只放行登记过的键，多一个直接抛错；枚举值越界同样拒收，不会带进 argv。
 2. **URL 脱敏**：`TASK_LIST` 不返回 URL；`TASK_DETAIL` 返回 `maskUrlSecrets()` 后的值。新增字段别把原始链接带出去。
 3. **删本地文件**：`TASK_ACTION` 的 `withFiles: true` 只允许配 `action: 'remove'`；主进程只取该任务 `artifacts`，经 `TrashFilesPort` 移入回收站，**部分失败保留记录**。
-4. **无痕**：`SETTINGS_SET` 的 `privateMode` 只收 boolean，`SETTINGS_GET` 回读；关闭窗口时清任务记录，**不动本地文件**。
+4. **无痕**：`SETTINGS_SET` 的 `privateMode` 只收 boolean，`SETTINGS_GET` 回读；**唯一真相源是 `general.privateMode`**（`paths.privateMode` 是禁读的遗留键，D-229）。入口 `m4-host.ts::readDefaults` 把开关与**展开后的**私有目录一起写进请求（`videoDir` / `audioDir` = `%LOCALAPPDATA%/YTVDLT/private` 的绝对形式），因此 `-P` 永不含 `%VAR%`；关窗时只清 `record.privateMode === true` 且不占槽位的记录，不动本地文件、不碰普通记录（D-232）。
 5. `PROBE` / `PROBE_PLAYLIST` / `DIALOG_CONFIRM` 仍是 fixture 通道，别当成真实能力。
 6. **更新三分家**（D-93 / D-94）：`APP_UPDATE_*` 管应用本体（GitHub Release），`COMPONENT_CHECK` / `COMPONENT_UPDATE` 管随包二进制，`COMPONENT_STATUS` 只读本地版本。`APP_UPDATE_STATUS` 是纯内存读，队列页与设置页都以轮询方式消费，**不要为它加主进程推送**。
 7. **`TASK_LIST` 只回本地封面路径 `thumbPath`**：远端缩略图 URL 由主进程缓存成文件，URL 本身永不出主进程（与 URL 脱敏同一条规则）。
@@ -288,7 +288,8 @@ ui（零依赖） ← preload ← apps/desktop
 | 用户改过下载目录 | `paths.videoDir` / `paths.audioDir` 存**绝对路径**；未改过则存 token（`%USERVIDEOS%/…`），换机器仍跟用户目录走（D-98 / D-117） |
 | **应用内部工作目录** | `<dataDir>/work/<taskId>/`：yt-dlp 产物清单、子进程 `cwd`、以及 `-P temp:` 指向的中间文件（`.part` / `.part-FragN.part` / `.ytdl`）。**按任务隔离**；清单读取并交接后才删除，成功后若目录为空则非递归 `rmdir`。**这就是续传的凭据，不要当成垃圾清理**（D-118） |
 | **跨卷时的中间文件** | `<outputDir>/.ytvdlt-incomplete/<taskId>/`：当 `<dataDir>` 与输出目录不在同一卷（或卷无法判定）时使用。放在输出目录内部是为了保证收尾的 `shutil.move` 退化成 rename，而不是整份复制 |
-| 封面缓存 / 更新包 | `<dataDir>\thumbs\<sha1(url)>.<ext>`、同目录 `index.json`（D-103 持久索引：taskIds / bytes / lastUsedAt）、`<dataDir>\updates\YTVDLT-Setup-*.exe`（D-93 / D-96） |
+| **无痕下载的产物** | `%LOCALAPPDATA%\YTVDLT\private`（`PRIVATE_OUTPUT_DIR`）：入口把它展开后写进请求的 `videoDir` / `audioDir`，所以 `-P`、产物封链根、历史跳过三者一致（D-229）。无痕任务**不写** `history.json`；关窗只清这些任务自己的队列记录（D-232） |
+| 封面缓存 / 更新包 | `<dataDir>\thumbs\<sha1(url)>.<ext>`、同目录 `index.json`（D-103 持久索引：taskIds / bytes / lastUsedAt）、`<dataDir>\updates\YTVDLT-Setup-*.exe`（D-93 / D-96）；**更新包先落 `<asset>.<uuid>.download` 暂存、校验通过才发布**，同名旧包被移成 `.replaced-<ts>` 而不是覆盖（D-233） |
 | **启动哈希缓存** | `<dataDir>\runtime-hash-cache.json`（D-176：按 (规范化路径, size, mtimeMs) 缓存随包运行时哈希，任一变化只重算该文件；缓存缺失/损坏/非法条目一律全量重算 fail-closed，校验永不跳过） |
 | **损坏快照备份** | 与 `tasks.json` 同目录的 `tasks.corrupt-<UTC 时间戳>[-N].json`（只读安装时随 `configDir` 一起回落到 `%APPDATA%\YTVDLT\config\`）：`TaskStore.load()` 在 JSON 损坏或坏记录隔离**之前**写入的字节级原文副本；备份失败 / 读取错误时 `save()` 一律拒绝，原 `tasks.json` 不被覆盖（D-159）。启动恢复报告里的 `load.status` 是判断依据 |
 
@@ -522,6 +523,8 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
     再按「有没有 `?`」拼分隔符）在参数顺序变化时全部不可靠；`app-nav.pageUrl`、
     `queue.js` / `settings.js` 的 `switchLocale` 已统一为 set/delete 重建。
 
+43. **「配置里有两个同名开关」时先找写方，再找读方**（D-229，隐私承诺失效级）：`general.privateMode` 由界面写、`paths.privateMode` 由任务构建读，双方从不对齐——开关亮着、记录照样落盘、文件照样进普通目录。判断一个开关是不是活的：`grep -rn "<key>" apps packages | grep -v dist` 里必须同时出现**写方**（`SETTINGS_SET` 白名单 + handler）和**读方**（请求 / 计划 / 路径），只有一边就是断线。同一族的第二坑：**「读出来的常量」也可能是令牌**——私有目录常量是 `%LOCALAPPDATA%/…`，spawn 不经 shell（坑 3 / D-79），令牌原样进 `-P` 会建出字面量目录，随后被产物封链门判「根外」让每个任务失败。任何要进 argv 的路径都必须是**已经展开的绝对路径**，展开点在入口（`readDefaults`），纯计划器只负责拼根与模板。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 
@@ -555,6 +558,8 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 | **主进程拒绝/失败文案（文件删除、打开、D-203/D-204/D-207 新句）未接英文 UI 映射**：en 界面经 `result.message` 原样显示中文（既有 code→i18n 映射只覆盖 7 个码） | `apps/desktop/src/main/m5-channels.ts` 文案常量、`packages/ui/src/i18n/messages.js` |
 | **文件权限的 TOCTOU 竞态、真实文件符号链接、UNC 管理员共享：登记为未测边界**（能力门显式 skip，不写抖动测试假装覆盖；junction 全矩阵与 realpath 已真实 fs 实测） | `tests/unit/win-fs-link-security.test.ts` 头注、D-206/D-207「未覆盖」；Electron 真进程 `shell.trashItem` 亦未端到端实测 |
 | **更新链路的代理 / TUN / Fake-IP 兼容性未在真实代理环境验收**：系统代理 / HTTP(S) / SOCKS / PAC / WPAD / TUN / Fake-IP 的端到端、407 代理认证、CDN 多跳重定向、安装包流式下载与取消，全部待项目负责人在真机确认；**离线单测已有**（`tests/unit/electron-update-network.test.ts`，覆盖代理解析含 SOCKS 写法、重定向守卫、Session 单飞与失败重试、login 只答匹配代理），但**只覆盖本层判定，不覆盖真实网络**（D-228） | `main/adapters/electron-update-network.ts`、`main/electron-entry.ts`；口径见 D-214「未覆盖」 |
+| **无痕下载只在单元层走通过**：开关 → 请求 → 计划 → 产物封链根的链路已有用例，但打包版真机没点过一次（需业主放行国际网并点名打包，铁律 9） | `m4-host.ts::readDefaults`、`path-resolver.ts::buildOutputDir`；口径见 D-229「未覆盖」 |
+| **更新目录的隔离包不自动清理**：`.replaced-*` / `.rejected-*` 会在多次换版后累积（只移除、不删除是刻意策略） | `app-update-service.ts`；口径见 D-233「未覆盖」 |
 
 > 这张表会随开发推进变短。**完成一项就删一行**，不要留着写「已做」——那是本手册最容易腐烂的地方。
 >

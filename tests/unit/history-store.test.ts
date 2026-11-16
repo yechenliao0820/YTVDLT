@@ -352,3 +352,103 @@ describe('persist-first, commit-after · history write failures leave no residue
     expect(diskIds).toEqual(['new-b', 'old-1']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// D-230 (audit P1) · "could not read" is not "empty".
+//
+// The old load() wrapped `readText` AND `JSON.parse` in one `catch` and set the
+// in-memory list to `[]` for both. A transient read failure (AV scan holding
+// the file, a brief EACCES) therefore looked exactly like "this user has no
+// history", and the next add() persisted `[onlyTheNewRow]` — the previous file
+// was gone before anything could retry. These cases pin the split:
+// read failure → reject + retry, nothing written; unparseable content → start
+// empty but copy the original aside BEFORE the first rewrite.
+// ---------------------------------------------------------------------------
+describe('D-230 · read failures never overwrite; corrupt bytes are preserved', () => {
+  const historyPath = (mem: ReturnType<typeof createInMemoryPorts>): string =>
+    `${mem.ports.env.configDir()}/history.json`;
+
+  const diskIds = (mem: ReturnType<typeof createInMemoryPorts>, path: string): string[] => {
+    const raw = mem.state.files.get(path);
+    if (raw === undefined) return [];
+    return (JSON.parse(raw) as { entries: Array<{ id: string }> }).entries.map((e) => e.id);
+  };
+
+  it('a read failure rejects the add and leaves the previous bytes untouched', async () => {
+    const mem = createInMemoryPorts();
+    const path = historyPath(mem);
+    mem.state.files.set(path, JSON.stringify({
+      schemaVersion: 1,
+      entries: [entry({ id: 'old-1', videoPath: 'C:/out/old1.mp4' })],
+    }));
+    const before = mem.state.files.get(path);
+
+    let failures = 1;
+    const ports = {
+      ...mem.ports,
+      fs: {
+        ...mem.ports.fs,
+        readText: async (target: string): Promise<string> => {
+          if (failures > 0 && target === path) {
+            failures -= 1;
+            throw new Error('EBUSY: history file locked');
+          }
+          return mem.ports.fs.readText(target);
+        },
+      },
+    };
+    const store = new HistoryStore({ ports });
+
+    await expect(store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' })))
+      .rejects.toThrow('EBUSY');
+    // The decisive assertion: the OLD code had already replaced this file with
+    // a single-row payload by now.
+    expect(mem.state.files.get(path)).toBe(before);
+
+    // Recovery: init() cleared the cached promise, so the retry re-reads and
+    // appends to the rows that were never lost.
+    const retried = await store.add(entry({ id: 'new-b', videoPath: 'C:/out/b.mp4' }));
+    expect(retried.added).toBe(true);
+    expect(diskIds(mem, path).sort()).toEqual(['new-b', 'old-1']);
+  });
+
+  it('copies an unparseable file aside before the first rewrite', async () => {
+    const mem = createInMemoryPorts();
+    const path = historyPath(mem);
+    mem.state.files.set(path, '{not json');
+
+    const store = new HistoryStore({ ports: mem.ports });
+    // Reading alone must not touch the file.
+    expect(await store.query({})).toEqual([]);
+    expect(mem.state.files.get(path)).toBe('{not json');
+
+    await store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' }));
+    const backups = [...mem.state.files.keys()].filter((key) => key.includes('history.json.corrupt-'));
+    expect(backups).toHaveLength(1);
+    expect(mem.state.files.get(backups[0] as string)).toBe('{not json');
+    expect(diskIds(mem, path)).toEqual(['new-a']);
+  });
+
+  it('refuses to rewrite when the preserve copy itself fails', async () => {
+    const mem = createInMemoryPorts();
+    const path = historyPath(mem);
+    mem.state.files.set(path, '{not json');
+    const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    const ports = {
+      ...mem.ports,
+      fs: {
+        ...mem.ports.fs,
+        writeTextAtomic: async (target: string, text: string): Promise<void> => {
+          if (target.includes('history.json.corrupt-')) throw new Error('backup disk full');
+          await inner(target, text);
+        },
+      },
+    };
+    const store = new HistoryStore({ ports });
+
+    await expect(store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' })))
+      .rejects.toThrow('backup disk full');
+    // Fail closed: the only copy of the damaged history is still the original.
+    expect(mem.state.files.get(path)).toBe('{not json');
+  });
+});

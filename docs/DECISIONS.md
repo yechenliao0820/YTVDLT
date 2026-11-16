@@ -2449,3 +2449,53 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① 校验改为「`pathname` 为空或 `'/'` 视为无路径」，真实路径 / `search` / `hash` 仍拒绝（`/x`、`?a=1`、`#f` 保持非法）。② 新增 `tests/unit/electron-update-network.test.ts`（20 例，全部离线、无 electron 依赖）：代理解析 8 例（空配置=system 而非 DIRECT、七种 scheme 与默认端口、凭据不进 `proxyRules`/key/partition、key 随凭据变化、七类非法输入、SOCKS 尾斜杠两种写法等价）；重定向守卫 5 例（相对 Location、跳数上限、HTTPS 降级、策略拒绝、环路/非 http/空 Location）；Session 生命周期 4 例（system 单分区复用、固定代理 rules 无 userinfo、配置变更各自成 Session、建立失败可重试）；请求驱动 6 例（hop 0 策略门在发请求前拒绝、login 只在固定代理模式安装且只答匹配端点、system 模式不装 login、校验通过的相对重定向被 follow、被策略拒绝的重定向不 follow、content-length 超预算即拒）。③ acceptance 增加 `A-D228` 并把测试文件登记进 `M3_TEST_FILE_MAP`（否则 `M5-GATE-file-coverage` 判 unmapped）。 |
 | 验证 | 新文件 20/20 通过（186 ms）；修复前 `socks5://…` 两例红，修复后绿。全量：unit 162 文件 2792 通过 / 5 skip、contract 53、integration 40、`typecheck` 5/5、`layering` 0、M5 验收 63 断言（59 PASS + 3 deferred）+ 10/10 gates、e2e 31/31 + 5/5。**用户可见修复**（SOCKS 代理从此可配置）：`docs/CHANGELOG.md` 按本项目惯例只在发版时成行，故并入下一版（0.3.2）发布行，随版本号一起提交。 |
 | 未覆盖 | 真机代理环境仍全部未验收：系统代理 / PAC / WPAD 自动发现、SOCKS 认证与 407 握手、TUN / Fake-IP、CDN 多跳真实重定向、安装包流式下载与中途取消的真实时序。单测只覆盖本层自己的判定与生命周期，**不能**据此宣称上述场景已验证（手册 §10 与 D-214「未覆盖」的结论保持不变）。 |
+
+## D-229 · 2026-11-16 · 无痕模式单一真相源 + 私有目录在入口展开（外部在线审计 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 外部在线审计（业主 2026-11-16 转述）：开启界面「无痕下载」后完成一次下载，记录仍可能落盘。主控核对属实，并发现**同一功能的第二处断点**：审计只看到配置键分叉，没往下走到路径层——私有目录常量是 `%LOCALAPPDATA%/YTVDLT/private` 这种**令牌**，而 spawn 不经过 shell（D-79 血案），令牌会原样进 `-P`。 |
+| 根因 | ① 键名分叉：UI 经 `SETTINGS_SET` 只写 `general.privateMode`（`m5-settings-handlers.ts`），任务构建读的是 `paths.privateMode`（`m4-host.ts::readDefaults` → `buildDownloadRequest`），后者从没有任何写方，恒为默认 `false` → 任务 `privateMode=false`、请求 `paths.privateMode=false`，`history.add()` 照常落盘、输出照常进用户视频目录。② 路径层：`path-resolver.ts::buildOutputDir` 在 privateMode 时返回 `PRIVATE_OUTPUT_DIR` **令牌**而不是绝对路径；`%VAR%` 不经 shell 不会被展开，yt-dlp 会建一个叫 `%LOCALAPPDATA%` 的字面量目录（D-79 实测过同一类失败）。③ 连带：字面量目录不在请求的输出根里，D-184/D-203 产物封链门会把每个私有产物判为「根外」并让任务失败。三条叠在一起，无痕下载**从未真正可用**，只是开关本身没生效把 ②③ 挡住了。 |
+| 决策 | ① `readDefaults()` 是「配置 → 请求」的唯一闸口：从 `general.privateMode` 读唯一真相源，覆盖到 `request.paths.privateMode`，单条 / 播放列表 / TXT 三个入口自动继承。② 同一闸口把 `PRIVATE_OUTPUT_DIR` 就地展开，并写进 `request.paths.videoDir` 与 `audioDir`——`-P` 恒为绝对路径，产物天然落在请求自己的根内，打开文件夹也指向真实位置。③ 删除 `buildOutputDir` 的 privateMode 改根分支：纯计划器不得产出任何它无法展开的 `%VAR%`（D-79 规则的直接推论）；路由只在入口发生一次。④ `paths.privateMode` 键保留在 schema 里但明确标注「LEGACY，禁止读取」，不做迁移、不双写——不迁走是为了避免一次静默的配置改写，禁读 + 用例才是防回归手段。 |
+| 验证 | `m4-host.test.ts` 新增 2 例：三入口（单条 / TXT / 播放列表）的 `record.privateMode` 与 `request.paths.privateMode` 同时为真、`videoDir` 为展开后的绝对路径（`/YTVDLT[\\/]private$/` 且不含 `%`）、`resolveDownloadPlan().outputDir` 不含 `%`；反向一例钉死「legacy `paths.privateMode: true` 不得开启无痕」。`path-resolver.test.ts` / `download-plan.test.ts` 相应三处断言改为新契约（计划器不换根、不产令牌）。**先红后绿**：还原旧 `m4-host.ts` 后两例红。全量 170 文件 2862 通过 / 5 skip、覆盖率四维 93.21/86.69/93.37/93.21、`typecheck` 5/5。 |
+| 未覆盖 | ① 打包版真机点一次无痕下载（需国际网 + 点名打包，铁律 9）未做；本机只证明到「请求与计划正确」。② `%LOCALAPPDATA%` 在系统环境缺失时不展开（会退化成字面量目录），未加额外兜底——Windows 上该变量恒存在，且与既有 `%USERVIDEOS%` 注入同一条通路。③ 未把既有 `config.json` 里的 `paths.privateMode` 迁走或删除（见决策 ④），历史配置里它继续是死键。 |
+
+## D-230 · 2026-11-16 · 历史文件读失败不再被当成「空历史」（外部在线审计 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 审计指出：`history.json` 暂时读失败后，旧记录可能被后面的写覆盖。主控核对属实——`load()` 用一个 `catch` 同时包住 `readText` 与 `JSON.parse`，两者都落进 `entries = []`。 |
+| 根因 | 「读不到」与「读出来是坏的」被当成同一件事。`init()` 只有在**抛出**时才清缓存重试（D-227），而这里吞掉了异常并把 `loaded` 正常置位 → 内存里是一份空基线，下一次 `add()` 的 persist-first 写盘就是「旧历史整段消失，只剩新行」。读取失败的真实成因通常是瞬时的（杀软扫描、另一进程持有），文件本身完全可能是好的。 |
+| 决策 | 两件事彻底分开：① **IO 失败**直接向上抛——`init()` 已有的单飞 + 失败清缓存机制保证下次调用重试，且任何 mutator 都会 reject 而不是对未知基线落盘；② **解析失败**（字节真的不是 JSON）仍从空表起步以保证 app 可用，但把原始字节记在 `corruptOriginal`，由 `persist()` 在**第一次覆盖之前**原样写到 `<history>.corrupt-<epochMs>.json`；备份写失败则 persist 失败、覆盖不发生（与 D-159 `tasks.json` 的 fail-closed 同一条立场）。损坏备份只在成功写入后清标记，不会重复刷盘。 |
+| 验证 | `history-store.test.ts` 新增 3 例（D-230 组）：① 一次性 `readText` 失败 → `add()` reject 且磁盘字节**逐字未变**（旧代码此处已把文件换成单行），随后重试成功且旧行与新行同时存在；② 损坏文件读后不写、`add()` 成功后存在且内容逐字等于原文的 `.corrupt-*` 副本；③ 备份写失败 → `add()` reject、原文件仍是原文。还原旧 `history-store.ts` 后三例全红。全量同上。 |
+| 未覆盖 | 读失败期间正在跑的任务会以 Error 结束（媒体文件已在盘上，`history.add()` 抛错的既有语义），而不是「Completed 但没历史行」——本项目一律选「如实报错、不静默丢数据」（D-209 同款取向）；若真机上杀软锁文件频繁导致误报，需要单独决策改成「完成 + 待补写队列」。 |
+
+## D-231 · 2026-11-16 · 排队任务在 enqueue 返回前落盘（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 并发槽位已满时新任务显示已入队，但在下一次进度 / 任务结束触发快照之前退出或崩溃，重启后该任务消失。 |
+| 根因 | `enqueue()` 只做「写内存 + 进 FIFO + pump」，不落盘；排队记录既不会产生进度事件（`pump()` 不启动它），也没有 `run().finally`，唯一会写它的是**别的任务**恰好触发的节流持久化。窗口期长度完全由别的任务决定，长时间排队 = 长时间零持久化。 |
+| 决策 | `enqueue()` 在 `pump()` 之后判断记录是否**仍停在 FIFO**：是则 `await persistSnapshot()` 后才返回。已启动的记录不在此处写（它自己的首个进度 tick 与 `run().finally` 覆盖），这样 D-163「纯进度抖动不重写 tasks.json」的写次数契约一字不动。批量走 `enqueueBatch()` 时用 `batchDepth` 嵌套计数把写推迟到批次末尾一次——200 行 TXT 导入不再产生 200 次全文件重写；D-163 指纹门保证「全员已启动」时这次写是 no-op。持久化失败沿用 T2 通道：日志一条 WARNING（每失败周期一次）、不阻塞入队——即「入队成功前尝试持久化」，失败可见但不阻断下载。⑤ 同一规则覆盖 `restart()`：重试把记录从 `Error`/`Canceled` 推到 `ReadyWithInfo` 后若排在满槽位之后，也没有别的写方，不写就等于「重启后被撤销」。 |
+| 验证 | `task-snapshot-persist.test.ts` 新增 4 例：① 并发 1 时第二个任务入队后 tasks.json 立刻含 t1+t2 且 t2 为 `Idle`；② `enqueueBatch([b2,b3])` 之后**只有一次**写入且三个成员齐全；③ 槽位空闲时入队**不**额外写（D-163 计数不变，旧实现与新实现都必须绿）；④ 失败任务在满槽位下 `restart()`，最新快照已是 `ReadyWithInfo` 且 `error` 清空。还原旧 `task-queue.ts` 后 ①②④ 红、③ 绿。全量同上。 |
+| 未覆盖 | 「入队 → 落盘」之间仍有毫秒级窗口（先入内存后写盘），进程被强杀在写盘完成前仍会丢该条；要彻底消除需要写盘成功才算入队的同步语义，会拖慢批量导入，本轮不做。UI 侧没有「保存失败」的可见提示（只有日志），若业主需要再加通道。 |
+
+## D-232 · 2026-11-16 · 无痕清理按记录标记，不再清空既有普通记录（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 已有普通任务记录时开启无痕，关闭窗口（含隐藏到托盘）后**所有非运行中的记录**都被删掉，包括与无痕无关的普通下载；而独立历史存储里的记录反倒没被清。 |
+| 根因 | `electron-entry.ts::clearPrivateHistory()` 的判据是「开关是否为真 + 状态是否非运行」，与记录本身属不属于无痕无关。开关是**全局瞬时状态**，用它决定「删哪些历史」等于用今天的开关去追溯昨天的记录。 |
+| 决策 | 判据下沉到记录：只有 `record.privateMode === true`（入队时捕获、随快照持久化）且不占槽位（`Running` / `FetchingInfo` 跳过，`remove()` 本来也拒绝）才是清理目标；开关当前位置**不参与**判定——否则「开了无痕、下载完、又关掉开关、再退出」会把无痕记录留在盘上，等于同一条隐私承诺换个角度继续失效。规则抽成 `core/src/task-queue/private-cleanup.ts`（纯函数 + 最小队列端口，`forget` 封面由桌面层注入），`electron-entry` 只做装配。文件与历史存储都不动：无痕任务本来就不写历史，媒体文件属于用户。 |
+| 验证 | `task-queue.test.ts` 新增 3 例：规则表（普通记录 / Running / FetchingInfo 一律不删）；混合队列只删 `priv-done` 与 `priv-error`，普通行与运行中的无痕行保留，封面 forget 只对真的删掉的 id 触发；`remove()` 返回 false 时不谎报已清理。全量同上。 |
+| 未覆盖 | 这一段装配仍在 `electron-entry.ts` 内（导入 electron，单测覆盖不到），真机只验证到「代码路径正确」为止；「运行中的无痕任务」要等下一次关窗才清，本轮不做延迟清理。D-88 里「开启时不清空现有记录、关窗时清」的原始表述由本条收紧为「只清无痕记录」。 |
+
+## D-233 · 2026-11-16 · 更新包先校验暂存文件，再以不覆盖方式发布（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 更新目录里已有同名文件、但缓存检查因大小不符 / PE 头无效 / 发布缺少 digest 而不复用它时，新下载会把 `.part` 直接 rename 到同名路径，**校验在 rename 之后**；一旦校验失败，旧文件已经没了。 |
+| 根因 | 发布与校验的顺序写反：`downloadToFile` 的职责是「字节搬完就改名」，验证属于调用方，而调用方拿到的已经是覆盖后的同名文件；缓存检查的三条拒绝分支里只有 sha 不符会隔离，另外两条把旧文件原地留给下一轮 rename 覆盖。 |
+| 决策 | ① 每次下载写到唯一暂存名 `<asset>.<uuid>.download`，**校验这个文件**；② 校验通过才发布：同名旧文件先 `isolateFile(..., 'replaced')` 移开（沿用「只隔离不删除」），移不动就**放弃发布**、把已验证的暂存文件当安装路径交出去（`install()` 只需要一条路径）；rename 失败则把旧文件放回原名并仍用暂存路径；③ sidecar 写在最终发布的路径上；④ 取消落在「字节完成、尚未校验」的窗口时，暂存文件走 `trashPartial` 回收（回收站，不永久删除）。缓存复用路径（`verifiedCachedFile`）逻辑不动。 |
+| 验证 | `app-update-service-cache.test.ts` 新增 2 例：① 新下载校验失败 → 既有同名文件**逐字未变**、被拒的暂存文件带 `.rejected-` 隔离（旧代码此处旧文件已被覆盖）；② 校验成功 → 同名位置是新包、sidecar 匹配新哈希、旧文件以 `.replaced-` 完整保留、`install()` 打开的正是发布路径。`app-update-service.test.ts` 的 digest 闸门断言由「前缀匹配 `<asset>.rejected-`」改为「含 `.rejected-`」并注明原因（被拒的是暂存文件）。还原旧 `app-update-service.ts` 后两例红。全量同上。 |
+| 未覆盖 | 未在本机做破坏性复现（真去覆盖一个 220 MB 旧包再校验失败），只在临时目录用假下载器复刻；`.replaced-*` 不设自动清理，长期多次换版会在 updates 目录留下旧包（与 `.rejected-*` 同一策略，留给业主决定是否加清理）。 |

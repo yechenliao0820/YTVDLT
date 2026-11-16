@@ -6,6 +6,7 @@ import { describe, it, expect } from 'vitest';
 import {
   canTransition, assertTransition, allTransitions, TASK_STATES,
   LEGAL_TRANSITIONS, IllegalTaskTransitionError, TaskQueue, HistoryStore, TaskStore,
+  purgePrivateRecords, shouldPurgeOnPrivateClose,
 } from '@ytvdlt/core';
 import type {
   DownloadEngine, EngineEvent, DownloadRequest, HistoryEntry, HistoryQuery, MediaInfo, TaskRecord,
@@ -883,5 +884,60 @@ describe('D-209 · cancel during cleanup / history write leaves no history row',
     const raw = mem.state.files.get(historyPath);
     expect(raw).toBeDefined();
     expect(JSON.parse(raw as string)).toEqual({ schemaVersion: 1, entries: [] });
+  });
+});
+
+/**
+ * D-232 (audit P2) · 无痕关闭只清「无痕任务」，绝不带走既有普通记录。
+ *
+ * The old hook removed every non-running row whenever the switch was on. A user
+ * who turned private mode on for one video and closed the window lost the
+ * ordinary downloads they had been keeping — and that loss was not recoverable
+ * (the row is gone from `tasks.json` too). The rule is now carried by the
+ * RECORD (captured at enqueue, persisted in the snapshot), not by the switch
+ * position at close time.
+ */
+describe('D-232 · 无痕清理的作用域', () => {
+  const settled = (id: string, privateMode: boolean) => record(id, privateMode);
+
+  it('rules: only settled private records are targets', () => {
+    expect(shouldPurgeOnPrivateClose(settled('p1', true))).toBe(true);
+    expect(shouldPurgeOnPrivateClose(settled('n1', false))).toBe(false);
+    expect(shouldPurgeOnPrivateClose({ ...settled('p2', true), state: 'Running' })).toBe(false);
+    expect(shouldPurgeOnPrivateClose({ ...settled('p3', true), state: 'FetchingInfo' })).toBe(false);
+  });
+
+  it('purges private rows, keeps normal rows and running private rows, forgets covers only for removed ids', async () => {
+    const rows = [
+      settled('priv-done', true),
+      settled('normal-done', false),
+      { ...settled('priv-running', true), state: 'Running' as const },
+      { ...settled('priv-error', true), state: 'Error' as const },
+    ];
+    const removed: string[] = [];
+    const forgotten: string[] = [];
+    const report = await purgePrivateRecords(
+      {
+        list: () => rows,
+        remove: async (taskId: string) => { removed.push(taskId); return true; },
+      },
+      (taskId) => forgotten.push(taskId),
+    );
+
+    expect(removed).toEqual(['priv-done', 'priv-error']);
+    expect(report.removed).toEqual(['priv-done', 'priv-error']);
+    expect(report.keptRunning).toEqual(['priv-running']);
+    expect(removed).not.toContain('normal-done');
+    expect(forgotten).toEqual(['priv-done', 'priv-error']);
+  });
+
+  it('a refused removal is not reported as purged (queue keeps its slot holder)', async () => {
+    const rows = [settled('priv-a', true)];
+    const report = await purgePrivateRecords({
+      list: () => rows,
+      remove: async () => false,
+    });
+    expect(report.removed).toEqual([]);
+    expect(report.keptRunning).toEqual([]);
   });
 });

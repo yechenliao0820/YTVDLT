@@ -179,7 +179,33 @@ function readDefaults(
   // Resolving it to a concrete directory is the per-task job of
   // `resolveTempDirFor()` — filling it here would make an internal default
   // indistinguishable from a user decision and defeat the volume check.
-  const paths = withExpandedPaths(cast<Partial<PathsDomain>>('paths'), expandPath);
+  //
+  // D-229 (audit P1): private mode has ONE source — `general.privateMode`, the
+  // key the queue toolbar writes through SETTINGS_SET and SETTINGS_GET reads
+  // back. `paths.privateMode` is a legacy schema key that no writer ever set,
+  // so reading it here silently produced `false` while the UI said "on": the
+  // task went to the normal folder AND history.add() persisted it. The overlay
+  // below is the only place config becomes a request, so every intake path
+  // (single / playlist / TXT) now inherits the same answer.
+  const general = config.getDomain('general') as Record<string, unknown>;
+  const privateMode = general['privateMode'] === true;
+  const expandedPaths = withExpandedPaths(cast<Partial<PathsDomain>>('paths'), expandPath);
+  // D-229 part 2: the private ROOT is resolved HERE, not in the planner. The
+  // request is the only place the engine and the artifact-containment gate both
+  // look, so writing the expanded directory into `videoDir` / `audioDir` keeps
+  // three things true at once: `-P` is absolute (no `%LOCALAPPDATA%` literal —
+  // spawn never goes through a shell, D-79), the recorded artifacts stay inside
+  // the request's own roots (D-184/D-203), and "open folder" points at where the
+  // file really is.
+  const privateDir = privateMode
+    ? (expandPath ?? ((raw: string): string => expandEnvVars(raw, process.env)))(PRIVATE_OUTPUT_DIR)
+      .replace(/[\\/]+$/, '')
+    : '';
+  const paths: Partial<PathsDomain> = {
+    ...expandedPaths,
+    privateMode,
+    ...(privateMode ? { videoDir: privateDir, audioDir: privateDir } : {}),
+  };
   return {
     format: cast<Partial<FormatDomain>>('format'),
     subtitle: cast<Partial<SubtitleDomain>>('subtitle'),

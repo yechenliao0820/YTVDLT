@@ -277,8 +277,11 @@ describe('app update service · install gate (published digest required)', () =>
     expect(state.phase).toBe('error');
     expect(state.message).toContain('缺少 SHA-256 摘要');
     // Isolated, not deleted: the rejected copy survives for support inspection.
+    // D-233: the rejected file is the STAGED download (`<asset>.<uuid>.download`),
+    // never the canonical entry, so the name carries the tag in the middle
+    // rather than as a prefix.
     const names = readdirSync(h.dir);
-    expect(names.filter((name) => name.startsWith(`${ASSET_NAME}.rejected-`))).toHaveLength(1);
+    expect(names.filter((name) => name.includes('.rejected-'))).toHaveLength(1);
     expect(names.includes(ASSET_NAME)).toBe(false);
     // The self-computed hash is never persisted as a baseline (no sidecar), so
     // nothing becomes installable afterwards.

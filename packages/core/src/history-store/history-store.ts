@@ -28,6 +28,13 @@ export class HistoryStore implements IHistoryStore {
   private writeQueue: Promise<void> = Promise.resolve();
   /** Single-flight gate for the first load (D-227). Null until the first init. */
   private initPromise: Promise<void> | null = null;
+  /**
+   * D-230 (audit P1): bytes of a history file that EXISTS but could not be
+   * parsed. They are copied to `<history>.corrupt-<ts>.json` before the first
+   * rewrite, so the damaged original is never silently replaced. `null` means
+   * "nothing to preserve" (healthy load, or no file at all).
+   */
+  private corruptOriginal: string | null = null;
 
   constructor(deps: HistoryStoreDeps) {
     this.ports = deps.ports;
@@ -60,21 +67,56 @@ export class HistoryStore implements IHistoryStore {
     return this.initPromise;
   }
 
-  /** The actual first read. Only ever runs once, inside {@link init}. */
+  /**
+   * The actual first read. Only ever runs once, inside {@link init}.
+   *
+   * D-230 (audit P1): a read failure and a parse failure are NOT the same
+   * thing and must not share one `catch`.
+   *  - **read failure** (EACCES / EBUSY / a transient lock): the file may be
+   *    perfectly good, it just could not be opened. Returning an empty array
+   *    here made the NEXT `add()` persist `[onlyTheNewRow]` and destroy a
+   *    history this process never saw. It now throws: `init()` clears the
+   *    cached promise (D-227) so the next call retries, and every mutation
+   *    rejects instead of writing against an unknown baseline.
+   *  - **parse failure** (the bytes really are not JSON): the store still
+   *    starts empty so the app keeps working, but the original bytes are
+   *    copied aside before the first rewrite — corrupt is not the same as
+   *    worthless, and `add()` must never be the thing that deletes it.
+   */
   private async load(): Promise<void> {
     await this.ports.fs.mkdir(this.ports.env.configDir());
     if (!(await this.ports.fs.exists(this.filePath))) {
       this.entries = [];
       return;
     }
+    const raw = await this.ports.fs.readText(this.filePath);
     try {
-      const parsed: unknown = JSON.parse(await this.ports.fs.readText(this.filePath));
+      const parsed: unknown = JSON.parse(raw);
       const candidate = parsed as Partial<HistoryFile>;
-      this.entries = Array.isArray(candidate.entries) ? candidate.entries : [];
+      // Valid JSON with the wrong SHAPE is just as unreadable as broken JSON:
+      // `{}`, `{"entries": 5}` or a bare array all mean "we cannot recover the
+      // rows", so they take the same preserve-before-overwrite path.
+      if (!Array.isArray(candidate.entries)) throw new Error('history structure: entries is not an array');
+      this.entries = candidate.entries;
     } catch {
-      // Corrupt history must not crash the app; start empty (data is regenerable).
+      // Corrupt history must not crash the app; start empty, keep the bytes.
       this.entries = [];
+      this.corruptOriginal = raw;
     }
+  }
+
+  /**
+   * D-230: preserve an unparseable history file exactly once, before the first
+   * write that would replace it. A failed copy aborts the write (the caller
+   * sees the rejection and the disk keeps the original), which is the same
+   * fail-closed stance `task-store` takes for a damaged `tasks.json` (D-159).
+   */
+  private async preserveCorruptOriginal(): Promise<void> {
+    const original = this.corruptOriginal;
+    if (original === null) return;
+    const backup = `${this.filePath}.corrupt-${this.ports.clock.nowEpochMs()}.json`;
+    await this.ports.fs.writeTextAtomic(backup, original);
+    this.corruptOriginal = null;
   }
 
   /**
@@ -86,6 +128,9 @@ export class HistoryStore implements IHistoryStore {
    * disk still holds exactly the previous state.
    */
   private async persist(entries: HistoryEntry[]): Promise<void> {
+    // D-230: an unreadable-but-present history is copied aside first; a failed
+    // backup therefore blocks the overwrite instead of losing the original.
+    await this.preserveCorruptOriginal();
     const payload: HistoryFile = { schemaVersion: 1, entries };
     await this.ports.fs.writeTextAtomic(this.filePath, `${JSON.stringify(payload, null, 2)}\n`);
   }

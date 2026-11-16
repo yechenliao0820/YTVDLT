@@ -68,7 +68,11 @@ interface Setup {
   isolated(prefix: string): string[];
 }
 
-function setup(digest: string | null = GOOD_HASH): Setup {
+function setup(
+  digest: string | null = GOOD_HASH,
+  /** D-233: override what the "network" delivers (default: the real installer). */
+  respond?: (request: DownloadRequest) => Promise<DownloadResult>,
+): Setup {
   const dir = mkdtempSync(join(tmpdir(), 'ytvdlt-updater-'));
   const base = createInMemoryPorts();
   const http: HttpPort = {
@@ -95,6 +99,7 @@ function setup(digest: string | null = GOOD_HASH): Setup {
   const downloadInstaller = async (request: DownloadRequest): Promise<DownloadResult> => {
     downloads += 1;
     requests.push(request);
+    if (respond !== undefined) return respond(request);
     writeFileSync(request.targetPath, INSTALLER);
     return { path: request.targetPath, bytes: INSTALLER.length, sha256: GOOD_HASH };
   };
@@ -241,5 +246,79 @@ describe('D-104 · install-time integrity re-check', () => {
     expect(JSON.parse(readFileSync(join(h.dir, 'pending-update-cleanup.json'), 'utf8'))).toEqual({
       fromVersion: '0.1.10', targetVersion: '0.2.1', fileName: ASSET_NAME, sha256: GOOD_HASH,
     });
+  });
+});
+
+/**
+ * D-233 (audit P3) · 先校验独立临时文件，再以不覆盖的方式发布。
+ *
+ * The old order renamed the `.part` straight onto `<asset name>` and verified
+ * afterwards. A same-name file that had merely failed the cache check — a
+ * different size or a broken PE header, neither of which isolates the cache —
+ * was therefore destroyed BEFORE anyone knew whether the new download was
+ * usable, and a failed verification left nothing to fall back to.
+ *
+ * Now the download lands at `<asset name>.<uuid>.download`, is verified THERE,
+ * and only a verified file is published: an existing entry is moved aside
+ * (`.replaced-<ts>`, never deleted), and if it cannot be moved the publish is
+ * abandoned so the old file keeps its name.
+ */
+describe('D-233 · publish only verified bytes, never overwrite the old copy', () => {
+  const damaged = (): Uint8Array => {
+    const bytes = Uint8Array.from(INSTALLER);
+    bytes[bytes.length - 1] = 9; // same size, still `MZ`: the "rejected" case
+    return bytes;
+  };
+  const legacy = (): Uint8Array => {
+    // Different size on purpose: the cache check rejects it WITHOUT isolating it.
+    const bytes = new Uint8Array(INSTALLER.length + 5).fill(3);
+    bytes[0] = 0x4d;
+    bytes[1] = 0x5a;
+    return bytes;
+  };
+
+  it('keeps the existing same-name file when the fresh download fails verification', async () => {
+    const bad = damaged();
+    const badHash = createHash('sha256').update(bad).digest('hex');
+    const h = setup(GOOD_HASH, async (request) => {
+      writeFileSync(request.targetPath, bad);
+      return { path: request.targetPath, bytes: bad.length, sha256: badHash };
+    });
+    const previous = legacy();
+    h.writeCache(previous);
+
+    await h.service.check({ manual: true });
+    const state = await h.service.download();
+    expect(state.phase).toBe('error');
+    expect(state.message).toContain('SHA-256 不匹配');
+    // The whole point: the file that was already there is untouched...
+    expect(readFileSync(h.target).equals(Buffer.from(previous))).toBe(true);
+    // ...and the rejected bytes are quarantined under their staging name.
+    // (The old code had already replaced `target` with them by this point.)
+    expect(h.isolated('.rejected-')).toHaveLength(1);
+  });
+
+  it('moves the existing same-name file aside (never deletes it) before publishing', async () => {
+    const h = setup();
+    const previous = legacy();
+    h.writeCache(previous);
+
+    await h.service.check({ manual: true });
+    const ready = await h.service.download();
+    expect(ready.phase).toBe('ready');
+    // The canonical name now holds the verified bytes, with a matching sidecar.
+    expect(readFileSync(h.target).equals(Buffer.from(INSTALLER))).toBe(true);
+    expect(readFileSync(`${h.target}.sha256`, 'utf8').trim()).toBe(GOOD_HASH);
+    // The previous file survives under `.replaced-`, byte for byte.
+    const replaced = h.isolated('.replaced-');
+    expect(replaced).toHaveLength(1);
+    expect(readFileSync(join(h.dir, replaced[0] as string)).equals(Buffer.from(previous))).toBe(true);
+    // And install launches that published path (the service builds paths with
+    // `/`; Windows accepts both separators).
+    const attempt = await h.service.install();
+    expect(attempt.ok).toBe(true);
+    expect(h.opened[0]).toContain(ASSET_NAME);
+    expect(h.opened[0]).not.toContain('.download');
+    expect(h.opened[0]).not.toContain('.replaced-');
   });
 });

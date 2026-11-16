@@ -149,6 +149,14 @@ export class TaskQueue implements ITaskQueue {
    * HistoryStore write queue (D-222).
    */
   private snapshotWriteQueue: Promise<void> = Promise.resolve();
+  /**
+   * D-231 (audit P2): nesting counter for `enqueueBatch()`. A batch member that
+   * parks in the FIFO would otherwise trigger one full rewrite each (a 200-line
+   * TXT import = 200 serialised snapshots); inside a batch the write is deferred
+   * and issued ONCE at the end, while a standalone `enqueue()` still writes
+   * before it returns.
+   */
+  private batchDepth = 0;
 
   constructor(deps: TaskQueueDeps) {
     this.deps = deps;
@@ -261,18 +269,44 @@ export class TaskQueue implements ITaskQueue {
     this.records.set(stored.id, stored);
     this.pending.push(stored.id);
     this.pump();
+    // D-231 (audit P2): a record that DID NOT start now sits in the FIFO and
+    // has no other writer — no progress tick, no `run().finally`, nothing —
+    // so a quit / crash before the next task ends erased a row the user had
+    // already confirmed. Persist before returning. A record that started is
+    // covered by the run lifecycle (first tick + unconditional final write),
+    // and skipping it here is what keeps the D-163 "no rewrite on pure
+    // progress" contract intact. Inside a batch the write is deferred to a
+    // single `enqueueBatch()` write (see `batchDepth`).
+    if (this.batchDepth === 0 && this.pending.includes(stored.id)) {
+      await this.persistSnapshot();
+    }
   }
 
   /**
    * Enqueue N independent tasks (M4-4 batch). Each `enqueue` only parks the
    * task and lets `pump()` fill the available slots, so a 50-item batch never
    * starts 50 downloads.
+   *
+   * D-231: the parked members were previously invisible on disk until some
+   * OTHER task emitted a progress tick — the exact window the audit hit
+   * ("already enqueued, killed before the next snapshot"). One write covers
+   * the whole batch; the D-163 fingerprint gate makes it a no-op when every
+   * member started and already persisted itself.
    */
   async enqueueBatch(records: readonly TaskRecord[]): Promise<readonly string[]> {
     const ids: string[] = [];
-    for (const record of records) {
-      await this.enqueue(record);
-      ids.push(record.id);
+    this.batchDepth += 1;
+    try {
+      for (const record of records) {
+        await this.enqueue(record);
+        ids.push(record.id);
+      }
+    } finally {
+      // The final write lives in `finally` on purpose: a throw halfway through
+      // still leaves the already-parked members on disk (they are real rows the
+      // user confirmed), and the counter must never leak.
+      this.batchDepth -= 1;
+      if (this.batchDepth === 0) await this.persistSnapshot();
     }
     return ids;
   }
@@ -957,6 +991,13 @@ export class TaskQueue implements ITaskQueue {
     this.cancelRequested.delete(taskId);
     this.pending.push(record.id);
     this.pump();
+    // D-231, same rule as `enqueue()`: a retry that parks behind a full slot
+    // has no other writer, and its state/artifacts just changed (e.g.
+    // `Completed → ReadyWithInfo`). Leaving it unwritten meant a restart could
+    // be undone by the next crash while the UI already showed the retry.
+    if (this.batchDepth === 0 && this.pending.includes(record.id)) {
+      await this.persistSnapshot();
+    }
   }
 
   /**

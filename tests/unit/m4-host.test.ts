@@ -7,6 +7,7 @@ import type {
   DownloadEngine, DownloadRequest, EngineEvent, PlaylistInfo, TaskRecord,
 } from '@ytvdlt/shared';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
+import { resolveDownloadPlan } from '@ytvdlt/core';
 import { createM4Host } from '../../apps/desktop/src/main/m4-host.js';
 import { createInMemoryPorts } from './helpers/in-memory-ports.js';
 
@@ -355,6 +356,67 @@ describe('M4 host · subtitle patch + pre-probed MediaInfo (stage 3)', () => {
     await waitFor(() => host.task.queue.get(ids[0] as string)?.state === 'Completed');
     expect(counter.probes).toBe(probesBefore + 1);
     expect(host.task.queue.get(ids[0] as string)?.request?.subtitle.enabled).toBe(false);
+    host.dispose();
+  });
+});
+
+/**
+ * D-229 (audit P1) · 无痕开关只有一个真相源。
+ *
+ * The toolbar writes `general.privateMode`; the old intake code read
+ * `paths.privateMode`, a key no writer ever touched, so it always answered
+ * `false`. Result: "无痕" downloads went to the normal folder AND
+ * `history.add()` persisted them — the privacy promise failed silently, with
+ * the UI showing the switch on. `readDefaults()` now overlays the one switch
+ * onto the request, so every intake path (single / playlist / TXT) agrees.
+ */
+describe('D-229 · 无痕开关的单一真相源', () => {
+  it('general.privateMode drives the task flag and the request on all three intake paths', async () => {
+    const { host } = await setup();
+    await host.task.config.set('general', 'privateMode', true);
+
+    const single = await host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' });
+    const singleTask = host.task.queue.get(single[0] as string);
+    expect(singleTask?.privateMode).toBe(true);
+    expect(singleTask?.request?.paths.privateMode).toBe(true);
+    // D-229 part 2: the private ROOT is expanded at intake. The planner used to
+    // hand yt-dlp a literal `%LOCALAPPDATA%/YTVDLT/private` (spawn has no
+    // shell), which both misplaced the file and pushed it outside the
+    // request's own artifact roots.
+    expect(singleTask?.request?.paths.videoDir).toMatch(/YTVDLT[\\/]private$/);
+    expect(singleTask?.request?.paths.videoDir).not.toContain('%');
+    expect(singleTask?.request?.paths.audioDir).toBe(singleTask?.request?.paths.videoDir);
+    expect(resolveDownloadPlan(singleTask?.request as never).outputDir).not.toContain('%');
+
+    const txt = await host.enqueueTxtBatch({
+      urls: ['https://example.org/t1', 'https://example.org/t2'], kind: 'video',
+    });
+    for (const id of txt.taskIds) {
+      expect(host.task.queue.get(id)?.privateMode).toBe(true);
+      expect(host.task.queue.get(id)?.request?.paths.privateMode).toBe(true);
+    }
+
+    const batch = await host.enqueuePlaylistBatch({
+      selectedIds: ['a1'], playlistUrl: 'https://example.org/playlist?list=PL_fixture_01', kind: 'video',
+    });
+    expect(host.task.queue.get(batch[0] as string)?.privateMode).toBe(true);
+
+    await waitFor(() => [single[0], ...txt.taskIds, ...batch]
+      .every((id) => host.task.queue.get(id as string)?.state === 'Completed'));
+    host.dispose();
+  });
+
+  it('a stray legacy paths.privateMode does not turn private mode on', async () => {
+    const { host } = await setup();
+    // The key an old build or a hand-edited config.json may still carry.
+    await host.task.config.set('paths', 'privateMode', true);
+
+    const ids = await host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' });
+    const task = host.task.queue.get(ids[0] as string);
+    expect(task?.privateMode).toBe(false);
+    expect(task?.request?.paths.privateMode).toBe(false);
+
+    await waitFor(() => host.task.queue.get(ids[0] as string)?.state === 'Completed');
     host.dispose();
   });
 });

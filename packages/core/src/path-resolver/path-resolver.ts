@@ -127,7 +127,23 @@ export function expandEnvVars(
 
 /**
  * 4 combinations (00 / 10 / 01 / 11) of `subdirByExtractor` x `subdirByPlaylist`.
- * An optional baseDir selects `audioDir` (audio mode); privateMode always wins.
+ * An optional baseDir selects `audioDir` (audio mode).
+ *
+ * D-229 (audit P1): private mode NO LONGER rewrites the root here.
+ *
+ * It used to return `PRIVATE_OUTPUT_DIR` — a `%LOCALAPPDATA%/…` TOKEN — for
+ * every private request. `-P` is passed to a spawned process (no shell), so the
+ * token reached yt-dlp verbatim and the download landed in a literal
+ * `%LOCALAPPDATA%` folder (the D-79 failure mode); the recorded artifacts were
+ * then outside the request's output roots and the D-184/203 containment gate
+ * refused them, i.e. every private download failed. The switch was also never
+ * actually on (the UI wrote `general.privateMode`, intake read
+ * `paths.privateMode`), which is why nobody saw it.
+ *
+ * Routing now happens ONCE, at intake (`m4-host.ts::readDefaults` expands the
+ * private directory and writes it into `request.paths.videoDir` / `audioDir`).
+ * This function stays a pure "root + optional subdirs" resolver, so nothing can
+ * hand yt-dlp a `%VAR%` it will not expand.
  */
 export function buildOutputDir(
   paths: PathsDomain,
@@ -135,8 +151,7 @@ export function buildOutputDir(
   playlistTitle: string,
   baseDir: string = paths.videoDir,
 ): string {
-  const chosen = paths.privateMode === true ? PRIVATE_OUTPUT_DIR : baseDir;
-  const root = (typeof chosen === 'string' && chosen.length > 0 ? chosen : paths.videoDir)
+  const root = (typeof baseDir === 'string' && baseDir.length > 0 ? baseDir : paths.videoDir)
     .replace(/[\\/]+$/, '');
   const segments: string[] = [root];
   if (paths.subdirByExtractor === true) {

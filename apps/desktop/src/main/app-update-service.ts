@@ -37,6 +37,7 @@
  * turn a perfectly good "update available" into an error.
  */
 import { readFile, rename, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import type {
   AppRelease, AppReleaseAsset, AppReleaseNote, AppUpdateAction, AppUpdateActionResult,
   AppUpdateState, CorePorts, HttpPort,
@@ -360,6 +361,47 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
     return { path, sha256: expected };
   }
 
+  /**
+   * D-233 (audit P3) · publish a VERIFIED staging file under the release name.
+   *
+   * Two invariants, both about not destroying something the user may still
+   * need:
+   *  1. an existing file at the canonical name is MOVED ASIDE, never deleted
+   *     (`.replaced-<ts>`, same "isolate, don't delete" rule as the rejected
+   *     download), so a failed upgrade leaves both copies on disk;
+   *  2. if that move cannot be confirmed, the publish is ABANDONED and the
+   *     verified bytes stay at the staging name — `install()` only needs a
+   *     path, not a pretty one, and overwriting an unconfirmed destination is
+   *     exactly the data loss this exists to prevent.
+   */
+  async function publishVerifiedInstaller(
+    stagedPath: string,
+    canonicalPath: string,
+  ): Promise<{ path: string; reason: string }> {
+    let movedAside: string | null = null;
+    if ((await fileSize(canonicalPath)) >= 0) {
+      movedAside = await isolateFile(canonicalPath, 'replaced');
+      if ((await fileSize(movedAside)) < 0) {
+        return { path: stagedPath, reason: `existing file could not be moved aside (${movedAside})` };
+      }
+      await logger.warn('app-update', 'existing installer kept aside; publishing the new one', {
+        detail: movedAside,
+      });
+    }
+    try {
+      await rename(stagedPath, canonicalPath);
+      return { path: canonicalPath, reason: '' };
+    } catch (error) {
+      // Swap failed: put the previous file back under its own name (best
+      // effort) and hand the caller the verified staging path instead. Neither
+      // version is lost, and the install path does not need a pretty name.
+      if (movedAside !== null && (await fileSize(canonicalPath)) < 0) {
+        await rename(movedAside, canonicalPath).catch(() => undefined);
+      }
+      return { path: stagedPath, reason: messageOf(error) };
+    }
+  }
+
   async function download(): Promise<AppUpdateState> {
     if (disposed) return state();
     if (phase === 'downloading') return state();
@@ -380,6 +422,13 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
     message = `正在下载 ${asset.name}`;
     downloadedBytes = 0;
     totalBytes = asset.sizeBytes > 0 ? asset.sizeBytes : null;
+    /**
+     * D-233: the unique staging path of THIS attempt, remembered so the abort
+     * branch can discard a completed-but-unverified staging file. The old code
+     * left a cancelled-after-transfer download at the canonical name (where the
+     * cache could still reuse it); a staging file would just be dead weight.
+     */
+    let stagedPath: string | null = null;
     try {
       const cached = await verifiedCachedFile(asset);
       controller.signal.throwIfAborted();
@@ -392,7 +441,18 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
         return state();
       }
 
-      const target = `${deps.updatesDir}/${safeFileName(asset.name)}`;
+      // D-233 (audit P3): download into a UNIQUE staging name, verify THAT
+      // file, and only then publish it to the canonical name. The old order
+      // (rename the `.part` onto the canonical path, verify afterwards) meant a
+      // same-name file that had merely failed the cache check — different size,
+      // broken PE header, or a release that publishes no digest, none of which
+      // isolate the cache — was destroyed before anyone knew whether the new
+      // download was usable. The staged name also makes the cache path
+      // single-writer: `verifiedCachedFile` is the only reader of the canonical
+      // name, and it never runs while a download is in flight.
+      const canonical = `${deps.updatesDir}/${safeFileName(asset.name)}`;
+      const target = `${deps.updatesDir}/${safeFileName(asset.name)}.${randomUUID()}.download`;
+      stagedPath = target;
       const result = await (deps.downloadInstaller ?? downloadToFile)({
         url: asset.url,
         targetPath: target,
@@ -437,6 +497,8 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
 
       controller.signal.throwIfAborted();
       if (problems.length > 0) {
+        // The rejection quarantines the STAGED file; whatever sits at the
+        // canonical name was never touched, so an earlier copy survives.
         const rejected = await isolateFile(target, 'rejected');
         await logger.error('app-update', 'installer verification failed', { problems });
         installerPath = null;
@@ -446,17 +508,26 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
         return state();
       }
 
+      // D-233: verified bytes → publish. Nothing is overwritten; an existing
+      // same-name installer is moved aside (never deleted) first.
+      const published = await publishVerifiedInstaller(target, canonical);
+      if (published.path !== canonical) {
+        await logger.warn('app-update', 'could not publish installer under its release name', {
+          detail: published.reason,
+        });
+      }
+
       // D-104 (tightened): persist the verified hash as a DIAGNOSTIC sidecar.
       // Reuse requires the current release's published digest (see
       // `verifiedCachedFile`) — a self-computed hash is not a trust root, so
       // the sidecar never authorizes reuse by itself.
-      await writeSidecar(target, result.sha256).catch(async (error: unknown) => {
+      await writeSidecar(published.path, result.sha256).catch(async (error: unknown) => {
         await logger.warn('app-update', 'could not write checksum sidecar', {
           detail: error instanceof Error ? error.message : String(error),
         });
       });
       controller.signal.throwIfAborted();
-      installerPath = target;
+      installerPath = published.path;
       verifiedSha256 = result.sha256.toLowerCase();
       downloadedBytes = result.bytes;
       totalBytes = result.bytes;
@@ -468,6 +539,19 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       return state();
     } catch (error) {
       if (controller.signal.aborted && !(error instanceof PartialCleanupError)) {
+        // D-233: an abort that lands between "bytes finished" and "verified"
+        // leaves a complete staging file. It is not publishable and the cache
+        // never looks at that name, so recycle it (never a permanent delete).
+        if (stagedPath !== null && (await fileSize(stagedPath)) >= 0) {
+          const trash = deps.trashPartial;
+          if (trash !== undefined) {
+            await trash(stagedPath).catch(async (cleanupError: unknown) => {
+              await logger.warn('app-update', 'cancelled download left a staging file', {
+                detail: messageOf(cleanupError),
+              });
+            });
+          }
+        }
         phase = 'available';
         message = '已取消下载，可以重新下载';
         downloadedBytes = 0;
