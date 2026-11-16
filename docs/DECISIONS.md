@@ -2380,3 +2380,52 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① `TrashFilesPort.trash` 增加可选第二参数 `roots?`（append-only 可选参数契约；该接口实际定义在 `m5-channels.ts`，shared/ports.ts 无此接口——审计外勘误）；② 执行器每批解析一次 `canonicalContainmentRoots`（D-208 短名别名同预检），每个条目在 stat 探测通过后、**紧贴 `trashItem` 前**逐条 realpath 重校验：根外 → error 拒收不调 trashItem；ENOENT/ENOTDIR → 既有 missing 幂等语义（不双报）；EACCES/ELOOP 等 → fail-closed；**空 roots 显式 fail-closed**（挡住 `isPathInsideRoots` 对空 roots 的 fail-open 设计）；roots 缺省 → 逐字节走旧路径（兼容旧调用方）；③ 两处生产调用方接线（withFiles 用该请求 trusted roots、字幕回收用 trustedArtifactRoots）；预检门本身一行未动，执行器复检是第二道线。 |
 | 验证 | `local-file-status-adapter.test.ts` 新增 8 用例（竞态拦截 trashItem 零调用 / ENOENT 幂等 / EACCES fail-closed / 根内不误伤 / 短名别名 / 混合批次 / 不传 roots 则 realpath 不被调用 / 空 roots fail-closed），17 passed；调用方回归 m5-channels + subtitle-discard + task-removal + queue-delete + restore-chain 共 116 passed；能力门既有 skip 保持原样。 |
 | 未覆盖 | realpath 与 trashItem 仍是两次独立路径级调用，竞态窗口从「预检后任意时刻」收窄到「相邻系统调用间的微秒级间隙」，用户态无法归零（需句柄级回收语义，Electron `shell.trashItem` 不提供）——已在代码内诚实注释；真实 junction 竞态未实测（§10 既登记）。 |
+
+## D-222 · 2026-11-15 · 历史提交串行化：persist-first commit-after（外部审计复核 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-218 交付后的复核审计发现、主控核实：① `history-store.add()` 先改内存再持久化——持久化失败时 add 向上抛，D-218 的补偿删除**不可达**，残留行被写队列后续任务的 persist 冲到磁盘（Canceled 卡片 + 落盘成功行，比 D-218 修的窗口更糟）；② `remove()` 同构——持久化失败时内存已删、磁盘还在（内存/磁盘分歧）；③ `runSafely` 在 `run()` 的 finally（persistSnapshot）**之后**才钉 `record.error`，错误细节不落 tasks.json。 |
+| 根因 | 内存提交与持久化是两步、内存先行：失败路径没有任何回滚，而写队列的后续任务序列化的是**当前**内存（含残留）；快照在错误钉住之前持久化是 `run()`→`finally`→`runSafely` 的控制流顺序所致。 |
+| 决策 | ① **persist-first commit-after**：`add()`/`remove()`/`importJson()`（importJson 与 add 是同一缺陷类，顺手同模式改造）的「读-去重-构建 next-持久化-提交」整体移入写队列任务内；`persist(payload)` 序列化**将要变成的状态**，成功才 `this.entries = next`——失败时内存零变更、磁盘零变更（writeTextAtomic 原子写不留半截文件），**失败路径没有回滚代码**（不存在需要回滚的内存变更，天然规避审计警告的「恢复旧数组覆盖并发记录」）；写队列本身串行，队列内读-改-持久化-提交即原子；`enqueue<T>` 泛型化透传返回值（链延续 `next.then(()=>undefined,()=>undefined)`，调用方拿原始 reject）。② `runSafely` catch 钉错误 + transition 后追加 best-effort `persistSnapshot()`（已核实 `transition()` 不持久化，现状确实漏；与 finally 的持久化严格先后、TaskStore.save 内部队列按调用序串行，无竞态）。 |
+| 验证 | history-store.test.ts +3（add 失败无残留且磁盘干净 / remove 失败双侧不动+重试一致 / 并发 add 双落盘）；task-queue.test.ts +1（错误进持久化快照）；**stash 红→绿验证**（还原 src 修复恰 4 新用例失败）；D-218 窗口 A/B 零回归；独立校验员动态验证并发 5 add 同 dedupe key 恰 1 added 4 duplicate、交错失败+成功无残留。全量 2821 passed / 0 failed。 |
+| 未覆盖 | history-store `init()` 的 loaded 短路使新库第二个写入可能先于首个 init 入队（队列仍串行自愈、旧代码行为完全相同、生产不可达）——校验员记录在案不改；错误钉住后的重持久化若磁盘仍故障则错误细节仍只在内存（best-effort 上限，原错误不被遮蔽）。 |
+
+## D-223 · 2026-11-15 · 回收站执行期绑定预检确认的信任根（外部审计复核 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-221 交付后的复核审计发现、主控核实：`trash()` 执行期**现算** canonical roots——输出根本身在预检后、执行前被替换（换 junction 指向别处）时，复检会顺着**新身份**重新判「根内」，预检确认的信任基线与执行阶段脱钩。 |
+| 决策 | ① `TrashPreflightVerdict` ok 变体新增可选 `verificationRoots`（append-only，refused 不带）；② `TrashFilesPort.trash` 追加可选第三参 `expectedCanonicalRoots`：提供时用**同一原语**（`canonicalContainmentRoots`）从同一字符串根重推导并与预检基线**双向集合比对**——出现预检未记录的新解析（根被换身份）→ 整批拒绝、trashItem 零调用；记录中的已确认别名不再可推导 → 按 errno 诊断（ENOENT/ENOTDIR 拒、EACCES/ELOOP fail-closed）；绑定的基线根同时用于逐条复检。③ 两处生产调用链全部绑定（withFiles 从裁决取、字幕回收闭包本就持有裁决——审计前假设回收链拿不到裁决，与现实不符，如实接线）。 |
+| 关键替代 | 字面实现「根 realpath ENOENT → 整批拒」会**误拒合法批次**：真实 withFiles 用例的 `tempDir` 预检时可能尚未建盘（canonical 按语义保留字符串形态）→ 实测撞红既有用例。改为基线比对语义后，同身份的良性创建（tempDir 被 mkdir）不拒；校验员以真实文件系统 junction 对抗实验验证：稳态无误拒、换根拒绝、未建盘根预检后被指别处拒绝、junction 重定向旧目标存活拒绝——全部 trashItem 零调用。 |
+| 验证 | local-file-status-adapter.test.ts +15 用例（含 refused 不带 verificationRoots、append-only 旧 fake 旧行为钉死）；既有 D-221 8 用例零回归；调用方回归 74 + 15 passed；独立校验员实盘 junction 五场景对抗通过。 |
+| 未覆盖 | 「预检后换根→换回原身份再回收」仍只剩 realpath→trashItem 微秒级窗口（代码明文登记的既有残余，本修复不弱化也不宣称消除）；被 D-209 丢弃别名的根在基线比对中不可见（条目级复检仍守每一条目）。 |
+
+## D-224 · 2026-11-15 · 托盘异常分支加固：日志 sink 双保险 + 半成品清理（外部审计复核 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-220 交付后的复核审计点名两个未验证分支：① `forwardLog` 用 `void` 转发——JSONL sink 抛出/拒绝时 unhandled rejection 且丢日志；② `buildTray` 中途抛错（构造成功后 menu/tooltip 失败）→ 半成品 Tray 无人销毁，exe 重试可能产生双图标。 |
+| 决策 | ① `forwardLog`（electron-entry）与 `logTrayFailure`（bootstrap，可测接缝——electron-entry 顶层 import 真 electron 不可被 vitest 导入）同款双保险：同步 throw 走 try/catch、异步拒绝走 `Promise.resolve(...).catch(...)`，console 兜底摘要**不含 fields**（未经 redact 管道，泄漏面关闭）；日志失败宁丢一条绝不影响启动/托盘。② `buildTray` 构造成功后的全部步骤包进 try/catch：失败先 guard `tray.destroy()`（destroy 再抛被吞、不覆盖原错误）再**重抛原错误**——exe 重试面对干净状态，无双图标；`createTrayWithFallback`/`logTrayFailure`/D-60 兜底语义未动。 |
+| 验证 | bootstrap.test.ts +4 用例（sink 拒绝型 + 同步抛型：无 unhandled rejection、console 摘要无 fields 泄漏、D-60 不变；中途失败：trayDestroyed 恰 1 + 重试成功 + 原错误入日志；destroy 再抛：三连 guard 不阻断）；bootstrap 29 条全绿；独立校验员确认两分支被真实用例钉住。 |
+| 未覆盖 | 真机托盘根因本身仍待新构建复现（D-220 既登记）；两条 P4 观察项维持登记（buildTray 构造器成功后 destroy 失败的极端三重故障、forwardLog 丢条不重试的设计取舍）。 |
+
+## D-225 · 2026-11-16 · 六大文件按职责拆分：五轮逐字迁移 + 兼容重导出（拆分任务三/四/五/六/七）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主拆分清单点名的六个大文件「一个文件分饰多个角色」：queue.js 2424、m5-channels.ts 2283、yt-dlp-engine.ts 1214（任务三后 1035）、task-queue.ts 1146（任务二后 1170）、settings.js 1006、subtitle-picker.js 959——改任一职责都要在几千行里找上下文，风险集中。 |
+| 根因 | 职责随里程碑（M1→M5）按 append-only 惯例不断堆入同一文件，从未按职责分文件；拆分风险在于两条 engine 深层导入测试路径、16 个 m5-channels 深层导入测试、UI 的普通脚本装载链与冻结基线。 |
+| 决策 | 五轮「逐字迁移 + 旧路径兼容重导出」，每轮独立交付独立全量验证：① **任务三**：engine UTF-8 账目（D-133/D-144/D-153）→ `utf8-tail.ts`；M5 白名单/DTO/通道表 → `m5-contracts.ts`。② **任务四**：m5-channels handler 按实际依赖分四域 `m5-{task,download,site,settings}-handlers.ts`，组合根留类型 + `M5ChannelDeps` + D-160 共享预检闭包 + `M5HandlerContext` 接缝（唯一非逐字接缝 3 行：CANCEL/STATUS 经 `peekControllers/peekProgress` 只读窥视同一 registry）。③ **任务五**：queue.js 纯显示模型 → `queue-model.js`（`YTVDLT.queueModel`，先于页面装载；页面保持状态唯一 owner，16 个字节等价委托）；装载链四处同步（index.html、冒烟 MODULES、两个 VM harness、7 份 e2e 基线各 +1 行 script）。④ **任务六**：task-queue 纯函数簇 → `concurrency`/`snapshot-projection`/`history-entry`/`app-error` 四模块；TaskQueue 类保持唯一状态 owner（写盘三字段 `snapshotWriteQueue`/`lastPersistedFingerprint`/`snapshotPersistFailed` 零复制）。⑤ **任务七**：yt-dlp-engine 纯分类/路径函数 → `precheck-classify`/`aria2c-dir`（新模块未进 barrel，包公开面零扩大）。任务六/七由独立子代理执行、主会话不信任其报告逐项核验（范围/逐字比对/状态唯一性/亲跑全量）。同轮**任务二**独立复核确认 D-218~222 已覆盖清单 8 个时序点，并补全 `persistSnapshot` 的 `snapshotWriteQueue` 串行边界（进度节流 `void` 写与另一任务结束写重叠时，旧全量快照可乱序后落盘；修复后最新快照必最后落盘；确定性交错测试旧实现红）。**runner 化两轮均按清单「宁可不做」条款拒绝**（run()/download 流水线重排 await/cancel/spawn 顺序属行为承重墙）；settings.js / subtitle-picker.js 经评估**缓拆**（纯收益约 45/70 行 vs 共享状态穿线与装载链风险，理由与路线记录于交付报告）。 |
+| 验证 | 每轮全量 `run-tests.mjs all` 168 文件 0 failed（2821→2823，+2 为新测试：快照写序交错测试、冒烟 25 模块断言）+ integration 40/40 + `check-layering` 0 violations + 相关包 `tsc --noEmit`；两条 engine 深层导入路径、16 个 m5-channels 深层导入测试、31 channel 断言、UI 冒烟/竞态套件全部原样通过。 |
+| 未覆盖 | e2e（本地无 playwright；queue 基线 7 行 script 插入为确定性手工操作，需真机复验）/ acceptance / coverage 阈值 / 真机托盘与真实下载；settings.js 与 subtitle-picker.js 缓拆待下一功能需求同轮处理；core barrel `export *` 使 4 个原私有函数新增公开面（可按需收回）；本决策只登记拆分本身，五轮均无用户可见行为变化，CHANGELOG 不动。**（后续：D-226 已在具备 node/pnpm/无头浏览器的机器上补跑 e2e、acceptance、覆盖率门禁并全绿，本行保持记录当时状态。）** |
+
+## D-226 · 2026-11-16 · 任务九终验：门禁实跑 + 新代码落点铁律（防止拆分被回填）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 任务九按清单第 12 节做最终验证与交接。核验中发现两类遗留：① `scripts/acceptance.mjs` 有 2 处 `::` 函数锚点在任务四搬迁后失效——A-D177 的 `readAutostart`、A-D186 的 `MAX_URL_CHARS` 仍指向 `m5-channels.ts`，而 `M5-GATE-evidence` 只校验 evidence 非空，所以从未被拦截（即「证据字符串写着，但那个符号早不在那个文件」）；② 维护手册 §3 只有「功能 → 文件」对照表，**没有「新代码不许写回旧大文件」的规则**——下一个接手者（人或 AI）完全可能把新 handler 塞回 `m5-channels.ts`、把新显示逻辑塞回 `queue.js`，若干轮后拆分自动失效。 |
+| 根因 | ① 任务八只核对「文件路径是否存在」，没核对 `::` 之后的**函数符号**是否仍在该文件；门禁设计只查非空，天然拦不住符号漂移。② 拆分回答的是「代码现在在哪」，没有回答「以后新代码该写哪」；而手册是唯一会被下一位接手者读的入口，规则不落纸等于不存在。 |
+| 决策 | ① 两处锚点改为真实落点（`m5-settings-handlers.ts::readAutostart`、`m5-contracts.ts::MAX_URL_CHARS`），纯证据字符串，判据、门禁逻辑、断言集合零改动。② 手册 §0 追加**铁律 15「拆分出来的模块不许回填」**，并在 §3 前插入 **§3.0 新代码落点表**（10 行：handler 按域进 `m5-*-handlers.ts`；通道名/白名单/DTO/校验进 `m5-contracts.ts`；共享预检闭包只能留组合根且禁止第二个 registry；队列页纯显示进 `queue-model.js`、DOM/timer/页面状态留 `queue.js`；engine 分类/路径/UTF-8 各自落位；task-queue 纯函数进四模块、状态字段留原类），并给出「纯函数 vs 状态 owner」判据与「UI 新模块必须同步四处装载链（index.html / 冒烟 MODULES / 两个 VM harness / e2e 基线）+ 字幕组件唯一动态装载例外」。外层手册副本同步。③ 本轮**未提交、未推送、未打包、未发布**，改动留业主决定。 |
+| 验证 | 有 node/pnpm/无头浏览器（Chrome for Testing 151.0.7922.34，与基线同版本）的机器上，七项门禁 + 冻结门禁全部实跑：typecheck turbo 5/5；layering 0 violations；unit 162 文件 2770 通过（5 skip 全为能力门：文件符号链接 EPERM、UNC 不可构造）；contract 6 文件 53 通过；integration offline 12 文件 40 通过；acceptance M1 17/17 断言 + 5/5 接收项、覆盖率 87.00%；acceptance M5 59/62 断言 + 3 项如实 deferred、10/10 gates、覆盖率 86.98%；e2e 31/31 用例 + 5/5 负向检查、逐例 0px 像素差；frozen-gate PASS。**计数对账**：2770+53=2823（与前七轮基线逐字一致）+40 集成 = 2863 = 全量配置运行的通过数（0 失败、7 pending 全部可解释）。**跨版本**：Node 22.22.2 与 Node 24.22.2 各跑一遍 unit+contract，结果逐字相同。**循环依赖静态扫描**（221 个生产文件）：仅 1 个环且为类型环——组合根与四域模块双向引用全部是 `import type`，编译期擦除，运行时单向。**证据锚点扫描**：94 条路径 + 全部 `::` 符号，改后缺失 0、不可解析 0。 |
+| 未覆盖 | 真机项仍未验证（Windows 托盘、真实下载/取消、NSIS 打包安装、更新器闭环——即 M5 的 A-4.4-28 / A-4.4-29 / A-D118-RESUME 三项 deferred 与 N1/N2/N3）；本机 5 个能力门 skip（文件符号链接需 SeCreateSymbolicLinkPrivilege、UNC 管理员共享不可稳定构造），junction 用例全部实跑；`test:online` 需真实国际网，与 CI 一致排除；settings.js 与 subtitle-picker.js 仍缓拆（与 D-225 同策略）；循环依赖为静态近似，不解析字符串拼接的动态 specifier（全仓动态 import 仅 4 处固定字面量）；外层 `docs/DECISIONS.md` / `DELIVERY-REPORT.md` 副本仍落后于项目内，是否补同步留业主裁决。 |

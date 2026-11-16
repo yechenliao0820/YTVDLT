@@ -730,7 +730,10 @@ describe('D-208 · canonical roots（根形态 ≠ realpath 形态时判定仍�
       [`${SHORT}/videos/real.mp4`],
       contextWith(async (p) => mapShortToLong(p)),
     );
-    expect(verdict).toEqual({ kind: 'ok', missingPaths: [] });
+    expect(verdict.kind).toBe('ok');
+    // D-222b：预检裁决按 append-only 语义新增了 verificationRoots 字段，此处
+    // 保留断言原意图（裁决种类 + missing 列表），不做整体深比较。
+    expect(verdict.kind === 'ok' ? verdict.missingPaths : null).toEqual([]);
   });
 
   it('missing 判定同样用 canonical 根：父目录解析为长名且等于根 → missing（D-120 不变）', async () => {
@@ -741,7 +744,8 @@ describe('D-208 · canonical roots（根形态 ≠ realpath 形态时判定仍�
       }
       return mapped; // 父目录（videos）解析为长名形态
     }));
-    expect(verdict).toEqual({ kind: 'ok', missingPaths: [`${SHORT}/videos/gone.mp4`] });
+    expect(verdict.kind).toBe('ok');
+    expect(verdict.kind === 'ok' ? verdict.missingPaths : null).toEqual([`${SHORT}/videos/gone.mp4`]);
   });
 
   it('canonical 化不放宽安全：realpath 解析到根外 → 仍整批拒绝', async () => {

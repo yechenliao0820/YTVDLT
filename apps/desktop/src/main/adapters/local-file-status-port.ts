@@ -211,6 +211,13 @@ async function preflightOnePath(
  * gone entries come back as `missingPaths` (exact input strings) and are the
  * caller's D-120 `filesMissing` bookkeeping; they are excluded from the trash
  * call.
+ *
+ * D-221 re-audit · root binding: an `ok` verdict also carries the
+ * `verificationRoots` this verdict was judged against (the D-208 canonical
+ * alias list), so the caller can hand them back to `trash()` as its
+ * `expectedCanonicalRoots` — the executor then verifies root IDENTITY against
+ * the pre-flight record instead of re-deriving the roots at execution time.
+ * A `refused` verdict carries no roots: nothing may execute behind it.
  */
 export async function preflightTrashPaths(
   paths: readonly string[],
@@ -235,7 +242,7 @@ export async function preflightTrashPaths(
   if (refusedReason !== null) {
     return { kind: 'refused', reason: refusedReason, refusedCount };
   }
-  return { kind: 'ok', missingPaths };
+  return { kind: 'ok', missingPaths, verificationRoots };
 }
 
 /**
@@ -288,7 +295,133 @@ export async function preflightTrashPaths(
  * calls. It cannot reach zero at the kernel level (see the residual-window
  * note below); the acceptance criterion it implements is the D-203/D-207 one:
  * a file that cannot be PROVEN to belong to the current task is never deleted.
+ *
+ * D-221 re-audit · root binding (optional third parameter
+ * `expectedCanonicalRoots`): the check above still re-derives the canonical
+ * roots from the `roots` argument AT EXECUTION TIME, so a root directory
+ * itself swapped between the pre-flight and `trash()` (e.g. replaced by a
+ * junction pointing elsewhere) would be re-judged under its NEW identity —
+ * trust-baseline drift. When the caller passes the pre-flight verdict's
+ * `verificationRoots` here, `trash()` first verifies that baseline (see
+ * `verifyBoundRootIdentity`: the canonical roots are re-derived from the same
+ * string roots and must reproduce the recorded list — a swapped / dangling /
+ * unreadable confirmed root refuses the WHOLE batch with every entry `error`
+ * and zero `trashItem` calls); the per-entry re-validation then judges
+ * against these pre-flight-confirmed roots instead of re-derived ones.
+ * Omitted (undefined) → the legacy re-derive-at-execution behaviour above,
+ * byte-for-byte unchanged.
  */
+/**
+ * D-221 re-audit · root identity re-verification (the trust-baseline half of
+ * the executor backstop). `expectedCanonicalRoots` is the pre-flight verdict's
+ * `verificationRoots` passed back verbatim — the canonical root list the
+ * verdict was judged against. `roots` is the same string-root list the caller
+ * gave the pre-flight (both wired callers pass it to both calls).
+ *
+ * The naive "re-realpath every recorded entry" cannot distinguish a root that
+ * was CONFIRMED by realpath at pre-flight and has since been swapped / deleted
+ * from a root that NEVER resolved at pre-flight: `canonicalContainmentRoots`
+ * keeps the string form of an unresolvable root as comparison-only evidence
+ * (a request's `tempDir` legitimately may not exist on disk yet — it is still
+ * a judging root). Requiring the latter to resolve would refuse every
+ * legitimate batch whose record names a not-yet-created directory. The check
+ * therefore re-derives EXACTLY what the pre-flight derived — same primitive,
+ * same string roots — and compares it against the recorded baseline:
+ *
+ *   - any RE-DERIVED entry the pre-flight never recorded -> the baseline moved:
+ *     a root swapped identity (e.g. replaced by a junction pointing elsewhere)
+ *     -> refuse (identity). Post-fix review precision note: only a NEWLY
+ *     derived entry whose normalized identity differs from the baseline refuses
+ *     here; a same-identity benign creation (e.g. the tempDir being mkdir-ed
+ *     between pre-flight and trash) re-derives to an already-recorded string
+ *     form and does NOT refuse.
+ *   - a RECORDED entry the re-derivation can no longer produce -> only a
+ *     confirmed realpath ALIAS can go missing (string forms always re-derive):
+ *     the root that used to resolve to it is gone / dangling / unreadable.
+ *     Diagnosed at the recorded form itself:
+ *       ENOENT / ENOTDIR -> refuse (D-203: an unresolvable confirmed root can
+ *       prove ownership of nothing beneath it — never "missing");
+ *       anything else (EACCES / ELOOP / …) -> refuse, fail-closed;
+ *       resolves but the alias still no longer derives -> the root moved away
+ *       while the old target persists -> refuse (identity).
+ *   - everything re-derives -> the trust baseline is intact; the per-entry
+ *     re-validation judges against the RECORDED list, not the re-derived one.
+ *
+ * Comparison is by `normalizedForContainment` (D-208: an 8.3 short-name root
+ * resolving to its long-form alias is the SAME directory, not drift).
+ *
+ * `roots` omitted (undefined — no wired caller does this): nothing to
+ * re-derive from, so every recorded form is treated as pre-flight-confirmed
+ * and re-checked strictly (ENOENT refuses). Defensive fail-closed corner.
+ *
+ * Returns the refusal reason for the WHOLE batch, or `null` when the recorded
+ * baseline still reproduces exactly.
+ */
+const ROOT_IDENTITY_CHANGED_REASON = '回收前复检发现输出根目录身份已变化，已拒绝移入回收站';
+const ROOT_GONE_REASON = '回收前复检发现输出根目录已消失或悬空（无法解析真实路径），已拒绝移入回收站';
+
+function rootUnresolvableReason(error: unknown): string {
+  return `回收前复检无法解析输出根目录真实路径（${errnoDetail(error)}），已拒绝移入回收站`;
+}
+
+async function verifyBoundRootIdentity(
+  expectedCanonicalRoots: readonly string[],
+  roots: readonly string[] | undefined,
+  realpath: (path: string) => Promise<string>,
+): Promise<string | null> {
+  const recorded = new Set<string>();
+  for (const root of expectedCanonicalRoots) {
+    const normalized = normalizedForContainment(root);
+    if (normalized !== null) recorded.add(normalized);
+  }
+  if (roots === undefined) {
+    // Defensive corner: no string roots to re-derive from — strict per-form.
+    for (const root of expectedCanonicalRoots) {
+      let real: string;
+      try {
+        real = await realpath(root);
+      } catch (error) {
+        const code = errnoOf(error);
+        return code === 'ENOENT' || code === 'ENOTDIR' ? ROOT_GONE_REASON : rootUnresolvableReason(error);
+      }
+      const normalizedReal = normalizedForContainment(real);
+      if (normalizedReal === null || !recorded.has(normalizedReal)) {
+        return ROOT_IDENTITY_CHANGED_REASON;
+      }
+    }
+    return null;
+  }
+  // One canonical-alias re-derivation per BATCH (the same call shape the
+  // unbound legacy path makes — no extra primitive per entry).
+  const derived = await canonicalContainmentRoots(roots, realpath);
+  const derivedSet = new Set<string>();
+  for (const entry of derived) {
+    const normalized = normalizedForContainment(entry);
+    if (normalized === null || !recorded.has(normalized)) {
+      // A resolution the pre-flight never confirmed: never judge containment
+      // under the NEW identity — refuse the whole batch instead.
+      return ROOT_IDENTITY_CHANGED_REASON;
+    }
+    derivedSet.add(normalized);
+  }
+  for (const root of expectedCanonicalRoots) {
+    const normalized = normalizedForContainment(root);
+    if (normalized === null || derivedSet.has(normalized)) continue;
+    // A recorded form the re-derivation can no longer produce — a confirmed
+    // alias whose root stopped resolving to it. Diagnose at the recorded form.
+    try {
+      await realpath(root);
+    } catch (error) {
+      const code = errnoOf(error);
+      return code === 'ENOENT' || code === 'ENOTDIR' ? ROOT_GONE_REASON : rootUnresolvableReason(error);
+    }
+    // The recorded form itself still resolves, but the root that used to
+    // resolve to it no longer does — the resolution target moved.
+    return ROOT_IDENTITY_CHANGED_REASON;
+  }
+  return null;
+}
+
 export function createTrashFilesPort(
   trashItem: (path: string) => Promise<void>,
   stat: (path: string) => Promise<StatOutcome> = nodeStat,
@@ -306,14 +439,32 @@ export function createTrashFilesPort(
     async trash(
       paths: readonly string[],
       roots?: readonly string[],
+      expectedCanonicalRoots?: readonly string[],
     ): Promise<readonly TrashFileOutcome[]> {
+      // D-221 re-audit · root binding (third parameter): when the caller hands
+      // back the pre-flight's `verificationRoots`, verify the IDENTITY of every
+      // bound root FIRST — a root swapped / gone / unresolvable since the
+      // pre-flight refuses the WHOLE batch before a single `trashItem` call.
+      // The per-entry re-validation below then judges against these
+      // pre-flight-confirmed roots, NOT against roots re-derived here.
+      if (expectedCanonicalRoots !== undefined) {
+        const rootRefusal = await verifyBoundRootIdentity(expectedCanonicalRoots, roots, realpath);
+        if (rootRefusal !== null) {
+          return paths.map((path) => ({ path, status: 'error' as const, reason: rootRefusal }));
+        }
+      }
       // One canonical-alias resolution per BATCH (not per entry): the verdicts
       // compare realpath resolutions against the same D-208 alias list the
       // pre-flight uses, so an 8.3 short-name / reparse-point root form never
-      // refuses a legitimate file.
-      const verificationRoots = roots === undefined
-        ? undefined
-        : await canonicalContainmentRoots(roots, realpath);
+      // refuses a legitimate file. With a bound root list the re-derivation is
+      // SKIPPED on purpose — the pre-flight's confirmed roots are the trust
+      // baseline; re-deriving them here would judge under whatever identity
+      // the root directory has NOW.
+      const verificationRoots = expectedCanonicalRoots !== undefined
+        ? expectedCanonicalRoots
+        : roots === undefined
+          ? undefined
+          : await canonicalContainmentRoots(roots, realpath);
       const outcomes: TrashFileOutcome[] = [];
       for (const path of paths) {
         // D-203: refuse links BEFORE any destructive action. This runs ahead of
@@ -395,7 +546,12 @@ export function createTrashFilesPort(
         // which `shell.trashItem` (Electron) does not expose. This backstop
         // reduces the exploitability from "any moment after the pre-flight"
         // to "the microseconds between two adjacent syscalls", which is the
-        // accepted, registered residual risk (AI-MAINTENANCE §10).
+        // accepted, registered residual risk (AI-MAINTENANCE §10). The bound
+        // roots above close a DIFFERENT gap — trust-baseline drift (the
+        // executor judging by roots re-derived from a root directory whose
+        // identity changed after the pre-flight confirmed them); they do NOT
+        // change this remaining realpath→trashItem window, which stays as
+        // registered.
         try {
           await trashItem(path);
           outcomes.push({ path, status: 'trashed' });

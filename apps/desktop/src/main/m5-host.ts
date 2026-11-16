@@ -188,7 +188,10 @@ function detailPort(host: M4Host): TaskDetailPort {
  * artifact/link survives (cleanup is skipped, the download keeps Completed).
  * Provably-gone entries (`missingPaths`) are reported as removed, preserving
  * the D-120 idempotent contract. A port without `preflight` (legacy fakes)
- * keeps its exact previous behaviour.
+ * keeps its exact previous behaviour. D-221 re-audit: the recycler runs the
+ * pre-flight itself, so its confirmed canonical roots (`verificationRoots`)
+ * are bound into the executor call — root identity is re-verified before the
+ * recycle bin, same as the withFiles branch.
  */
 function makeSubtitleRecycler(
   port: TrashFilesPort,
@@ -197,6 +200,14 @@ function makeSubtitleRecycler(
     try {
       let targets: readonly string[] = paths;
       let provablyGone: readonly string[] = [];
+      // D-221 re-audit · root binding: the recycler runs the pre-flight right
+      // here, so the verdict's confirmed canonical roots (`verificationRoots`)
+      // are available and travel into the executor call — the executor then
+      // re-verifies root identity before anything destructive and judges the
+      // per-entry re-validation against the pre-flight-confirmed roots, same
+      // as the withFiles branch. `undefined` for ports without `preflight`
+      // (legacy fakes) or verdicts without the field → previous behaviour.
+      let boundVerificationRoots: readonly string[] | undefined;
       if (port.preflight !== undefined) {
         const verdict = await port.preflight(paths, roots);
         // ONE unprovable path refuses the whole batch: nothing is trashed, so
@@ -204,15 +215,19 @@ function makeSubtitleRecycler(
         // bin behind a refusal.
         if (verdict.kind === 'refused') return [];
         provablyGone = verdict.missingPaths;
+        boundVerificationRoots = verdict.verificationRoots;
         const gone = new Set(provablyGone);
         targets = paths.filter((path) => !gone.has(path));
       }
-      // D-207/D-209 backstop: the task's trusted roots (non-null — the queue
-      // refuses `null` roots before ever calling this hook) re-validated in
-      // the executor immediately before `trashItem`, same as the withFiles
-      // branch. A port whose `trash` ignores the optional roots (legacy fake)
-      // simply keeps its previous behaviour.
-      const outcomes = targets.length === 0 ? [] : await port.trash(targets, roots);
+      // D-207/D-209 backstop: the pre-flight-bound trusted roots (non-null —
+      // the queue refuses `null` roots before ever calling this hook)
+      // re-validated in the executor immediately before `trashItem`, same as
+      // the withFiles branch. A port whose `trash` ignores the optional
+      // roots / third argument (legacy fake) simply keeps its previous
+      // behaviour.
+      const outcomes = targets.length === 0
+        ? []
+        : await port.trash(targets, roots, boundVerificationRoots);
       const trashed = outcomes
         .filter((entry) => typeof entry === 'string'
           || entry.status === 'trashed' || entry.status === 'missing')

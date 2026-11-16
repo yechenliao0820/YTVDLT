@@ -160,3 +160,108 @@ describe('A-M2-21 · remove (optionally deleting files) + export/import', () => 
     expect(await store.get('missing')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Audit follow-up (D-218 复核) · persist-first, commit-after.
+//
+// The old add()/remove()/importJson() mutated `this.entries` BEFORE awaiting
+// the write queue, so a persist failure left residue: an add() failure kept
+// the row in memory (and the NEXT queue task flushed it to disk — a canceled
+// task showed a successful history row that survived restart), a remove()
+// failure deleted from memory while the row stayed on disk. The new contract:
+// the write-queue task persists the WOULD-BE state and commits memory only
+// after the atomic write succeeded — a failure leaves memory AND disk
+// untouched, with no rollback and no compensation needed.
+// ---------------------------------------------------------------------------
+describe('persist-first, commit-after · history write failures leave no residue', () => {
+  /**
+   * One-shot sabotage in the style of the D-218 gate fakes: `writeTextAtomic`
+   * fails the next `n` writes to the history file, then recovers. `disk()`
+   * reads the "on-disk" history.json from the in-memory ports' file map (the
+   * same way the D-218 window-B test reads it).
+   */
+  const setupFailing = () => {
+    const mem = createInMemoryPorts();
+    const historyPath = `${mem.ports.env.configDir()}/history.json`;
+    const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    let failsLeft = 0;
+    mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (failsLeft > 0 && path === historyPath) {
+        failsLeft -= 1;
+        throw new Error('simulated history write failure');
+      }
+      await inner(path, text);
+    };
+    const store = new HistoryStore({ ports: mem.ports });
+    const diskIds = (): string[] => {
+      const raw = mem.state.files.get(historyPath);
+      if (raw === undefined) return [];
+      return (JSON.parse(raw) as { entries: Array<{ id: string }> }).entries.map((e) => e.id);
+    };
+    return { store, diskIds, setFails: (n: number): void => { failsLeft = n; } };
+  };
+
+  it('add() whose persist throws leaves the entry nowhere — memory and disk both stay clean', async () => {
+    const { store, diskIds, setFails } = setupFailing();
+    // A first healthy write so "no residue" is asserted about real leftovers.
+    await store.add(entry({ id: 'h1', videoPath: 'C:/out/one.mp4' }));
+    expect(diskIds()).toEqual(['h1']);
+
+    // The next persist fails: add() rejects and commits NOTHING.
+    setFails(1);
+    await expect(store.add(entry({ id: 'h2', videoPath: 'C:/out/two.mp4' })))
+      .rejects.toThrow('simulated history write failure');
+
+    // Memory is clean (the old code kept h2 in `entries` right here)...
+    expect((await store.query({})).map((e) => e.id)).toEqual(['h1']);
+    // ...and disk is clean (no residue, no half-written file).
+    expect(diskIds()).toEqual(['h1']);
+
+    // Recovery: a later add persists the committed state. Under the old
+    // commit-early code this write would have flushed the h2 residue to disk.
+    await store.add(entry({ id: 'h3', videoPath: 'C:/out/three.mp4' }));
+    expect((await store.query({})).map((e) => e.id)).toEqual(['h1', 'h3']);
+    expect(diskIds()).toEqual(['h1', 'h3']);
+    expect(diskIds()).not.toContain('h2');
+  });
+
+  it('remove() whose persist throws keeps the entry in memory AND on disk; a retried remove lands on both', async () => {
+    const { store, diskIds, setFails } = setupFailing();
+    await store.add(entry({ id: 'h1', videoPath: 'C:/out/one.mp4' }));
+    expect(diskIds()).toEqual(['h1']);
+
+    setFails(1);
+    await expect(store.remove('h1')).rejects.toThrow('simulated history write failure');
+    // Nothing was committed: memory still has the entry (the old code had
+    // already filtered it out here — memory/disk divergence), disk unchanged.
+    expect((await store.query({})).map((e) => e.id)).toEqual(['h1']);
+    expect(diskIds()).toEqual(['h1']);
+
+    // After recovery the retry removes it consistently on both sides.
+    expect(await store.remove('h1')).toBe(true);
+    expect(await store.query({})).toEqual([]);
+    expect(diskIds()).toEqual([]);
+  });
+
+  it('two concurrent add() calls both land on disk (serialized queue, no lost update)', async () => {
+    const { mem } = setup();
+    const store = new HistoryStore({ ports: mem.ports });
+    // Fire the second add WITHOUT awaiting the first: the write queue must
+    // serialize both read-modify-persist-commit sequences, and the second
+    // persist must observe the first commit.
+    const [first, second] = await Promise.all([
+      store.add(entry({ id: 'a', videoPath: 'C:/out/a.mp4' })),
+      store.add(entry({ id: 'b', videoPath: 'C:/out/b.mp4' })),
+    ]);
+    expect(first.added).toBe(true);
+    expect(second.added).toBe(true);
+
+    expect((await store.query({})).map((e) => e.id).sort()).toEqual(['a', 'b']);
+    const historyPath = `${mem.ports.env.configDir()}/history.json`;
+    const raw = mem.state.files.get(historyPath);
+    expect(raw).toBeDefined();
+    const diskIds = (JSON.parse(raw as string) as { entries: Array<{ id: string }> })
+      .entries.map((e) => e.id).sort();
+    expect(diskIds).toEqual(['a', 'b']);
+  });
+});

@@ -22,6 +22,9 @@ const sources = {
   messages: readFileSync(join(UI_SRC, 'i18n', 'messages.js'), 'utf8'),
   shell: readFileSync(join(UI_SRC, 'app-shell.js'), 'utf8'),
   picker: readFileSync(join(UI_SRC, 'subtitles', 'subtitle-picker.js'), 'utf8'),
+  // Task 5: the queue page now delegates its pure display model to
+  // queue-model.js; load it before the page exactly like index.html does.
+  model: readFileSync(join(UI_SRC, 'pages', 'queue', 'queue-model.js'), 'utf8'),
   queue: readFileSync(join(UI_SRC, 'pages', 'queue', 'queue.js'), 'utf8'),
 };
 
@@ -249,6 +252,7 @@ export function subtitleHarness(options: {
     sandbox.__YTVDLT_TASKS__ = [];
   }
 
+  new Function('window', sources.model)(sandbox);
   new Function('window', sources.queue)(sandbox);
   const queue = sandbox['YTVDLTQueue'];
   const picker = queue.subtitlePicker();
