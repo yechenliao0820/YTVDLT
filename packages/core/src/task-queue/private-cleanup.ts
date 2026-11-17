@@ -1,0 +1,78 @@
+/**
+ * D-232 · which records a private-mode close may purge.
+ *
+ * The queue toolbar's 「无痕下载」 switch is a promise about the DOWNLOADS the
+ * user made while it was on, not about records from before it was flipped. The
+ * old close hook walked `queue.list()` and removed every non-running row, so
+ * turning private mode on for one video erased the ordinary downloads the user
+ * still wanted — an irreversible deletion of data that was never private.
+ *
+ * Two rules, deliberately independent of the current switch position:
+ *  1. only `record.privateMode === true` is a cleanup target. The flag is
+ *     captured at enqueue time and survives restarts (it is part of the
+ *     snapshot), so the decision belongs to the record, not to whatever the
+ *     toggle says hours later;
+ *  2. a record that still occupies a slot (`Running` / `FetchingInfo`) is
+ *     skipped — `TaskQueue.remove()` refuses it anyway, and killing a live
+ *     download to tidy a list is not what "close the window" means. Its own
+ *     `run().finally` will persist the finished state; the NEXT close removes
+ *     it.
+ *
+ * Pure and dependency-free on purpose: no `node:*`, no queue import (the
+ * minimal port shape below keeps this testable and keeps `task-queue.ts` the
+ * only state owner). The caller supplies the covers' `forget` callback because
+ * the thumbnail cache lives in the desktop layer.
+ */
+import type { TaskRecord, TaskState } from '@ytvdlt/shared';
+
+/** The minimum a purge needs from a queue — structurally satisfied by TaskQueue. */
+export interface PrivateCleanupQueue {
+  list(): readonly TaskRecord[];
+  remove(taskId: string): Promise<boolean>;
+}
+
+/** States that still hold a slot; `TaskQueue.remove()` refuses these. */
+const SLOT_HOLDING: readonly TaskState[] = ['Running', 'FetchingInfo'];
+
+/** True when this record must disappear when a private-mode session closes. */
+export function shouldPurgeOnPrivateClose(
+  record: Pick<TaskRecord, 'privateMode' | 'state'>,
+): boolean {
+  if (record.privateMode !== true) return false;
+  return !SLOT_HOLDING.includes(record.state);
+}
+
+export interface PrivatePurgeReport {
+  /** Ids actually removed from the queue. */
+  readonly removed: readonly string[];
+  /** Private ids left alone because they are still running. */
+  readonly keptRunning: readonly string[];
+}
+
+/**
+ * Remove every settled private record. Files are never touched — the media the
+ * user downloaded belongs to them (D-88's "cleanup never touches the
+ * filesystem" rule is unchanged); only the queue row and its snapshot entry go.
+ *
+ * A `remove()` rejection propagates: the snapshot write failed, so the row is
+ * still on disk and pretending otherwise would hide a failed privacy cleanup.
+ */
+export async function purgePrivateRecords(
+  queue: PrivateCleanupQueue,
+  forgetCover?: (taskId: string) => void,
+): Promise<PrivatePurgeReport> {
+  const removed: string[] = [];
+  const keptRunning: string[] = [];
+  for (const record of queue.list()) {
+    if (record.privateMode !== true) continue;
+    if (!shouldPurgeOnPrivateClose(record)) {
+      keptRunning.push(record.id);
+      continue;
+    }
+    if (await queue.remove(record.id)) {
+      removed.push(record.id);
+      forgetCover?.(record.id);
+    }
+  }
+  return { removed, keptRunning };
+}

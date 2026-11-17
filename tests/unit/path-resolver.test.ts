@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 import {
   sanitizeToken, sanitizeFileName, renderTemplate, buildOutputDir,
   resolveOutputPath, truncateWindowsPath, analyzeWindowsPath, expandEnvVars,
-  BUILTIN_OUTPUT_TEMPLATES, PRIVATE_OUTPUT_DIR,
+  BUILTIN_OUTPUT_TEMPLATES,
   WINDOWS_MAX_PATH, WINDOWS_SAFE_PATH, LONG_PATH_PREFIX, LONG_UNC_PREFIX,
   ConfigStore, DEFAULT_DOMAINS, createDefaultConfig,
 } from '@ytvdlt/core';
@@ -132,10 +132,15 @@ describe('B2 PathResolver · buildOutputDir 4 combinations (A-4.4-03)', () => {
       .toBe('C:/V/YouTube/MyList');
   });
 
-  it('selects audioDir as base when supplied and privateMode when enabled', () => {
+  it('uses the supplied base dir; D-229 moved private routing to the intake', () => {
     expect(buildOutputDir(paths(), 'YouTube', 'MyList', 'C:/A')).toBe('C:/A');
+    // The planner must never return a `%VAR%` token: `-P` reaches a spawned
+    // process that will not expand it (D-79). `m4-host.ts::readDefaults` writes
+    // the expanded private directory into the request instead.
     expect(buildOutputDir(paths({ privateMode: true }), 'YouTube', 'MyList', 'C:/A'))
-      .toBe(PRIVATE_OUTPUT_DIR);
+      .toBe('C:/A');
+    expect(buildOutputDir(paths({ privateMode: true, videoDir: 'C:/private' }), 'Y', 'P'))
+      .toBe('C:/private');
   });
 
   it('sanitizes subdir tokens and strips trailing separators', () => {
@@ -229,9 +234,10 @@ describe('B2 PathResolver · resolveOutputPath (Q-M3-09 fixed order / D-43)', ()
     expect(resolution.preview).toBe('C:/V/Clean Title.mp4');
   });
 
-  it('UNSC private mode routes the preview to the private directory', () => {
-    const resolution = resolveOutputPath(paths({ privateMode: true }), vars());
-    expect(resolution.dir).toBe(PRIVATE_OUTPUT_DIR);
+  it('D-229: the preview follows the request root, never a private-mode token', () => {
+    const resolution = resolveOutputPath(paths({ privateMode: true, videoDir: 'C:/private' }), vars());
+    expect(resolution.dir).toBe('C:/private');
+    expect(resolution.preview.startsWith('C:/private/')).toBe(true);
   });
 });
 

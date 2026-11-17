@@ -102,6 +102,12 @@ export const DEFAULT_DOMAINS: Readonly<Record<ConfigDomainName, Record<string, u
     videoDir: DEFAULT_PATH_TOKENS.videoDir,
     audioDir: DEFAULT_PATH_TOKENS.audioDir,
     commandDir: '%USERPROFILE%/Downloads/YTVDLT/Commands',
+    // D-229 (audit P1): LEGACY, DO NOT READ. The private-mode switch the queue
+    // toolbar writes lives in `general.privateMode`; `m4-host.ts::readDefaults`
+    // overlays that value onto `request.paths.privateMode`. This key stays only
+    // so an existing config.json keeps its shape — nothing may take behaviour
+    // from it (that mistake shipped a "private" download that was written to
+    // the normal folder and recorded in history).
     privateMode: false,
     tempDir: '',
   },

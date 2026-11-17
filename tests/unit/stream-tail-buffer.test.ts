@@ -24,19 +24,20 @@
  * adapter code path with deterministic input — fully offline.
  */
 import { afterAll, describe, it, expect } from 'vitest';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  STREAM_TAIL_MAX_BYTES, STREAM_TAIL_TRUNCATED_MARKER,
+  STREAM_TAIL_MAX_BYTES, STREAM_TAIL_TRUNCATED_MARKER, TERMINATION_UNCONFIRMED_MARKER,
 } from '@ytvdlt/shared';
 import { ErrorMapper } from '@ytvdlt/core';
 import { utf8ByteLength } from '@ytvdlt/engine-ytdlp';
 import { appendUtf8Tail, assembleUtf8Tail, utf8TailText } from '../../packages/engine-ytdlp/src/yt-dlp-engine.js';
 import {
   appendToStreamTail, assembleStreamTail, newStreamTail, streamTailText,
-  createStreamingProcessPort,
+  createStreamingProcessPort, TERMINATION_GRACE_MS,
 } from '../../apps/desktop/src/main/adapters/process-streaming.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -357,4 +358,112 @@ describe('D-144 · streaming spawn against the real bundled node.exe (L2)', () =
     expect(done.stdout.startsWith(`${STREAM_TAIL_TRUNCATED_MARKER}\n`)).toBe(true);
     expect(await port.isAlive(handle.pid as number)).toBe(false);
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// L2 · D-235 · done() settle parity with the bounded path
+// ---------------------------------------------------------------------------
+
+// Capability gate (D-206/D-207 precedent — never fake a jittery test): the
+// watchdog's FIRE path needs a platform where `close` genuinely lags `exit`.
+// On this project's target (Windows, bundled node) two real-process probes
+// show close ALWAYS follows exit within milliseconds even when a grandchild
+// inherits the stdio pipes — so this probe detects the capability once and
+// the fire-path test below skips honestly where it cannot reproduce.
+const closeLagReproducible = await (async (): Promise<boolean> => {
+  const probe = 'const cp=require("child_process");'
+    + 'const g=cp.spawn(process.execPath,["-e","setInterval(()=>{},3000)"],'
+    + '{stdio:["ignore","inherit","inherit"]});'
+    + 'g.on("spawn",()=>{setTimeout(()=>process.exit(0),100);});';
+  const t0 = Date.now();
+  const child = spawn(NODE_EXE, ['-e', probe], {
+    shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const lagged = await Promise.race([
+    new Promise<boolean>((resolve) => {
+      child.on('close', () => resolve(Date.now() - t0 > 1_000));
+    }),
+    // close did NOT arrive quickly while the grandchild holds the pipes →
+    // the platform does reproduce the lag → the watchdog fire path is real.
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 1_500)),
+  ]);
+  child.removeAllListeners();
+  try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  return lagged;
+})();
+
+describe('D-235 · streaming settle parity (real bundled node.exe, L2)', () => {
+  it('5 · the healthy path never sees the watchdog: no stall, no false marker', async () => {
+    const port = createStreamingProcessPort();
+    const handle = port.spawnStreaming(
+      NODE_EXE, ['-e', 'process.stdout.write("ok");process.stderr.write("warn\\n")'],
+      { shell: false, windowsHide: true }, () => undefined,
+    );
+    const started = Date.now();
+    const done = await handle.done;
+    // close arrives right after exit here, so the watchdog must be cleared
+    // — settling is fast and the result carries NO termination marker.
+    expect(Date.now() - started).toBeLessThan(TERMINATION_GRACE_MS);
+    expect(done.exitCode).toBe(0);
+    expect(done.stderr).toBe('warn\n');
+    expect(done.stderr).not.toContain(TERMINATION_UNCONFIRMED_MARKER);
+    expect(done.stdout).toBe('ok');
+  }, 10_000);
+
+  it('6 · a requested kill settles without a stall and without a false marker', async () => {
+    const port = createStreamingProcessPort();
+    const handle = port.spawnStreaming(
+      NODE_EXE, ['-e', 'setInterval(()=>{},250);'],
+      { shell: false, windowsHide: true }, () => undefined,
+    );
+    expect(handle.pid).not.toBe(null);
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    const started = Date.now();
+    const ok = await handle.kill();
+    // The real taskkill wins the kill race in milliseconds; a whole-grace
+    // stall would mean the bounded answer degraded the healthy path.
+    expect(ok).toBe(true);
+    expect(Date.now() - started).toBeLessThan(TERMINATION_GRACE_MS);
+    const done = await handle.done;
+    expect(done.exitCode).toBe(null);
+    expect(done.stderr).not.toContain(TERMINATION_UNCONFIRMED_MARKER);
+    expect(await port.isAlive(handle.pid as number)).toBe(false);
+  }, 20_000);
+
+  it.skipIf(!closeLagReproducible)(
+    '7 · a grandchild holding stdio cannot keep done() pending forever',
+    async () => {
+      const port = createStreamingProcessPort();
+      // The child prints its output, spawns a grandchild that INHERITS the
+      // stdio pipes and then exits. The grandchild holds the pipe write ends
+      // for 9 s, so `close` would not arrive until then (the audited "done
+      // never settles" family — 手册坑 21: PyInstaller's bootloader child does
+      // exactly this inheritance). The watchdog must settle from the child's
+      // own exit evidence inside the grace instead.
+      const script = 'const cp=require("child_process");'
+        + 'process.stdout.write("ok");process.stderr.write("warn\\n");'
+        + 'const g=cp.spawn(process.execPath,["-e","setTimeout(()=>{},9000)"],'
+        + '{stdio:["ignore","inherit","inherit"]});'
+        + 'g.on("spawn",()=>{setTimeout(()=>process.exit(0),100);});';
+      const handle = port.spawnStreaming(
+        NODE_EXE, ['-e', script], { shell: false, windowsHide: true },
+        () => undefined,
+      );
+      const started = Date.now();
+      const done = await handle.done;
+      const elapsed = Date.now() - started;
+
+      // Settled by the exit watchdog (armed on the child's exit, fired after
+      // the grace) — long BEFORE the grandchild releases the pipes at ~9 s.
+      expect(elapsed).toBeGreaterThanOrEqual(TERMINATION_GRACE_MS);
+      expect(elapsed).toBeLessThan(8_500);
+      // Exit evidence, not a fabricated success: the child exited 0 and the
+      // result carries the real output plus the honest tree-uncertainty note.
+      expect(done.exitCode).toBe(0);
+      expect(done.timedOut).toBe(false);
+      expect(done.stdout).toBe('ok');
+      expect(done.stderr.startsWith('warn\n')).toBe(true);
+      expect(done.stderr).toContain(TERMINATION_UNCONFIRMED_MARKER);
+    }, 20_000,
+  );
 });

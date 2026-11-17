@@ -19,7 +19,10 @@ import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { CorePorts, EngineUpdateSource } from '@ytvdlt/shared';
-import { ArtifactVerifier, ErrorMapper, Logger, expandEnvVars, type IConfigStore } from '@ytvdlt/core';
+import {
+  ArtifactVerifier, ErrorMapper, Logger, expandEnvVars, purgePrivateRecords,
+  type IConfigStore,
+} from '@ytvdlt/core';
 import { createEngine } from '@ytvdlt/engine-ytdlp';
 import { createNodePorts } from './adapters/node-ports.js';
 import {
@@ -161,19 +164,29 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
    */
   let loggerRef: Logger | null = null;
 
-  /** Clear history only when `general.privateMode` is on; never touches files. */
+  /**
+   * D-232 (audit P2): purge the records THIS user mark as private, and nothing
+   * else. The old hook cleared every non-running row whenever the switch was on,
+   * which destroyed ordinary downloads the user had kept for days — see
+   * `core/src/task-queue/private-cleanup.ts` for the two rules (record flag,
+   * never a running slot). The switch position is deliberately NOT consulted:
+   * the flag was captured at enqueue time and is what the download actually did,
+   * so flipping the toggle off before closing cannot leave a "private" row
+   * behind. Files are never touched — only the queue row and its snapshot entry.
+   */
   const clearPrivateHistory = async (): Promise<void> => {
     const host = hostRef;
     if (host === null) return;
     try {
-      if (host.m4.task.config.get('general', 'privateMode') !== true) return;
-      for (const record of host.m4.task.queue.list()) {
-        if (record.state === 'Running' || record.state === 'FetchingInfo') continue;
-        await host.m4.task.queue.remove(record.id);
+      await purgePrivateRecords(
+        {
+          list: () => host.m4.task.queue.list(),
+          remove: (taskId) => host.m4.task.queue.remove(taskId),
+        },
         // D-103: drop the cover reference too; the file is recycled by a later
         // prune pass, never here (shutdown must not touch the filesystem).
-        thumbnailsRef?.forget(record.id);
-      }
+        (taskId) => thumbnailsRef?.forget(taskId),
+      );
     } catch {
       // Best effort: a failed snapshot write must never block shutdown.
     }

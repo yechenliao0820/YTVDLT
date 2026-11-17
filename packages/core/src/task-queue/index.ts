@@ -6,6 +6,7 @@ export * from './concurrency.js';
 export * from './snapshot-projection.js';
 export * from './history-entry.js';
 export * from './app-error.js';
+export * from './private-cleanup.js';
 export {
   TaskQueue, normalizeConcurrency, DEFAULT_CONCURRENCY, MAX_CONCURRENCY,
   type TaskQueueDeps,

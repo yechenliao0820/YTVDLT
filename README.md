@@ -19,23 +19,31 @@ dialog on first launch.
 - Download engine: bundled `yt-dlp`, verified and replaceable at runtime
 - Maintainability: a one-way layering rule keeps all queue logic offline-testable
 
-## Latest release — 0.3.0
+## Latest release — 0.3.1
 
 | | |
 |---|---|
-| Released | 2026-11-12 |
-| Artifact | `YTVDLT.Setup.0.3.0.exe` — NSIS installer, Windows x64, 226,282,986 B |
-| SHA-256 | `5d93f92307e3b91ac72e5fa372332caa8766e265d0709254dd87d38287940af3` |
-| Tag / release baseline | `v0.3.0` |
-| Downloads | [Release 0.3.0](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.0) · [all releases](https://github.com/yechenliao0820/YTVDLT/releases) |
+| Released | 2026-11-15 |
+| Artifact | `YTVDLT.Setup.0.3.1.exe` — NSIS installer, Windows x64, 226,400,406 B |
+| SHA-256 | `cbfdccb1e5885b794806c8ab6b2ff6e5dac2cee65e8f73359706dd5cc07d02d7` |
+| Tag / release baseline | `v0.3.1` |
+| Downloads | [Release 0.3.1](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.1) · [all releases](https://github.com/yechenliao0820/YTVDLT/releases) |
 
-**What changed in 0.3.0** — the first release to carry everything that landed
-on top of 0.2.9: the subtitle pipeline, TXT and playlist batch import, the
-lowest-quality fix (`-S +res`), bounded child-process output, the dynamic
-supported-sites panel with six-state URL pre-checks, the HTTP / IPC /
-termination boundary hardening, and two new UI paths — a pre-check you can see
-and confirm before a link is queued, and command templates in Settings
-(D-124…D-139).
+**What changed in 0.3.1** — everything that landed on top of 0.3.0 (D-140…D-213),
+verified on a real machine through eight core chains. The headline is a broad
+security-and-privacy hardening pass: every outbound connection is DNS-pinned to
+a policy-verified address, every page ships a Content-Security-Policy with a
+deny-all session permission gate, config writes are truly atomic with a
+byte-level backup of a corrupt task snapshot, and the config domains a caller
+may read are whitelisted. On the user-facing side: the URL pre-check can be
+cancelled mid-flight, first launch follows the OS language, download and
+pre-check URLs are length-capped, `network.maxRate` actually reaches the
+engine, and the start-with-Windows switch shows the registry's real state.
+Named fixes: a deep link no longer pre-fills the wrong URL, drive-letter roots
+and bare UNC share roots are rejected as download folders up front, a component
+update's `.bak` cleanup no longer rolls back a good swap, and a verifier that
+is killed by its own timeout is now recorded honestly (`SKIPPED`) instead of
+being counted as a pass.
 
 The installer is **not code-signed**; SmartScreen will warn once on first run.
 
@@ -236,9 +244,9 @@ never installs silently. When the installer is ready the button switches to
 
 The release-notes dialog explains the **whole interval you skipped**: read the
 release list, keep every version between your build and the one on offer, and
-print one block per version, oldest first. A machine on 0.2.8 upgrading to
-0.3.0 therefore reads what 0.2.9 changed *and* what 0.3.0 changed — instead of
-one body that refers to a version it never ran. (D-140)
+print one block per version, oldest first. A machine on 0.3.0 upgrading to
+0.3.1 therefore reads what 0.3.1 changed — aggregated from the live release
+list — instead of one body that refers to a version it never ran. (D-140)
 
 ### Known limitations
 
@@ -256,24 +264,34 @@ Stated plainly rather than glossed over:
   covered a dedicated extractor, two GenericIE pages, a media-less page, an
   age-gated video and an unavailable one, with **0 misclassifications**, and
   confirmed that *lowest* selects the minimum available video height (144p on
-  the 144/240/360/480/720/1080 source). Real Electron-window verification and
-  installer acceptance are still pending. The DNS-rebinding gap is now closed
+  the 144/240/360/480/720/1080 source). The DNS-rebinding gap is closed
   (D-143): every outbound connection is pinned to a policy-verified resolved
   address, re-resolved and re-checked on every redirect hop; residual limits
   (such as a fully controlled resolver) are recorded under D-143. The
   hardening history lives in `DECISIONS.md` D-137 / D-138 / D-143.
+- 0.3.1 was verified on a real machine (2026-11-15): eight core chains passed
+  on the packaged installer — startup & version truth, the app update check
+  (with live release-notes aggregation), component status, a real download
+  into the Videos library, open-folder, delete-with-files (recycle bin),
+  mid-download cancel, and the second-instance deep-link prefill. One known
+  issue is disclosed in the release notes: in the packaged build, closing the
+  window quits the app instead of hiding to the tray — a legacy behaviour
+  shared by every released version, already fixed in code (D-220 / D-224) and
+  awaiting the next build's re-verification. YouTube and similar sites require
+  reachable network access (direct or via your own proxy).
 - App updates download the whole installer (no delta), and the portable build
   does not participate in self-update.
-- No real-device, all-sites coverage is claimed; the verification numbers
-  below are automated test results, not a field trial.
+- No real-device, all-sites coverage is claimed; the verification numbers in
+  *Engineering and verification* are automated test results, not a field trial.
 
 Full list: [`docs/AI-MAINTENANCE.md`](docs/AI-MAINTENANCE.md) §10.
 
-## Release history — 0.2.2 → 0.3.0
+## Release history — 0.2.2 → 0.3.1
 
-Nine releases in four days. The trajectory moved from UI polish, through
+Ten releases in eight days. The trajectory moved from UI polish, through
 download-core correctness, to edge cases that only appear after a file has been
-moved or deleted outside the app.
+moved or deleted outside the app — and then into a broad security, privacy and
+real-machine-verification pass.
 
 | Version | Date | Focus | Decisions | Release |
 |---|---|---|---|---|
@@ -284,154 +302,52 @@ moved or deleted outside the app.
 | 0.2.6 | 2026-11-09 | `APP_INFO` version truth; post-download stages; safer delete dialog; default Videos folder; per-task temp-file isolation | D-114…D-118 | [v0.2.6](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.6) |
 | 0.2.7 | 2026-11-09 | Updater install state machine; card button height adapts to large windows | D-119 | [v0.2.7](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.7) |
 | 0.2.8 | 2026-11-10 | Idempotent deletion; on-demand local file state detection; layered licence pane with the full English licence | D-120 / D-121 | [v0.2.8](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.8) |
-| **0.2.9** | **2026-11-10** | Native right-click edit menu in editable fields; settings placeholder shows `—` instead of a made-up path | D-122 / D-123 | [v0.2.9](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.9) |
+| 0.2.9 | 2026-11-10 | Native right-click edit menu in editable fields; settings placeholder shows `—` instead of a made-up path | D-122 / D-123 | [v0.2.9](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.9) |
 | 0.3.0 | 2026-11-12 | Subtitle pipeline; TXT / playlist batch import; bounded engine output; dynamic supported-sites list and the six-state URL pre-check; HTTP / IPC / process-termination hardening; command templates | D-124…D-139 | [v0.3.0](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.0) |
+| **0.3.1** | **2026-11-15** | Everything after 0.3.0, machine-verified: DNS-pinned outbound connections; CSP + deny-all session permission gate on every page; atomic config writes with corrupt-snapshot backup; config-domain whitelist; cancellable URL pre-checks; first-launch OS language; deep-link prefill fix; download-location root rejection; verifier-timeout honesty | D-140…D-213 | [v0.3.1](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.1) |
 
-0.3.0 is published. Work landing on top of it, **not yet released** — the
-version-jump release-notes fix (D-140, see *Staying current*), the live-mode
-fixture guard (D-141), honest cancel-failure handling (D-142), and four
-external-audit fixes: DNS-pinned outbound connections (D-143), bounded
-download output (D-144), truly atomic config writes (D-145), and a
-detail-page cancel button aligned with what the queue can actually do
-(D-146) — is described in
+0.3.1 is published. Work landing on top of it, **not yet released** — the
+post-release audit round: verbose stderr no longer leaks signed-URL parameters
+into error reports and logs (D-234), a streaming download now settles from exit
+evidence when `close` never arrives and a kill answer is bounded (D-235), the
+proxy password is scrubbed from `tasks.json` and re-injected from current config
+on restore (D-236), concurrent duplicate downloads reserve their ` (n)` copy
+names up front (D-237), and the unused `history.remove deleteFile` capability
+(a permanent unlink) is removed outright (D-238). These are described in
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-196).
+[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-238).
 
 ## Engineering and verification
 
-The 0.2.8 release was gated by:
+Every change lands through the same gates; the table below is the standing
+state of the repository (per-release numbers live in
+[`docs/CHANGELOG.md`](docs/CHANGELOG.md), per-decision evidence in
+[`docs/DECISIONS.md`](docs/DECISIONS.md)):
 
 | Gate | Result |
 |---|---|
-| `pnpm typecheck` | 5/5 workspace packages successful |
-| Unit / contract / integration tests | 1152 passed (88 new cases covering the deletion matrix and file-state scenarios) |
-| `node scripts/run-e2e.mjs` | 31/31 screenshot + DOM cases, 5/5 deliberate negative checks |
-| Screenshot drift | 0 px (two DOM baselines rebuilt per case after the licence-pane change; no PNG baseline was overwritten) |
-| `check-layering` / `frozen-gate` | 0 violations / passed |
-
-The 0.3.0 work (subtitles, batch import, playlist batch, supported sites, URL
-pre-check, command templates and the D-137/D-138 security-boundary hardening)
-was gated separately by:
-
-| Gate | Result |
-|---|---|
-| `pnpm typecheck` | 5/5 workspace packages successful |
-| Unit / contract / integration tests | **1829 passed / 2 skipped across 138 files, 0 failed** |
-| Coverage | statements 88.7% / branches 86.7% / functions 92.0% / lines 88.7% (floor 70, not raised) |
-| Screenshot E2E | 31/31 cases + 5/5 negative checks; only the two settings baselines were rebuilt (PNG + DOM), the other 58 baseline files byte-identical |
+| `pnpm typecheck` | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
+| Unit / contract / integration tests | **2,875 passed, 6 skipped (capability-gated), 0 failed across 170 files** |
+| Coverage | statements 93.16% / branches 86.66% / functions 93.46% / lines 93.16% (floor 70, not raised; the zero-dependency UI itself is covered too) |
+| Screenshot E2E | 31/31 cases + 5/5 deliberate negative checks; screenshot baselines untouched by the recent audit-repair rounds |
 | `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
-| Engine self-report provenance | Which extractors exist, and how failures are classified, are read back from the shipped `yt-dlp` — never from a checked-in list |
+| CI | GitHub Actions (`ci.yml`, `windows-latest`) runs typecheck, the full suite with coverage, layering and the frozen-file gate on every push to `main` and every PR; branch protection requires it to pass before merge, and all actions are pinned to commit SHAs |
 
-The audit-and-repair round after 0.3.0 (D-140…D-146, not yet released) passed
-the same gates:
-
-| Gate | Result |
-|---|---|
-| Typecheck | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
-| Unit / contract / integration tests | **1,871 passed across 132 files, 0 failed** |
-| Coverage | statements 88.3% / branches 86.3% / functions 91.4% / lines 88.3% (floor 70, not raised) |
-| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** (the detail-page cancel fix applies to live mode only) |
-| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
-
-The 2026-11-13 audit-and-repair rounds (D-150…D-171, not yet released) added
-user-cancellable pre-checks, snapshot write/validation hardening, IPv6
-allowlisting, a bounded stdout line-assembly buffer, component-updater network
-policy and GitHub Actions CI, then followed up with backup-before-write on a
-corrupt task snapshot, per-`operationId` pre-check cancellation, a mirror trust
-model, deep snapshot validation and a branch-protection checklist. A further
-round closed ten external-audit findings: a probe can now be cancelled (the
-metadata child is killed through the same abort surface as the timeout), the
-saved snapshot no longer contains signed CDN URLs, parked tasks expose a real
-cancel, `network.maxRate` actually reaches `-r`, the start-with-Windows switch
-writes the HKCU Run key, the dev-only fixture IPC channels are absent from
-packaged builds, `config:set` writes the whitelisted keys instead of answering
-`ok` unconditionally, the bundled runtime is verified once at start-up, every
-page carries a Content-Security-Policy and denies all session permissions, and a
-component update waits for the queue to drain before swapping a file. They
-passed the same gates:
-
-| Gate | Result |
-|---|---|
-| `pnpm typecheck` | 5/5 workspace packages successful |
-| Unit / contract / integration tests | **2,038 passed across 139 files, 0 failed** |
-| Coverage | statements 90.13% / branches 87.07% / functions 93.27% / lines 90.13% (floor 70, not raised) |
-| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift; 31 DOM baselines rebuilt for the CSP meta line, zero PNG baselines changed** |
-| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
-| M5 acceptance | 10/10 gates PASS, allGreen=true |
-
-A GitHub Actions workflow (`ci.yml`) now runs typecheck, the full test suite,
-coverage, layering and the frozen-file gate on every push to `main` and every
-PR; packaging is a separate manual workflow. The first push triggered run #1,
-which failed on a clean runner because three kinds of assets were missing: two
-recorded `.log` fixtures were accidentally ignored, the bundled `node.exe` /
-`yt-dlp.exe` are intentionally not committed, and Windows checkout uses CRLF
-while the licence test compares LF bytes. D-157 fixes only the environment
-(fixtures committed, runtime fetched before tests, inputs normalized) without
-relaxing a single assertion. A follow-up (D-158) pins `.mjs` files to LF in
-`.gitattributes`: Windows runners otherwise check those shebang-bearing
-scripts out with CRLF, which breaks test collection. The numbers above come
-from the local run.
-
-The follow-up repair round on 2026-11-14 (D-173…D-181, not yet released) fixed
-eight issues those rounds left behind: legacy configs still carrying the
-placeholder `maxRate: 1000` are migrated (schema v3) instead of silently
-capping every upgraded install at 1 MB/s, a busy queue no longer wedges the
-intake gate when a component update defers, `config:get` answers only
-whitelisted preference domains, the start-up integrity check caches per-file
-hashes (and the crash dialog no longer shows a literal `//n`), the
-start-with-Windows toggle shows the registry's real state, `tasks.json` is
-rewritten only on structural changes, and the log page copies through a
-main-process clipboard channel instead of a permission that D-170 denies. It
-passed the same gates:
-
-| Gate | Result |
-|---|---|
-| Typecheck | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
-| Unit / contract / integration tests | **2,099 passed, 0 failed** |
-| Coverage | four dimensions ≥ the 70 floor enforced by the suite (the local summary is blocked by the D-29 delete guard; exact figures come from CI) |
-| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** |
-| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
-
-A second repair round the same day (D-182…D-186) closed the five code-level
-leftovers from that audit: a download cancelled before the child process spawns
-now cancels for real (no more "cancel failed" while the download runs to
-completion), history records carry the measured file size instead of a
-hardcoded 0, artifact paths are contained to the task's own output roots before
-they can be trashed or opened, all four GitHub Actions are pinned to commit
-SHAs (a fourth one the audit had missed included), and download / pre-check
-URLs are capped at 4,096 characters. It passed the same gates:
-
-| Gate | Result |
-|---|---|
-| Typecheck | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
-| Unit / contract / integration tests | **2,149 passed, 0 failed** |
-| Coverage | statements 89.48% / branches 86.75% / functions 91.51% / lines 89.48% (floor 70, not raised) |
-| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** |
-| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
-
-UI coverage joined the gate the same day (D-187): a shared import harness
-(`tests/unit/helpers/ui-harness.ts`) loads the zero-dependency UI scripts —
-plain IIFEs that attach their test surfaces to `window` — under fake browser
-globals, so the v8 coverage provider finally sees them (the legacy
-`runInNewContext` tests execute in VM sandboxes the provider never reports).
-Sixteen behavioural test files (~470 cases) drive every UI module to 99.2%
-statement coverage, `packages/ui` is now part of `vitest.config.ts`, and the
-threshold stays at 70. The four dimensions land at:
-
-| Gate | Result |
-|---|---|
-| Typecheck | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
-| Unit / contract / integration tests | **2,649 passed, 0 failed** (165 files) |
-| Coverage | statements 93.42% / branches 86.61% / functions 93.55% / lines 93.42% (floor 70, not raised; the UI itself: statements 99.21% / branches 86.35% / functions 97.55%) |
-| Screenshot E2E | 31/31 cases + 5/5 negative checks; **0 px drift, no baseline rebuilt** |
-| `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
+The first CI runs failed on a clean runner for environment-only reasons
+(missing fixtures, the intentionally uncommitted bundled runtime, CRLF
+checkout) — the fixes committed fixtures, fetched the runtime before tests and
+normalized line endings, without relaxing a single assertion (D-157 / D-158).
+The suite also gained a UI-coverage harness that loads the zero-dependency
+renderer scripts under fake browser globals so the coverage provider can see
+them (D-187).
 
 Design invariants worth knowing if you plan to modify the code:
 
 - File deletion has exactly one primitive — `shell.trashItem`. Nothing in the
   adapter permanently unlinks a file.
 - The renderer never sees a media URL in `TASK_LIST`, and never receives a
-  remote thumbnail URL — only a local cached path.
+  remote thumbnail URL — only a local cached path. The task snapshot never
+  carries a proxy password or signed CDN URLs.
 - `packages/core` imports no `node:*`; `check-layering.mjs` fails the build if
   it ever does.
 - Every IPC payload is validated against an explicit key whitelist before a
@@ -440,8 +356,8 @@ Design invariants worth knowing if you plan to modify the code:
   There is deliberately no hard-coded fallback, and the enqueue gate fails
   **open**: only a clear "unsupported" blocks a URL.
 
-These are automated results for the shipped build, not a claim that every
-Windows device, DPI setting or video site has been exercised.
+These are automated results, not a claim that every Windows device, DPI setting
+or video site has been exercised.
 
 ## Requirements
 

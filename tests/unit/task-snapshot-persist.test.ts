@@ -300,3 +300,223 @@ describe('Task-2 audit · 并发快照按提交顺序落盘（新快照必是最
     expect(t2?.state).toBe('Completed');
   });
 });
+
+/**
+ * D-231 (audit P2) · a task the user already confirmed must not exist only in
+ * memory while it waits for a slot.
+ *
+ * The old `enqueue()` updated the record map, pushed the id into the FIFO and
+ * called `pump()` — and wrote nothing. A parked task emits no progress and has
+ * no `run().finally`, so until ANOTHER task happened to tick, the waiting row
+ * lived only in RAM: quitting (or crashing) in that window lost a download the
+ * UI had already shown as queued.
+ *
+ * The fix persists inside `enqueue()` *only when the record parked* — a task
+ * that started is covered by its own lifecycle (first tick + final write), and
+ * writing on every intake would break the D-163 "no rewrite on pure progress"
+ * contract. `enqueueBatch()` nests the same rule so a 200-line TXT import costs
+ * ONE serialisation instead of 200.
+ */
+describe('D-231 · 排队任务在 enqueue 返回前落盘', () => {
+  /** A download that never emits an event: the run hangs in `Running`. */
+  const silentEngine: DownloadEngine = {
+    async version() { return 'fake'; },
+    async probe() { return mediaInfo(); },
+    async probePlaylist() { throw new Error('not used'); },
+    download() {
+      return { pid: 1, cancel: async () => true };
+    },
+    async selfUpdate() {
+      return { fromVersion: '', toVersion: '', channel: 'stable', changed: false };
+    },
+  };
+
+  const parkedSession = (concurrency: number) => {
+    const mem = createInMemoryPorts();
+    const rewrites: string[] = [];
+    const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (path.endsWith('tasks.json')) rewrites.push(text);
+      await inner(path, text);
+    };
+    const queue = new TaskQueue({
+      ports: mem.ports,
+      engine: silentEngine,
+      verifier: okVerifier,
+      history: new HistoryStore({ ports: mem.ports }),
+      taskStore: new TaskStore({ ports: mem.ports }),
+      jsRuntimePath: 'C:/runtime/node.exe',
+      persistIntervalMs: 0,
+      concurrency,
+    });
+    return { mem, queue, rewrites };
+  };
+
+  it('并发已满时，第二个任务的入队立刻写进 tasks.json', async () => {
+    const { queue, rewrites } = parkedSession(1);
+    await queue.enqueue(record('t1'));
+    expect(queue.activeTaskIds).toEqual(['t1']);
+
+    await queue.enqueue(record('t2'));
+    // Parked, and already on disk — no tick, no task end required.
+    expect(queue.get('t2')?.state).toBe('Idle');
+    expect(rewrites).toHaveLength(1);
+    const persisted = parse(rewrites[0] ?? '{}');
+    expect(persisted.tasks.map((task) => task.id).sort()).toEqual(['t1', 't2']);
+    expect(persisted.tasks.find((task) => task.id === 't2')?.state).toBe('Idle');
+  });
+
+  it('批量入队只写一次，且每个排队成员都在这次写入里', async () => {
+    const { queue, rewrites } = parkedSession(1);
+    await queue.enqueue(record('b1'));
+    await queue.enqueueBatch([record('b2'), record('b3')]);
+
+    expect(rewrites).toHaveLength(1);
+    const persisted = parse(rewrites[0] ?? '{}');
+    expect(persisted.tasks.map((task) => task.id).sort()).toEqual(['b1', 'b2', 'b3']);
+    expect(persisted.tasks.filter((task) => task.state === 'Idle')).toHaveLength(2);
+  });
+
+  it('槽位空闲时启动的任务不额外写一次（D-163 计数不变）', async () => {
+    const { queue, rewrites } = parkedSession(3);
+    await queue.enqueue(record('s1'));
+    // Started, not parked: its own run lifecycle owns the write.
+    expect(queue.activeTaskIds).toEqual(['s1']);
+    expect(rewrites).toHaveLength(0);
+  });
+});
+
+/**
+ * D-231 · the same rule covers `restart()`: a retry that parks behind a busy
+ * slot changes the record (Error → ReadyWithInfo) and has no other writer, so
+ * a crash before the next tick used to restore the OLD terminal state — the
+ * retry silently vanished while the card already showed it.
+ */
+describe('D-231 · 排队中的重试同样落盘', () => {
+  it('restart 一个失败任务、槽位被占时，新状态立刻写进 tasks.json', async () => {
+    const mem = createInMemoryPorts();
+    const rewrites: string[] = [];
+    const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (path.endsWith('tasks.json')) rewrites.push(text);
+      await inner(path, text);
+    };
+    // `slow` never finishes (it holds the only slot); every other id completes
+    // with an artifact that the verifier rejects, so the record settles as Error.
+    const engine: DownloadEngine = {
+      async version() { return 'fake'; },
+      async probe() { return mediaInfo(); },
+      async probePlaylist() { throw new Error('not used'); },
+      download(req: DownloadRequest, onEvent: (e: EngineEvent) => void) {
+        const handle = { pid: 1, cancel: async () => true };
+        if (req.taskId === 'slow') return handle;
+        queueMicrotask(() => onEvent({
+          type: 'completed', taskId: req.taskId,
+          artifacts: [{ taskId: req.taskId, path: `C:/out/${req.taskId}.mp4`, kind: 'video', sizeBytes: 1 }],
+        }));
+        return handle;
+      },
+      async selfUpdate() {
+        return { fromVersion: '', toVersion: '', channel: 'stable', changed: false };
+      },
+    };
+    const failingVerifier = {
+      async verify() {
+        return {
+          taskId: 'x', artifacts: [], postprocessed: false,
+          criteria: [{ id: 'C1' as const, status: 'FAIL' as const, detail: 'rejected' }],
+          ok: false, failureCode: 'ARTIFACT_INCOMPLETE' as const, durationMs: 1,
+        };
+      },
+    };
+    const queue = new TaskQueue({
+      ports: mem.ports,
+      engine,
+      verifier: failingVerifier,
+      history: new HistoryStore({ ports: mem.ports }),
+      taskStore: new TaskStore({ ports: mem.ports }),
+      jsRuntimePath: 'C:/runtime/node.exe',
+      persistIntervalMs: 0,
+      concurrency: 1,
+    });
+
+    await queue.enqueue(record('bad'));
+    for (let i = 0; i < 100 && queue.get('bad')?.state !== 'Error'; i += 1) await tick(5);
+    expect(queue.get('bad')?.state).toBe('Error');
+
+    // A second task takes the only slot and never finishes.
+    await queue.enqueue(record('slow'));
+    expect(queue.activeTaskIds).toEqual(['slow']);
+
+    await queue.restart('bad');
+    // Parked behind `slow`, but the new state is already durable.
+    expect(queue.get('bad')?.state).not.toBe('Error');
+    expect(queue.get('bad')?.error ?? null).toBeNull();
+    const last = parse(rewrites[rewrites.length - 1] ?? '{}');
+    expect(last.tasks.find((task) => task.id === 'bad')?.state).toBe('ReadyWithInfo');
+    expect(last.tasks.find((task) => task.id === 'bad')?.error ?? null).toBeNull();
+  });
+});
+
+describe('D-236 · tasks.json 不携带代理密码', () => {
+  const PROXY = 'http://user:SuperSecretPw@proxy.local:8080';
+  const BACKFILL = 'http://fresh:BackfilledPw@proxy.local:8080';
+
+  const recordWithProxy = (taskId: string, proxy: string | null): TaskRecord => {
+    const base = record(taskId);
+    const req = base.request;
+    if (req === null) return base;
+    return { ...base, request: { ...req, network: { ...req.network, proxy } } };
+  };
+
+  it('落盘的投影 proxy 置空，内存记录原样保留（本轮 argv 还要用）', async () => {
+    const { queue, rewrites } = session('complete');
+    await queue.enqueue(recordWithProxy('t1', PROXY));
+    await tick();
+
+    expect(queue.get('t1')?.state).toBe('Completed');
+    // The in-memory request keeps the proxy — THIS session's argv needs it.
+    expect(queue.get('t1')?.request?.network.proxy).toBe(PROXY);
+    // The persisted copy never carries it: D-163's "signed links never touch
+    // disk" now covers the one credential-bearing request field. tasks.json
+    // is exactly the file users attach to bug reports.
+    const persisted = parse(rewrites[rewrites.length - 1] ?? '{}');
+    expect(persisted.tasks[0]?.request?.network.proxy).toBeNull();
+    expect(JSON.stringify(persisted)).not.toContain('SuperSecretPw');
+  });
+
+  it('restore 经宿主钩子回填当前配置的 proxy（当前配置为准）', async () => {
+    const mem = createInMemoryPorts();
+    const queue = new TaskQueue({
+      ports: mem.ports,
+      engine: fakeEngine({ mode: 'complete', downloadCalls: 0 }),
+      verifier: okVerifier,
+      history: new HistoryStore({ ports: mem.ports }),
+      taskStore: new TaskStore({ ports: mem.ports }),
+      jsRuntimePath: 'C:/runtime/node.exe',
+      persistIntervalMs: 0,
+      // The production shape of the hook (task-host.ts): re-inject the live
+      // config proxy so a restart neither loses the proxy nor revives a
+      // removed one.
+      repairRestoredRequest: (request) => ({
+        ...request,
+        network: { ...request.network, proxy: BACKFILL },
+      }),
+    });
+    const snapshot = parse(JSON.stringify({ tasks: [recordWithProxy('t1', null)] }));
+    await queue.restore(snapshot);
+    expect(queue.get('t1')?.request?.network.proxy).toBe(BACKFILL);
+    // The rehydrated request is what restart() runs on — the fake engine
+    // completes within the tick, which proves the run actually happened.
+    await queue.restart('t1');
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+
+  it('无钩子时 restore 原样保留（core 层无配置可读，缺省安全）', async () => {
+    const { queue } = session('complete');
+    const snapshot = parse(JSON.stringify({ tasks: [recordWithProxy('t1', null)] }));
+    await queue.restore(snapshot);
+    expect(queue.get('t1')?.request?.network.proxy).toBeNull();
+  });
+});

@@ -49,15 +49,32 @@ export function snapshotFingerprint(tasks: readonly TaskRecord[]): string {
  * keep their artifact copy; records WITH one additionally get their
  * `mediaInfo` replaced by `stripCredentialUrls()`'s minimised copy (see
  * `./snapshot-media.js` for why `thumbnail` is deliberately kept).
+ *
+ * D-236: the request snapshot is persisted verbatim EXCEPT `network.proxy` —
+ * a proxy value can carry `http://user:password@host`, and `tasks.json` is
+ * the file users attach to bug reports. The in-memory record is untouched
+ * (the argv still needs the proxy for THIS session); a restored task gets
+ * the CURRENT config proxy re-injected through the host's
+ * `repairRestoredRequest` hook (TaskQueueDeps), so a restart neither loses
+ * the proxy nor revives one the user has since removed. The fingerprint
+ * never reads `request`, so the D-163 write gate is unaffected.
  */
 export function buildPersistProjection(
   records: readonly TaskRecord[],
 ): TaskRecord[] {
-  return records.map((record) => (record.mediaInfo === null
-    ? { ...record, artifacts: [...record.artifacts] }
-    : {
-      ...record,
+  return records.map((record) => {
+    const request = record.request;
+    const needsProxyStrip = request !== null
+      && typeof request.network.proxy === 'string' && request.network.proxy !== '';
+    return {
+      ...(needsProxyStrip
+        ? {
+          ...record,
+          request: { ...request, network: { ...request.network, proxy: null } },
+        }
+        : record),
       artifacts: [...record.artifacts],
-      mediaInfo: stripCredentialUrls(record.mediaInfo),
-    }));
+      mediaInfo: record.mediaInfo === null ? null : stripCredentialUrls(record.mediaInfo),
+    };
+  });
 }

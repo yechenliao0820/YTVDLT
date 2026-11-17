@@ -79,6 +79,17 @@ export async function createTaskHost(options: TaskHostOptions): Promise<TaskHost
     jsRuntimePath: options.jsRuntimePath,
     concurrency,
     ...(options.recycleSubtitleFiles === undefined ? {} : { recycleSubtitleFiles: options.recycleSubtitleFiles }),
+    // D-236: the persisted snapshot blanks `network.proxy` (it can carry
+    // `http://user:pass@host` and `tasks.json` is the file users attach to
+    // bug reports). Re-inject the CURRENT config value at restore time — the
+    // same accessor the update-network surface uses (`getDomain('network')`)
+    // — so a restarted task neither loses its proxy nor revives a removed
+    // one. Current config wins over any stale snapshot value.
+    repairRestoredRequest: (request) => {
+      const raw = config.getDomain('network')['proxy'];
+      const proxy = typeof raw === 'string' && raw.trim() !== '' ? raw : null;
+      return { ...request, network: { ...request.network, proxy } };
+    },
   });
 
   const restore = await restoreTasks(queue, store);
