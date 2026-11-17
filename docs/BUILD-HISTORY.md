@@ -80,3 +80,22 @@
 | 发布 | **2026-11-12 创建 GitHub Release `v0.3.0`**（`published_at` 05:58:56Z），上传 `YTVDLT.Setup.0.3.0.exe`（226,282,986 B，Release `digest` 与本地 SHA-256 逐字符一致）/ `YTVDLT.Setup.0.3.0.exe.blockmap`（237,729 B）/ `latest.yml`（341 B）；说明英文（铁律 14）。仓库版本基准自此为 `0.3.0` |
 | 产物命名差异 | 本地产物是 `YTVDLT Setup 0.3.0.exe`（**空格**），但 **GitHub 会把资产名里的空格规范化成点号**，上传后实际是 `YTVDLT.Setup.0.3.0.exe`。`latest.yml` 首次上传时仍写空格名，会导致 electron-updater 拼出 404；已改成点号并重传，三条下载链接 HEAD 全部 200。**以后发版：以 GitHub 返回的资产名为准，`latest.yml` 必须写资产名而不是本地文件名** |
 
+
+## 0.3.2 构建（2026-11-17）
+
+| 项 | 值 |
+|---|---|
+| 触发 | 业主 2026-11-17 说「打包并发布新版」（铁律 9 的点名项） |
+| 版本号 | `0.3.1` → `0.3.2`（十进制进位）。与 0.3.0 那次不同，本轮**版本提升是永久性的**：两处 `package.json` 的 `version` 随本次提交入库，打包后**不还原**（发版基准自此为 `0.3.2`） |
+| 目标 | **只打 NSIS 安装版**（`--win nsis`）；未打便携版；`--publish never`，上传由随后的发布步骤单独执行 |
+| 命令 | `node scripts/build-desktop.mjs` → `electron-builder --config apps/desktop/electron-builder.yml --config.directories.buildResources=apps/desktop/build --config.directories.output=dist-0.3.2 -c.extraMetadata.main=apps/desktop/dist/main/main.cjs -c.electronDist=node_modules/electron/dist --win nsis --publish never`（`ELECTRON_BUILDER_BINARIES_MIRROR` 走 npmmirror；`CSC_IDENTITY_AUTO_DISCOVERY=false`） |
+| 产物 | `dist-0.3.2/YTVDLT Setup 0.3.2.exe` — **226,414,142 B** |
+| SHA-256 | `48db9a7cd535874b55582ba6e468d353fe294d6c4aec4ed1e38462624cc8d028` |
+| blockmap | `YTVDLT Setup 0.3.2.exe.blockmap` — 237,871 B |
+| latest.yml | `version: 0.3.2`，sha512 已写入，`releaseDate` 2026-11-17T09:00:19.459Z；**上传前把 `url` / `path` 改写成 GitHub 规范化后的点号资产名**（§9 坑 18，0.3.0 的教训） |
+| 版本资源 | `win-unpacked/YTVDLT.exe` FileVersion **0.3.2** / ProductVersion **0.3.2.0**；Setup 文件版本 0.3.2 |
+| asar | `win-unpacked/resources/app.asar` — 1,521,441 B；grep 命中本轮新增的 `queue.status.privateFailed`（4）/ `persistableRecords`（2）/ `isMissingFileError`（4），确认 D-239…D-243 的代码真的进了包 |
+| 运行时 | `resources/runtime/` 含 `aria2c.exe` / `ffmpeg/` / `node.exe` / `runtime-manifest.json` / `SHA2-256SUMS` |
+| 签名 | 未签名（无证书），SmartScreen 首次运行会提示 |
+| 未做 | **没有启动真机窗口点选**（安装包已产出但未运行安装流程）；未打便携版 |
+| 发布 | 见下方「0.3.2 发布」 |
