@@ -19,31 +19,38 @@ dialog on first launch.
 - Download engine: bundled `yt-dlp`, verified and replaceable at runtime
 - Maintainability: a one-way layering rule keeps all queue logic offline-testable
 
-## Latest release — 0.3.1
+## Latest release — 0.3.2
 
 | | |
 |---|---|
-| Released | 2026-11-15 |
-| Artifact | `YTVDLT.Setup.0.3.1.exe` — NSIS installer, Windows x64, 226,400,406 B |
-| SHA-256 | `cbfdccb1e5885b794806c8ab6b2ff6e5dac2cee65e8f73359706dd5cc07d02d7` |
-| Tag / release baseline | `v0.3.1` |
-| Downloads | [Release 0.3.1](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.1) · [all releases](https://github.com/yechenliao0820/YTVDLT/releases) |
+| Released | 2026-11-17 |
+| Artifact | `YTVDLT.Setup.0.3.2.exe` — NSIS installer, Windows x64, 226,414,142 B |
+| SHA-256 | `48db9a7cd535874b55582ba6e468d353fe294d6c4aec4ed1e38462624cc8d028` |
+| Tag / release baseline | `v0.3.2` |
+| Downloads | [Release 0.3.2](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.2) · [all releases](https://github.com/yechenliao0820/YTVDLT/releases) |
 
-**What changed in 0.3.1** — everything that landed on top of 0.3.0 (D-140…D-213),
-verified on a real machine through eight core chains. The headline is a broad
-security-and-privacy hardening pass: every outbound connection is DNS-pinned to
-a policy-verified address, every page ships a Content-Security-Policy with a
-deny-all session permission gate, config writes are truly atomic with a
-byte-level backup of a corrupt task snapshot, and the config domains a caller
-may read are whitelisted. On the user-facing side: the URL pre-check can be
-cancelled mid-flight, first launch follows the OS language, download and
-pre-check URLs are length-capped, `network.maxRate` actually reaches the
-engine, and the start-with-Windows switch shows the registry's real state.
-Named fixes: a deep link no longer pre-fills the wrong URL, drive-letter roots
-and bare UNC share roots are rejected as download folders up front, a component
-update's `.bak` cleanup no longer rolls back a good swap, and a verifier that
-is killed by its own timeout is now recorded honestly (`SKIPPED`) instead of
-being counted as a pass.
+**What changed in 0.3.2** — a privacy-and-durability release built out of two
+audit rounds (D-234…D-243). Private mode finally means what it says: the toolbar
+switch only reports "on" after the main process confirms the write and reverts
+with the real reason if it fails, the three paths that create a task wait for
+that write instead of reading the previous value, and a private task is no
+longer written to the queue snapshot at all — a crash or a kill can no longer
+resurrect the record on the next launch. Queue durability got equally honest:
+every enqueue is persisted before it returns (including a task that starts
+immediately, whose probe phase used to be unpersisted), and a failed snapshot
+write is reported instead of being swallowed — a removal that never reached the
+disk no longer looks like a success. `history.json` is read directly instead of
+trusting an existence probe that mapped every stat error to "missing", so a
+transient permission or sharing error can no longer overwrite a history this
+process never saw. The updater no longer hands a `.download` staging file to
+Windows: an installer that cannot be published under its release name is a
+failed update, not an install that may launch something else. The earlier audit
+fixes ride along: signed-URL parameters are redacted from verbose stderr, a
+streaming download settles from exit evidence when `close` never arrives, the
+proxy password is scrubbed from `tasks.json` and re-injected from the current
+config on restore, concurrent duplicate downloads reserve their ` (n)` copy
+names, and the unused permanent-unlink capability behind `history.remove` is
+gone.
 
 The installer is **not code-signed**; SmartScreen will warn once on first run.
 
@@ -279,6 +286,13 @@ Stated plainly rather than glossed over:
   shared by every released version, already fixed in code (D-220 / D-224) and
   awaiting the next build's re-verification. YouTube and similar sites require
   reachable network access (direct or via your own proxy).
+- 0.3.2 **contains** the close-to-tray fix (D-220 / D-224), but this build has
+  not been through the real-machine click-through yet: this round was validated
+  by the automated gates (typecheck, the full unit/contract suite, the
+  screenshot E2E with its negative controls) and the packaged installer was
+  built and inspected (version resources, asar contents, SHA-256) — it was not
+  installed and clicked through. Treat the tray behaviour as fixed-in-code,
+  pending field confirmation.
 - App updates download the whole installer (no delta), and the portable build
   does not participate in self-update.
 - No real-device, all-sites coverage is claimed; the verification numbers in
@@ -286,12 +300,13 @@ Stated plainly rather than glossed over:
 
 Full list: [`docs/AI-MAINTENANCE.md`](docs/AI-MAINTENANCE.md) §10.
 
-## Release history — 0.2.2 → 0.3.1
+## Release history — 0.2.2 → 0.3.2
 
-Ten releases in eight days. The trajectory moved from UI polish, through
+Eleven releases in ten days. The trajectory moved from UI polish, through
 download-core correctness, to edge cases that only appear after a file has been
 moved or deleted outside the app — and then into a broad security, privacy and
-real-machine-verification pass.
+real-machine-verification pass, followed by an audit round that made private
+mode and queue persistence mean exactly what they claim.
 
 | Version | Date | Focus | Decisions | Release |
 |---|---|---|---|---|
@@ -304,18 +319,14 @@ real-machine-verification pass.
 | 0.2.8 | 2026-11-10 | Idempotent deletion; on-demand local file state detection; layered licence pane with the full English licence | D-120 / D-121 | [v0.2.8](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.8) |
 | 0.2.9 | 2026-11-10 | Native right-click edit menu in editable fields; settings placeholder shows `—` instead of a made-up path | D-122 / D-123 | [v0.2.9](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.9) |
 | 0.3.0 | 2026-11-12 | Subtitle pipeline; TXT / playlist batch import; bounded engine output; dynamic supported-sites list and the six-state URL pre-check; HTTP / IPC / process-termination hardening; command templates | D-124…D-139 | [v0.3.0](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.0) |
+| **0.3.2** | **2026-11-17** | Private mode confirmed by the host before the UI claims it, and never persisted — a crash cannot resurrect the record; enqueue / retry / removal report a failed snapshot write instead of swallowing it; history reads no longer trust an existence probe; the updater refuses to install an installer it could not publish; plus the D-234…D-238 audit fixes | D-234…D-243 | [v0.3.2](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.2) |
 | **0.3.1** | **2026-11-15** | Everything after 0.3.0, machine-verified: DNS-pinned outbound connections; CSP + deny-all session permission gate on every page; atomic config writes with corrupt-snapshot backup; config-domain whitelist; cancellable URL pre-checks; first-launch OS language; deep-link prefill fix; download-location root rejection; verifier-timeout honesty | D-140…D-213 | [v0.3.1](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.1) |
 
-0.3.1 is published. Work landing on top of it, **not yet released** — the
-post-release audit round: verbose stderr no longer leaks signed-URL parameters
-into error reports and logs (D-234), a streaming download now settles from exit
-evidence when `close` never arrives and a kill answer is bounded (D-235), the
-proxy password is scrubbed from `tasks.json` and re-injected from current config
-on restore (D-236), concurrent duplicate downloads reserve their ` (n)` copy
-names up front (D-237), and the unused `history.remove deleteFile` capability
-(a permanent unlink) is removed outright (D-238). These are described in
-[`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-238).
+0.3.2 is published, and everything landed through D-243 is in it: the six
+private-mode and persistence defects from the second online audit (D-239…D-243),
+on top of the first audit round (D-234…D-238). Nothing is waiting for a release
+right now. Details live in [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
+[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-243).
 
 ## Engineering and verification
 
