@@ -99,3 +99,15 @@
 | 签名 | 未签名（无证书），SmartScreen 首次运行会提示 |
 | 未做 | **没有启动真机窗口点选**（安装包已产出但未运行安装流程）；未打便携版 |
 | 发布 | 见下方「0.3.2 发布」 |
+
+## 0.3.2 发布（2026-11-17）
+
+| 项 | 值 |
+|---|---|
+| Release | **v0.3.2**，id `448373158`，`published_at` 2026-11-17T09:17:40Z，<https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.2> |
+| 指向的提交 | `e3e9c8a`（`dev` 头，含 0.3.2 版本提升与发版文档）。**注意：`main` 此刻还没有这个提交**（PR 由业主创建并合并）；tag 指向的是实际被打包的那一份代码，合并后它就是 `main` 的祖先 |
+| 资产 | `YTVDLT.Setup.0.3.2.exe` 226,414,142 B `sha256:48db9a7c…c8d028`；`YTVDLT.Setup.0.3.2.exe.blockmap` 237,871 B `sha256:8391682e…67acc9`；`latest.yml` 341 B `sha256:3acd309c…2bf0f` |
+| 说明语言 | 英文（铁律 14），正文按 D-234…D-243 分「无痕 / 队列持久化 / 历史 / 更新 / 随版修复 / 验证」六节 |
+| 清单修正 | 上传前把 `latest.yml` 的 `url` / `path` 由 `YTVDLT Setup 0.3.2.exe` 改写成 `YTVDLT.Setup.0.3.2.exe`（§9 坑 18）；0.3.1 那次没改，清单对 electron-updater 是死链，本版修掉 |
+| 发布后校验 | ① `releases/latest` = `v0.3.2` 且三个资产 `digest` 非空；② 本地 `sha256` 与 exe 资产 `digest` 逐字符一致；③ `git rev-list -n1 v0.3.2` == `git rev-parse HEAD` == `e3e9c8a`。三项全过 |
+| 踩坑（这次真实发生） | 发布脚本先建**草稿**、三个资产齐了再转正——首轮 exe 上传进行到约 40% 时执行环境中断，上传进程随之被杀，草稿里只剩 `latest.yml` + `.blockmap`，`releases/latest` 仍显示 0.3.1。**现象是「发布没生效」，原因是资产未齐、Release 始终是 draft**。重传耗时约 9 分钟（本机上行到 GitHub 约 0.4 MiB/s，226 MB 不可能秒传）。**结论：不要以为上传卡死；用带进度的独立脚本、盯日志，传完再 PATCH `draft:false`** |
