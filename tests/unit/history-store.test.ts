@@ -458,3 +458,55 @@ describe('D-230 · read failures never overwrite; corrupt bytes are preserved', 
     expect(mem.state.files.get(path)).toBe('{not json');
   });
 });
+
+// ---------------------------------------------------------------------------
+// D-241 (audit P1) · "does the file exist?" must never be answered by a probe
+// whose failure mode is "false".
+//
+// The production `fs.exists()` port wraps `stat()` in a catch-all and returns
+// `false` for EVERY error (EACCES, EBUSY, a sharing violation…). `load()` used
+// to ask it first, so a transient stat failure on a perfectly good history
+// skipped the read, left `entries` empty, and the next `add()` persisted that
+// empty baseline — the same data-loss shape D-230 fixed for `readText`.
+// ---------------------------------------------------------------------------
+describe('D-241 · 存在性探测失败不再被当成「没有历史」', () => {
+  it('exists() 说谎时仍按真实文件合并，旧记录不被覆盖', async () => {
+    const mem = createInMemoryPorts();
+    const path = `${mem.ports.env.configDir()}/history.json`;
+    mem.state.files.set(path, JSON.stringify({
+      schemaVersion: 1,
+      entries: [entry({ id: 'old-1', videoPath: 'C:/out/old1.mp4' })],
+    }));
+
+    let probes = 0;
+    const ports = {
+      ...mem.ports,
+      fs: {
+        ...mem.ports.fs,
+        // Exactly what the production adapter does with a stat error.
+        exists: async (target: string): Promise<boolean> => {
+          if (target === path) { probes += 1; return false; }
+          return mem.ports.fs.exists(target);
+        },
+      },
+    };
+    const store = new HistoryStore({ ports });
+
+    const added = await store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' }));
+    expect(added.added).toBe(true);
+    const rows = JSON.parse(mem.state.files.get(path) ?? '{}') as { entries: Array<{ id: string }> };
+    // The old order produced exactly ['new-a'] here — old-1 was destroyed by a
+    // failed stat that had nothing to do with the file being absent.
+    expect(rows.entries.map((row) => row.id).sort()).toEqual(['new-a', 'old-1']);
+    // And the existence probe is not consulted at all any more.
+    expect(probes).toBe(0);
+  });
+
+  it('真正的 ENOENT 仍按首次运行处理（不误判为故障）', async () => {
+    const mem = createInMemoryPorts();
+    const store = new HistoryStore({ ports: mem.ports });
+    const added = await store.add(entry({ id: 'first', videoPath: 'C:/out/first.mp4' }));
+    expect(added.added).toBe(true);
+    expect(await store.query({})).toHaveLength(1);
+  });
+});

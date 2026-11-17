@@ -880,6 +880,8 @@ describe('D-187 · 任务管理与 D-116 单确认对话框纪律', () => {
     box.checked = false;
     box.dispatch('change');
     expect(callsTo(SETTINGS_SET).at(-1)?.payload).toEqual({ privateMode: false });
+    // D-239: the notice follows the CONFIRMATION, not the click.
+    await drain();
     expect(node('queue-status').textContent).toBe(T('queue.status.privateOff'));
   });
 
@@ -1496,6 +1498,70 @@ describe('D-187 · D-148 Star prompt 生命周期', () => {
     queue.maybeCheckStarPrompt(); // checked=true → 不再问
     queue.scheduleStarPrompt(1000); // checked=true → 不再排程
     expect(queue.starPrompt()).toEqual({ shown: true, checked: true, dialogOpen: false, scheduled: false });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 族九 · D-239 无痕开关：先确认，再宣称开启；入队不得读到旧值
+//
+// 旧实现是「乐观」的：改勾选的同一个 tick 里写 localStorage、发 SETTINGS_SET、
+// 弹「已开启」。主进程把写入排进 ConfigStore 的串行队列，于是紧接着的入队读到的
+// 还是旧值 —— 界面承诺无痕，文件却按普通模式落盘、历史也写了一条。
+// ---------------------------------------------------------------------------
+describe('D-239 · 无痕开关先确认再宣称开启', () => {
+  afterEach(() => {
+    handlers.set(SETTINGS_SET, () => ({ ok: true }));
+  });
+
+  it('SETTINGS_SET 未返回前不提示开启，且入队被拦住，确认后才放行', async () => {
+    handlers.set(SETTINGS_SET, () => HOLD);
+    const box = node('queue-private-mode') as UiNode & { checked: boolean };
+    box.checked = true;
+    box.dispatch('change', {});
+    await drain();
+
+    // 请求已发出，payload 正确
+    const writes = callsTo(SETTINGS_SET);
+    expect(writes.at(-1)?.payload).toEqual({ privateMode: true });
+    // ...但界面还不敢说「已开启」
+    expect(node('queue-status').textContent).not.toBe(T('queue.status.privateOn'));
+
+    // 此刻提交链接：预检可以走，DOWNLOAD_START 必须等设置落定
+    const startsBefore = callsTo(DOWNLOAD_START).length;
+    currentVerdict = { state: 'SUPPORTED', blocks: false };
+    node('queue-url').value = 'https://example.com/private';
+    node('queue-paste-form').dispatch('submit', { preventDefault() { /* 已拦截 */ } });
+    await drain();
+    expect(callsTo(URL_SUPPORT_CHECK).at(-1)?.payload).toMatchObject({ url: 'https://example.com/private' });
+    expect(callsTo(DOWNLOAD_START).length).toBe(startsBefore);
+
+    // 主进程确认后：提示开启 + 入队放行，且入队发生在确认之后
+    await settleChannel(SETTINGS_SET, { ok: true });
+    await drain();
+    expect(node('queue-status').textContent).toBe(T('queue.status.privateOn'));
+    expect(callsTo(DOWNLOAD_START).length).toBe(startsBefore + 1);
+    expect(box.checked).toBe(true);
+    await settleChannel(DOWNLOAD_START, { accepted: true, enqueued: true, taskIds: ['p1'] });
+    node('queue-url').value = '';
+  });
+
+  it('SETTINGS_SET 失败时开关回退、缓存回写旧值，并如实提示原因', async () => {
+    handlers.set(SETTINGS_SET, () => HOLD);
+    const box = node('queue-private-mode') as UiNode & { checked: boolean };
+    // 上一用例已把它置为 true；这次尝试关闭。
+    expect(box.checked).toBe(true);
+    box.checked = false;
+    box.dispatch('change', {});
+    await drain();
+    expect(node('queue-status').textContent).not.toBe(T('queue.status.privateOff'));
+
+    await settleChannel(SETTINGS_SET, { ok: false, code: 'CONFIG_WRITE_FAILED', message: '磁盘只读' });
+    await drain();
+    // 界面与服务端状态必须一致：开关弹回 true，而不是留下一个假的「已关闭」
+    expect(box.checked).toBe(true);
+    expect(win().localStorage.getItem('ytvdlt.privateMode')).toBe('true');
+    expect(node('queue-status').textContent)
+      .toBe(T('queue.status.privateFailed', { reason: '磁盘只读' }));
   });
 });
 

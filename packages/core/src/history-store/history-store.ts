@@ -7,6 +7,7 @@ import type {
   CorePorts, HistoryEntry, HistoryQuery, HistoryAddResult,
 } from '@ytvdlt/shared';
 import type { IHistoryStore } from '../ports.js';
+import { isMissingFileError } from '../fs-errors.js';
 import { applyQuery, dedupeKey, normalizePath } from './query.js';
 
 interface HistoryFile {
@@ -82,14 +83,29 @@ export class HistoryStore implements IHistoryStore {
    *    starts empty so the app keeps working, but the original bytes are
    *    copied aside before the first rewrite — corrupt is not the same as
    *    worthless, and `add()` must never be the thing that deletes it.
+   *
+   * D-241 (audit P1): "does the file exist?" is answered by the READ itself,
+   * not by a separate `fs.exists()` probe. The old order was
+   * `exists()` → `readText()`; the production `exists()` port maps EVERY
+   * failure (not just `ENOENT`) to `false`, so a transient stat error on a
+   * perfectly good file skipped the read, left `entries` empty, and the next
+   * `add()` persisted that empty baseline over the real history. Now only a
+   * genuine "no such file" (`isMissingFileError`) is a first run; every other
+   * error propagates and blocks the overwrite, exactly like D-230's read
+   * failure path.
    */
   private async load(): Promise<void> {
     await this.ports.fs.mkdir(this.ports.env.configDir());
-    if (!(await this.ports.fs.exists(this.filePath))) {
-      this.entries = [];
-      return;
+    let raw: string;
+    try {
+      raw = await this.ports.fs.readText(this.filePath);
+    } catch (error) {
+      if (isMissingFileError(error)) {
+        this.entries = [];
+        return;
+      }
+      throw error;
     }
-    const raw = await this.ports.fs.readText(this.filePath);
     try {
       const parsed: unknown = JSON.parse(raw);
       const candidate = parsed as Partial<HistoryFile>;

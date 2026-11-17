@@ -1,4 +1,30 @@
 /**
+ * D-240 (audit P1) · which records the snapshot may contain at all.
+ *
+ * A private-mode download is a promise that the record leaves no trace on
+ * disk. It already never reaches `history.json` (the add call is skipped), but
+ * the QUEUE snapshot kept it: `tasks.json` carried every `privateMode: true`
+ * row, and `TaskQueue.restore()` rebuilt it on the next launch as a `Canceled`
+ * task — the exact record the user asked not to keep, resurrected by the
+ * crash-recovery path. Purging on window close could never cover this: a crash
+ * or a `taskkill` runs no cleanup hook at all.
+ *
+ * So privacy is enforced at the WRITE boundary instead of in the cleanup hook:
+ *  - private rows are simply not part of any snapshot, which makes "restart
+ *    cannot show them" true for every shutdown path (graceful, close-to-tray,
+ *    crash, kill) without touching a running download;
+ *  - `restore()` also drops such rows found in an OLDER file (written before
+ *    this rule), so an upgrade does not resurrect them once either.
+ *
+ * Files the download produced are untouched — the media belongs to the user
+ * (D-88 / D-232's "cleanup never touches the filesystem" is unchanged); only
+ * the queue row stops being durable.
+ */
+export function persistableRecords(records: readonly TaskRecord[]): TaskRecord[] {
+  return records.filter((record) => record.privateMode !== true);
+}
+
+/**
  * The persisted-snapshot projection, split out of `task-queue.ts` (task-6
  * refactor).
  *

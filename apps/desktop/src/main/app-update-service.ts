@@ -99,6 +99,14 @@ export interface AppUpdateServiceDeps {
    * `net.request()`. The state machine and all verification steps are unchanged.
    */
   readonly downloadInstaller?: (request: DownloadRequest) => Promise<DownloadResult>;
+  /**
+   * D-243 (append-only, OPTIONAL): the rename primitive used when a verified
+   * staging file is published under its release name. Defaults to
+   * `node:fs/promises.rename`. Tests inject a failing implementation to pin
+   * the "publish failed ⇒ NOT installable" contract without having to make the
+   * real filesystem refuse a same-volume rename.
+   */
+  readonly renameFile?: (from: string, to: string) => Promise<void>;
 }
 
 export interface AppUpdateService {
@@ -160,6 +168,12 @@ async function isolateFile(target: string, tag: string): Promise<string> {
 
 export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateService {
   const { ports, logger, config } = deps;
+  /**
+   * D-243: the publish hop only. Everything else in this module keeps using the
+   * real `rename` — a test must be able to make the PUBLISH fail while the
+   * surrounding staging / isolation / sidecar writes still work.
+   */
+  const renameForPublish = deps.renameFile ?? rename;
 
   let phase: AppUpdateState['phase'] = 'idle';
   let latest: AppRelease | null = null;
@@ -370,9 +384,17 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
    *     (`.replaced-<ts>`, same "isolate, don't delete" rule as the rejected
    *     download), so a failed upgrade leaves both copies on disk;
    *  2. if that move cannot be confirmed, the publish is ABANDONED and the
-   *     verified bytes stay at the staging name — `install()` only needs a
-   *     path, not a pretty one, and overwriting an unconfirmed destination is
-   *     exactly the data loss this exists to prevent.
+   *     verified bytes stay at the staging name — overwriting an unconfirmed
+   *     destination is exactly the data loss this exists to prevent.
+   *
+   * D-243 (audit P2): the staging path is NOT an install path. Returning it as
+   * `{path: stagedPath}` let `download()` mark the state `ready` and
+   * `install()` hand `<asset>.<uuid>.download` to `shell.openPath()` — Windows
+   * decides by file association what that means: nothing (an error), or some
+   * unrelated program launched while the app reports "installer started" and
+   * quits. The caller now treats "not at the canonical name" as a FAILURE; the
+   * verified bytes are still kept (never deleted) for support, and the message
+   * says where they are.
    */
   async function publishVerifiedInstaller(
     stagedPath: string,
@@ -389,12 +411,12 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       });
     }
     try {
-      await rename(stagedPath, canonicalPath);
+      await renameForPublish(stagedPath, canonicalPath);
       return { path: canonicalPath, reason: '' };
     } catch (error) {
       // Swap failed: put the previous file back under its own name (best
-      // effort) and hand the caller the verified staging path instead. Neither
-      // version is lost, and the install path does not need a pretty name.
+      // effort) and report the staging path so the caller can name it. Neither
+      // version is lost; nothing is installable.
       if (movedAside !== null && (await fileSize(canonicalPath)) < 0) {
         await rename(movedAside, canonicalPath).catch(() => undefined);
       }
@@ -512,9 +534,20 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       // same-name installer is moved aside (never deleted) first.
       const published = await publishVerifiedInstaller(target, canonical);
       if (published.path !== canonical) {
+        // D-243 (audit P2): fail closed. The staged name is `<asset>.<uuid>.download`
+        // — handing THAT to `shell.openPath()` lets Windows pick a program by
+        // file association, so the old code could open the wrong thing and
+        // still report "installer launched" (then quit the app). The verified
+        // bytes are kept untouched for support; the state carries the reason and
+        // the path, and `install()` stays unreachable (`installerPath === null`).
         await logger.warn('app-update', 'could not publish installer under its release name', {
           detail: published.reason,
         });
+        installerPath = null;
+        verifiedSha256 = null;
+        phase = 'error';
+        message = `安装包已校验，但无法发布为 ${canonical}（${published.reason}）；已停止安装。文件保留在 ${published.path}，可重试或前往发布页手动下载`;
+        return state();
       }
 
       // D-104 (tightened): persist the verified hash as a DIAGNOSTIC sidecar.
@@ -582,6 +615,18 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       return result(false, 'install', '安装包尚未就绪');
     }
     const executable = installerPath;
+    // D-243 (audit P2): a belt for the path above. Only a published `.exe` may
+    // be handed to the OS: a `.download` staging file, a `.replaced-*` copy or
+    // anything else would be opened by FILE ASSOCIATION — an arbitrary program,
+    // with the app reporting success and then quitting. Refuse and say why.
+    if (!/\.exe$/i.test(executable)) {
+      installerPath = null;
+      verifiedSha256 = null;
+      phase = 'error';
+      const refusal = `安装包文件名不是 .exe（${executable}），已拒绝启动，以免交给系统按文件关联打开其它程序`;
+      message = refusal;
+      return result(false, 'install', refusal);
+    }
     // D-104: the file may have been swapped or damaged AFTER `ready`. Re-run
     // all three checks on the exact bytes we are about to hand to the OS.
     const asset = latest?.installer ?? null;

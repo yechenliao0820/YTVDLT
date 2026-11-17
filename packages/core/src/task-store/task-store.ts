@@ -10,6 +10,7 @@
  */
 import type { CorePorts, TaskSnapshot, TaskRecord } from '@ytvdlt/shared';
 import type { ITaskStore, TaskLoadDiagnostic } from '../ports.js';
+import { isMissingFileError } from '../fs-errors.js';
 
 export interface TaskStoreDeps {
   ports: CorePorts;
@@ -188,17 +189,11 @@ function healthyDiagnostic(status: 'missing' | 'ok'): TaskLoadDiagnostic {
 }
 
 /**
- * D-159: only a genuine "file does not exist" is a first run. The in-memory
- * test port throws a plain `Error('ENOENT: <path>')` while the production port
- * throws a Node `ErrnoException` with `code`; both must be recognised, and
- * everything else (`EACCES`, `EIO`, `EBUSY`, lock errors…) is a read failure.
+ * D-159: only a genuine "file does not exist" is a first run; everything else
+ * (`EACCES`, `EIO`, `EBUSY`, lock errors…) is a read failure. D-241 moved the
+ * classifier to `core/src/fs-errors.ts` so `HistoryStore` cannot drift from
+ * this rule — the two stores had the same failure mode for the same reason.
  */
-function isMissingFileError(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
-  if (code === 'ENOENT') return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /^ENOENT\b/.test(message);
-}
 
 /** D-159: bounded, content-free cause for the JSONL warning payload. */
 function errorMessage(error: unknown): string {
