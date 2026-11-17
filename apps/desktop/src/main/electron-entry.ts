@@ -172,7 +172,20 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
    * never a running slot). The switch position is deliberately NOT consulted:
    * the flag was captured at enqueue time and is what the download actually did,
    * so flipping the toggle off before closing cannot leave a "private" row
-   * behind. Files are never touched — only the queue row and its snapshot entry.
+   * behind. Files are never touched — only the queue row.
+   *
+   * D-240 (audit P1): the snapshot part of that sentence is obsolete. Private
+   * rows are excluded from `tasks.json` at the write boundary and dropped by
+   * `restore()`, so a crash / kill (which runs no close hook) cannot resurrect
+   * them either. This purge is now the in-memory tidy-up: it keeps the list
+   * clean for the rest of the session and stops settled rows from reappearing
+   * when the window is reopened from the tray. A running download is still
+   * skipped, never killed.
+   *
+   * D-242: `queue.remove()` now REJECTS when the snapshot write fails instead
+   * of reporting a removal that never reached disk; the catch below still
+   * swallows it because shutdown must not be blocked by a broken disk, but the
+   * failure is no longer silent to the queue's own logging.
    */
   const clearPrivateHistory = async (): Promise<void> => {
     const host = hostRef;

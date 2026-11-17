@@ -18,6 +18,14 @@
  *     `run().finally` will persist the finished state; the NEXT close removes
  *     it.
  *
+ * D-240 (audit P1) closed the leak this rule used to have: skipping a running
+ * record kept it OUT of this pass but still IN `tasks.json`, so a crash / kill
+ * during the download restored a `Canceled` private row on the next launch.
+ * Private rows are now excluded from every snapshot at the write boundary
+ * (`persistableRecords`) and dropped by `restore()`, so "skipped here" no
+ * longer means "still on disk". This purge is therefore only the in-memory
+ * tidy-up; privacy no longer depends on it running at all.
+ *
  * Pure and dependency-free on purpose: no `node:*`, no queue import (the
  * minimal port shape below keeps this testable and keeps `task-queue.ts` the
  * only state owner). The caller supplies the covers' `forget` callback because

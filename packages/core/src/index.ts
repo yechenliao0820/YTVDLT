@@ -57,3 +57,6 @@ export * from './artifact-classify/index.js';
 export * from './txt-import/index.js';
 // D-148 (append-only): pure frequency policy for the "Star on GitHub" prompt.
 export * from './star-prompt/index.js';
+// D-241 (append-only): the one "is this error just a missing file?" classifier
+// shared by every store that reads a file before overwriting it.
+export * from './fs-errors.js';

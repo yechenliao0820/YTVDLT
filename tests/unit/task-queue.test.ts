@@ -685,8 +685,14 @@ describe('T2 · persistSnapshot failure is visible but never fatal', () => {
     mem.state.logLines.filter((line) => line.includes('snapshot.persist.failed'));
 
   it('a completed download survives a failing store and emits exactly ONE warning', async () => {
-    const { mem, queue } = setupFailingStore();
+    const { mem, queue, setFail } = setupFailingStore();
+    // D-242: intake itself now reports a failed write, so the store works when
+    // the task enters the queue and "fills up" while the download runs — that
+    // is the shape this test is about (a broken disk must never turn a
+    // finished download into a failed one).
+    setFail(false);
     await queue.enqueue(record('t1'));
+    setFail(true);
     await tick();
 
     // The download path is untouched by the persistence failure.
@@ -711,14 +717,22 @@ describe('T2 · persistSnapshot failure is visible but never fatal', () => {
     setFail(false);
     await queue.enqueue(record('t1'));
     await tick();
-    expect(queue.get('t1')?.state).toBe('Completed');
     expect(warnings(mem)).toHaveLength(0);
 
+    // D-242: a failed intake is now REPORTED (it used to return normally).
     setFail(true);
-    await queue.enqueue(record('t2'));
+    await expect(queue.enqueue(record('t2'))).rejects.toThrow(/快照未能写入磁盘/);
     await tick();
-    expect(queue.get('t2')?.state).toBe('Completed');
     expect(warnings(mem)).toHaveLength(1);
+
+    // A later successful write ends the episode...
+    setFail(false);
+    await queue.enqueue(record('t3'));
+    await tick();
+    // ...so the next failure warns again instead of being folded into the old one.
+    setFail(true);
+    await expect(queue.enqueue(record('t4'))).rejects.toThrow(/快照未能写入磁盘/);
+    expect(warnings(mem)).toHaveLength(2);
   });
 });
 

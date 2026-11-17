@@ -105,6 +105,21 @@
   /** D-106: one queue view survives menu / nav-bar page switches. */
   var viewReady = false;
 
+  /**
+   * D-239: the in-flight private-mode write, or `null`.
+   *
+   * The toolbar switch used to be optimistic: it wrote localStorage, fired
+   * `SETTINGS_SET` and announced "private on" all in the same tick. The main
+   * process applies that write through `ConfigStore`'s serialised queue, so a
+   * download started in the same tick read the OLD value and saved the file —
+   * and the history row — in normal mode while the UI promised privacy. The
+   * promise is kept here so (a) the success notice only appears after the host
+   * confirmed, and (b) every enqueue channel waits for it (see `call`).
+   */
+  var privateModePending = null;
+  /** D-239: a `SETTINGS_GET` reply must not overwrite a switch the user moved. */
+  var privateModeTouched = false;
+
   function saveView() {
     if (!viewReady) return;
     var nav = global.YTVDLTNav;
@@ -212,9 +227,23 @@
     STAR_PROMPT_ACTION: 'ytvdlt:starPrompt:action'
   };
 
+  /** Channels that CREATE a task — the only ones whose meaning depends on the
+   *  private-mode setting. D-239: they must not run before a pending toggle has
+   *  been confirmed by the main process. */
+  var PRIVATE_MODE_SENSITIVE = ['DOWNLOAD_START', 'TXT_IMPORT_ENQUEUE', 'PLAYLIST_BATCH_ENQUEUE'];
+
   /** Thin wrapper over the preload surface: `{ok:false, code, message}` on failure
-   *  instead of a rejected promise, so every caller has one shape to handle. */
+   *  instead of a rejected promise, so every caller has one shape to handle.
+   *  D-239: an enqueue waits for the in-flight private-mode write first, so the
+   *  request the main process builds reads the value the USER sees. */
   function call(channel, payload) {
+    if (privateModePending !== null && PRIVATE_MODE_SENSITIVE.indexOf(channel) !== -1) {
+      return privateModePending.then(function () { return invoke(channel, payload); });
+    }
+    return invoke(channel, payload);
+  }
+
+  function invoke(channel, payload) {
     var bridge = taskBridge();
     if (bridge === null) return Promise.resolve({ ok: false, code: 'BRIDGE_UNAVAILABLE', message: t('queue.notify.bridge') });
     try {
@@ -1975,11 +2004,15 @@
     if (withFilesBox !== null) withFilesBox.addEventListener('change', syncDeleteRisk);
 
     // D-88: private mode is persisted by the host and honoured on window close.
+    // D-239: the switch is only "on" once the host confirmed the write — the
+    // notice, the localStorage mirror and every queued download follow the
+    // CONFIRMED value, never the optimistic one.
     var privateBox = doc.getElementById('queue-private-mode');
     if (privateBox !== null) {
       privateBox.checked = readStore('ytvdlt.privateMode') === 'true';
       if (live.active) {
         call('SETTINGS_GET', {}).then(function (snapshot) {
+          if (privateModeTouched) return; // the user already moved the switch
           if (snapshot && typeof snapshot.privateMode === 'boolean') {
             privateBox.checked = snapshot.privateMode;
             store('ytvdlt.privateMode', String(snapshot.privateMode));
@@ -1988,9 +2021,37 @@
       }
       privateBox.addEventListener('change', function () {
         var on = privateBox.checked;
-        store('ytvdlt.privateMode', String(on));
-        call('SETTINGS_SET', { privateMode: on });
-        notify(t(on ? 'queue.status.privateOn' : 'queue.status.privateOff'));
+        // Static preview has no bridge: keep the legacy immediate behaviour so
+        // the frozen screenshot baselines cannot change.
+        if (!live.active) {
+          store('ytvdlt.privateMode', String(on));
+          notify(t(on ? 'queue.status.privateOn' : 'queue.status.privateOff'));
+          return;
+        }
+        privateModeTouched = true;
+        var previous = !on;
+        var settled = call('SETTINGS_SET', { privateMode: on }).then(function (reply) {
+          if (!reply || reply.ok === false) {
+            var reason = (reply && (reply.message || reply.code)) || t('queue.notify.ipc');
+            privateBox.checked = previous;
+            store('ytvdlt.privateMode', String(previous));
+            notify(t('queue.status.privateFailed', { reason: String(reason) }));
+            return false;
+          }
+          store('ytvdlt.privateMode', String(on));
+          notify(t(on ? 'queue.status.privateOn' : 'queue.status.privateOff'));
+          return true;
+        }).catch(function () {
+          privateBox.checked = previous;
+          store('ytvdlt.privateMode', String(previous));
+          notify(t('queue.status.privateFailed', { reason: t('queue.notify.ipc') }));
+          return false;
+        });
+        privateModePending = settled;
+        settled.then(function () {
+          // Only clear the gate if no NEWER toggle replaced it meanwhile.
+          if (privateModePending === settled) privateModePending = null;
+        });
       });
     }
     installContextMenu();

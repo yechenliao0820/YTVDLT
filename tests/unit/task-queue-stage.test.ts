@@ -220,11 +220,14 @@ describe('D-115 stage propagation through the queue', () => {
     expect(queue.get('t1')?.lastStage).toBe('verifying');
     await queue.restart('t1');
     // The retry either sits in the FIFO (`null`) or has already re-entered the
-    // transfer (`downloading`). What must NOT survive is the previous attempt's
-    // `verifying` — that is the value the card would misreport.
+    // transfer (`downloading` / `merging`). D-242: `restart()` now awaits its
+    // snapshot write, which gives the fresh run one more turn to advance — a
+    // later stage of the NEW attempt is legitimate. What must NOT survive is
+    // the previous attempt's `verifying`: that is the value the card would
+    // misreport.
     const stage = queue.get('t1')?.lastStage;
     expect(stage).not.toBe('verifying');
-    expect([null, 'downloading']).toContain(stage);
+    expect([null, 'downloading', 'merging']).toContain(stage);
   });
 });
 

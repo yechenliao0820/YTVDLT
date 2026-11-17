@@ -26,7 +26,9 @@ import {
 import { assertTransition } from './state-machine.js';
 import { createProbeAbort } from './probe-abort.js';
 import { normalizeConcurrency, DEFAULT_CONCURRENCY } from './concurrency.js';
-import { snapshotFingerprint, buildPersistProjection } from './snapshot-projection.js';
+import {
+  snapshotFingerprint, buildPersistProjection, persistableRecords,
+} from './snapshot-projection.js';
 import { buildHistoryEntry } from './history-entry.js';
 import { toAppError } from './app-error.js';
 
@@ -147,6 +149,14 @@ export class TaskQueue implements ITaskQueue {
    * tick (persistIntervalMs can be 0).
    */
   private snapshotPersistFailed = false;
+  /**
+   * D-242: the reason behind the most recent failed write, cleared by the next
+   * successful one. `persistSnapshot()` reports only a boolean; the mutations
+   * that must surface a failure (`persistOrThrow`, `remove`) read the detail
+   * from here so the message the user sees is the real error (EACCES, ENOSPC,
+   * EBUSY…) instead of a generic sentence.
+   */
+  private lastPersistError: string | null = null;
   /**
    * Task-2 audit follow-up (checklist §14「同一序列化边界」): the snapshot
    * write itself. Every `persistSnapshot()` call snapshots the records and
@@ -299,16 +309,21 @@ export class TaskQueue implements ITaskQueue {
     this.records.set(stored.id, stored);
     this.pending.push(stored.id);
     this.pump();
-    // D-231 (audit P2): a record that DID NOT start now sits in the FIFO and
-    // has no other writer — no progress tick, no `run().finally`, nothing —
-    // so a quit / crash before the next task ends erased a row the user had
-    // already confirmed. Persist before returning. A record that started is
-    // covered by the run lifecycle (first tick + unconditional final write),
-    // and skipping it here is what keeps the D-163 "no rewrite on pure
-    // progress" contract intact. Inside a batch the write is deferred to a
-    // single `enqueueBatch()` write (see `batchDepth`).
-    if (this.batchDepth === 0 && this.pending.includes(stored.id)) {
-      await this.persistSnapshot();
+    // D-231 (audit P2) + D-242 (audit P2): EVERY standalone enqueue is written
+    // before it returns — including one that started immediately.
+    //
+    // The old rule only wrote when the record was still parked ("a started
+    // record is covered by the run lifecycle"). That left a real window: the
+    // run's first snapshot is the first PROGRESS tick (or the probe's end), so
+    // a crash during `probe()` — the longest, most failure-prone phase, tens of
+    // seconds on a slow link — left a task the user had confirmed in NO file at
+    // all. The D-163 contract this "saved" is about not rewriting the file on
+    // pure progress; one structural record per enqueue is not that.
+    //
+    // The result is CHECKED (D-242): a failed write used to be logged and
+    // swallowed, so the caller reported success while nothing was durable.
+    if (this.batchDepth === 0) {
+      await this.persistOrThrow('任务已加入队列，但队列快照未能写入磁盘，重启后该任务可能丢失');
     }
   }
 
@@ -326,18 +341,29 @@ export class TaskQueue implements ITaskQueue {
   async enqueueBatch(records: readonly TaskRecord[]): Promise<readonly string[]> {
     const ids: string[] = [];
     this.batchDepth += 1;
+    // D-242: a failed final write must reach the caller, but it must never
+    // MASK an earlier per-record failure — a `throw` inside `finally` would
+    // replace the original reason. The first error wins and is re-thrown after
+    // the batch write has been attempted (so the already-parked members still
+    // land on disk, which is why the write lives in `finally`).
+    let failure: unknown = null;
     try {
       for (const record of records) {
         await this.enqueue(record);
         ids.push(record.id);
       }
+    } catch (error) {
+      failure = error;
     } finally {
-      // The final write lives in `finally` on purpose: a throw halfway through
-      // still leaves the already-parked members on disk (they are real rows the
-      // user confirmed), and the counter must never leak.
       this.batchDepth -= 1;
-      if (this.batchDepth === 0) await this.persistSnapshot();
+      if (this.batchDepth === 0) {
+        const persisted = await this.persistSnapshot();
+        if (failure === null && !persisted) {
+          failure = new Error(`批量任务已入队，但队列快照未能写入磁盘（${this.lastPersistError ?? '写入失败'}），重启后可能丢失`);
+        }
+      }
     }
+    if (failure !== null) throw failure;
     return ids;
   }
 
@@ -952,7 +978,15 @@ export class TaskQueue implements ITaskQueue {
     if (pendingIndex !== -1) {
       this.pending.splice(pendingIndex, 1);
       this.records.delete(taskId);
-      await this.persistSnapshot();
+      // D-242, same rule as `remove()`: "cancelled" must not mean "gone from
+      // memory, still queued on disk". A failed write puts the record back in
+      // its exact FIFO position and reports the reason.
+      const persisted = await this.persistSnapshot();
+      if (!persisted) {
+        this.records.set(taskId, record);
+        this.pending.splice(pendingIndex, 0, taskId);
+        throw new Error(`任务取消未能写入队列快照（${this.lastPersistError ?? '写入失败'}），任务仍在队列中`);
+      }
       return true;
     }
     const handle = this.handles.get(taskId);
@@ -1056,25 +1090,38 @@ export class TaskQueue implements ITaskQueue {
     this.pump();
     // D-231, same rule as `enqueue()`: a retry that parks behind a full slot
     // has no other writer, and its state/artifacts just changed (e.g.
-    // `Completed → ReadyWithInfo`). Leaving it unwritten meant a restart could
-    // be undone by the next crash while the UI already showed the retry.
-    if (this.batchDepth === 0 && this.pending.includes(record.id)) {
-      await this.persistSnapshot();
-    }
+    // `Completed → ReadyWithInfo`). D-242: the write is now issued for a retry
+    // that started immediately too, and its failure is reported instead of
+    // being logged and forgotten.
+    if (this.batchDepth === 0) await this.persistOrThrow('重试任务已启动，但队列快照未能写入磁盘，重启后该状态可能丢失');
   }
 
   /**
    * Remove a task that is neither running nor needed any more (M4-6 detail
    * "delete"). Running tasks are refused so a process is never orphaned.
+   *
+   * D-242 (audit P2): a snapshot write that fails must NOT look like a
+   * successful removal. The old code deleted the row from memory first and
+   * awaited a `persistSnapshot()` that swallowed its own error, so this method
+   * returned `true` while `tasks.json` still held the row — the caller
+   * (`purgePrivateRecords` among others) then reported a cleanup that did not
+   * happen, and the next launch restored the record. Now the write is checked:
+   * on failure the in-memory row is put back (memory must agree with disk) and
+   * the rejection carries the reason.
    */
   async remove(taskId: string): Promise<boolean> {
     if (this.running.has(taskId)) return false;
-    if (!this.records.has(taskId)) return false;
+    const record = this.records.get(taskId);
+    if (record === undefined) return false;
     this.dropFromPending(taskId);
     // D-200: the id leaves the queue; drop any cancel recorded for it.
     this.cancelRequested.delete(taskId);
     this.records.delete(taskId);
-    await this.persistSnapshot();
+    const persisted = await this.persistSnapshot();
+    if (!persisted) {
+      this.records.set(taskId, record);
+      throw new Error(`任务记录未能从队列快照中删除（${this.lastPersistError ?? '写入失败'}），记录已保留`);
+    }
     return true;
   }
 
@@ -1090,6 +1137,13 @@ export class TaskQueue implements ITaskQueue {
     let restored = 0;
     for (const raw of snapshot.tasks) {
       if (this.records.has(raw.id)) continue;
+      // D-240 (audit P1): a private-mode row must never come back. New writes
+      // already exclude them (`persistableRecords`), but a file written by an
+      // OLDER build still carries them — restoring it would resurrect exactly
+      // the record the user asked not to keep. Dropping it here is also what
+      // cleans the file: the snapshot rewrite at the end of this method
+      // persists the remaining rows only.
+      if (raw.privateMode === true) continue;
       // D-236: the persisted copy carries no proxy (see buildPersistProjection);
       // the host hook re-injects the CURRENT config value so a restart neither
       // loses the proxy nor revives a removed one.
@@ -1114,21 +1168,34 @@ export class TaskQueue implements ITaskQueue {
   }
 
   /**
-   * T2: persist the queue snapshot; a failure is VISIBLE but never fatal.
+   * T2: persist the queue snapshot; a failure is VISIBLE but never fatal to a
+   * background write.
    *
-   * Semantics (unchanged): `taskStore.save()` rejections are caught so a
-   * broken snapshot can never blow up the download path. What changed: the
-   * failure is no longer silent. The warning goes through the EXISTING
-   * `CorePorts.logSink` facility (the same port Logger / ConfigStore write
-   * through, same `{ts, level, scope, event, payload?}` line shape), so it
-   * lands in `logs/app-*.jsonl` via the production adapter with zero new
-   * wiring. One line per failure episode (see `snapshotPersistFailed`); the
-   * payload carries only the error message — never snapshot content or URLs.
-   * The store also keeps the error on `TaskStore.lastSaveError` for offline
-   * diagnostics.
+   * Semantics (unchanged for fire-and-forget callers): `taskStore.save()`
+   * rejections are caught so a broken snapshot can never blow up the download
+   * path. The warning goes through the EXISTING `CorePorts.logSink` facility
+   * (the same port Logger / ConfigStore write through, same
+   * `{ts, level, scope, event, payload?}` line shape), so it lands in
+   * `logs/app-*.jsonl` via the production adapter with zero new wiring. One
+   * line per failure episode (see `snapshotPersistFailed`); the payload
+   * carries only the error message — never snapshot content or URLs. The store
+   * also keeps the error on `TaskStore.lastSaveError` for offline diagnostics.
+   *
+   * D-242 (audit P2): the outcome is RETURNED (`true` = the disk state matches
+   * what the caller asked for, `false` = the write failed). The callers that
+   * REPORT something to the user as done — `enqueue()` / `enqueueBatch()` /
+   * `restart()` / `remove()` — must check it; that is what stops "removed"
+   * from meaning "gone from memory, still on disk". `lastPersistError` carries
+   * the reason for those messages. Everything else (progress ticks, the final
+   * write of a run) keeps ignoring the result: a broken disk must never turn
+   * a finished download into a failed one.
    */
-  private async persistSnapshot(): Promise<void> {
-    if (this.deps.taskStore === undefined) return;
+  private async persistSnapshot(): Promise<boolean> {
+    if (this.deps.taskStore === undefined) return true;
+    // D-240 (audit P1): private-mode rows are memory-only — they are excluded
+    // BEFORE the fingerprint is taken, so "a private task changed" is not a
+    // reason to rewrite the file, and the persisted set can never contain one.
+    const persistable = persistableRecords([...this.records.values()]);
     // D-163: a no-op write is still a full-file rewrite. `run().finally` fires
     // on every task end, and the throttled progress ticks keep calling here
     // (state / stage / artifact / error changes ride on the next tick), so
@@ -1136,13 +1203,13 @@ export class TaskQueue implements ITaskQueue {
     // IN-MEMORY records: the persisted projection only strips fields the
     // fingerprint never looks at, so both produce the same string — and a
     // skipped tick no longer pays for building that projection either.
-    const fingerprint = snapshotFingerprint([...this.records.values()]);
-    if (fingerprint === this.lastPersistedFingerprint) return;
+    const fingerprint = snapshotFingerprint(persistable);
+    if (fingerprint === this.lastPersistedFingerprint) return true;
     // D-163: minimise before serialising — signed CDN links never touch disk.
     // (Task-6 split: the projection build moved verbatim to
     // `./snapshot-projection.js`; the fingerprint gate, the write queue and the
     // failure semantics stay HERE — this class remains the only state owner.)
-    const tasks = buildPersistProjection(this.list());
+    const tasks = buildPersistProjection(persistable);
     // Reserve the fingerprint BEFORE the awaited save: further progress events
     // fire while the write is still in flight, and each of them compares
     // against this field — updating it only after the save resolved would let
@@ -1152,8 +1219,9 @@ export class TaskQueue implements ITaskQueue {
     // Task-2 audit follow-up: the save is chained through `snapshotWriteQueue`
     // so overlapping persists land in submission order (newest last); see the
     // field comment. The task itself never rejects — a failed write is logged
-    // (once per episode) and un-reserves the fingerprint for the next attempt.
-    const write = this.snapshotWriteQueue.then(async () => {
+    // (once per episode), un-reserves the fingerprint for the next attempt, and
+    // is reported to THIS caller as `false` (D-242).
+    const write = this.snapshotWriteQueue.then(async (): Promise<boolean> => {
       try {
         await store.save({
           schemaVersion: 1,
@@ -1161,10 +1229,13 @@ export class TaskQueue implements ITaskQueue {
           tasks,
         });
         this.snapshotPersistFailed = false;
+        this.lastPersistError = null;
+        return true;
       } catch (error) {
         // The write never landed: un-reserve so the next attempt retries.
         this.lastPersistedFingerprint = null;
-        if (this.snapshotPersistFailed) return;
+        this.lastPersistError = error instanceof Error ? error.message : String(error);
+        if (this.snapshotPersistFailed) return false;
         this.snapshotPersistFailed = true;
         try {
           await this.deps.ports.logSink.appendJsonl(JSON.stringify({
@@ -1172,12 +1243,25 @@ export class TaskQueue implements ITaskQueue {
             level: 'WARNING',
             scope: 'task-queue',
             event: 'snapshot.persist.failed',
-            payload: { error: error instanceof Error ? error.message : String(error) },
+            payload: { error: this.lastPersistError },
           }));
         } catch { /* a dead log sink must not break the queue either */ }
+        return false;
       }
     });
     this.snapshotWriteQueue = write.then(() => undefined, () => undefined);
-    await write;
+    return write;
+  }
+
+  /**
+   * D-242: the "I reported success" wrapper. Used by every mutation whose
+   * contract is "this is now true on disk" (`enqueue` / `restart` / `remove`).
+   * Callers that are only refreshing an already-running task must keep using
+   * `persistSnapshot()` and ignore the result.
+   */
+  private async persistOrThrow(whatFailed: string): Promise<void> {
+    const persisted = await this.persistSnapshot();
+    if (persisted) return;
+    throw new Error(`${whatFailed}（${this.lastPersistError ?? '写入失败'}）`);
   }
 }

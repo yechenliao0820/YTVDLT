@@ -149,18 +149,23 @@ const tick = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms));
 const parse = (text: string): TaskSnapshot => JSON.parse(text) as TaskSnapshot;
 
 describe('D-163 · 纯进度抖动不重写 tasks.json', () => {
-  it('六个进度 tick 只落盘一次：首次结构写，之后全部跳过', async () => {
+  it('六个进度 tick 只多落一次结构性快照，其余全部跳过', async () => {
     const { queue, rewrites } = session('jitter');
     await queue.enqueue(record('t1'));
     await tick();
 
     expect(queue.get('t1')?.state).toBe('Running');
-    expect(rewrites).toHaveLength(1);
-    const persisted = parse(rewrites[0] ?? '{}');
+    // D-242: TWO structural writes now — the record itself at enqueue (the
+    // audit P2 gap: an immediately-started task used to reach disk only on its
+    // first tick) and the one tick that first shows `Running` /
+    // `lastStage=downloading`. Ticks 2-6 change only numbers.
+    expect(rewrites).toHaveLength(2);
+    const persisted = parse(rewrites[1] ?? '{}');
     expect(persisted.tasks).toHaveLength(1);
     expect(persisted.tasks[0]?.state).toBe('Running');
     expect(persisted.tasks[0]?.lastStage).toBe('downloading');
-    // The one write captured the FIRST tick; ticks 2-6 changed only numbers.
+    // The one structural write captured the FIRST tick; ticks 2-6 changed only
+    // numbers, which is exactly the D-163 contract under test.
     expect(persisted.tasks[0]?.lastPercent).toBe(1);
   });
 });
@@ -171,10 +176,11 @@ describe('D-163 · 结构性变化仍及时落盘', () => {
     await queue.enqueue(record('t1'));
     await tick();
 
-    // tick 1 writes `downloading`; the next tick after the marker writes
-    // `merging`; the remaining progress ticks change nothing structural.
-    expect(rewrites).toHaveLength(2);
-    const second = parse(rewrites[1] ?? '{}');
+    // enqueue record (D-242) → tick 1 writes `downloading` → the next tick
+    // after the marker writes `merging`; the remaining progress ticks change
+    // nothing structural.
+    expect(rewrites).toHaveLength(3);
+    const second = parse(rewrites[2] ?? '{}');
     expect(second.tasks[0]?.lastStage).toBe('merging');
     expect(second.tasks[0]?.lastPercent).toBe(20);
   });
@@ -185,9 +191,10 @@ describe('D-163 · 结构性变化仍及时落盘', () => {
     await tick();
 
     expect(queue.get('t1')?.state).toBe('Completed');
-    // mid-run tick + the unconditional `run().finally` write.
-    expect(rewrites).toHaveLength(2);
-    const final = parse(rewrites[1] ?? '{}');
+    // enqueue record (D-242) + mid-run tick + the unconditional
+    // `run().finally` write.
+    expect(rewrites).toHaveLength(3);
+    const final = parse(rewrites[2] ?? '{}');
     expect(final.tasks[0]?.state).toBe('Completed');
     expect(final.tasks[0]?.artifacts).toEqual(['C:/out/t1.mp4']);
 
@@ -221,13 +228,14 @@ describe('Task-2 audit · 并发快照按提交顺序落盘（新快照必是最
     // 钉住第一份（不含 t2 的）快照写；含 t2 的较新快照不拦。
     let releaseFirst: () => void = () => {};
     const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    let firstSeen = false;
+    // D-242: the FIRST tasks.json write is t1's own enqueue record; the one to
+    // pin is the next one (t1's `Running` tick), which is what makes the
+    // ordering hazard observable.
+    let tasksWrites = 0;
     mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
       if (path.endsWith('tasks.json')) {
-        if (!firstSeen) {
-          firstSeen = true;
-          await firstHeld;
-        }
+        tasksWrites += 1;
+        if (tasksWrites === 2) await firstHeld;
         rewrites.push(text);
       }
       await inner(path, text);
@@ -280,24 +288,33 @@ describe('Task-2 audit · 并发快照按提交顺序落盘（新快照必是最
     await tick();
     expect(queue.get('t1')?.state).toBe('Running');
     // W1（t1 的进度快照）此刻被钉在写入口，尚未落地。
-    await queue.enqueue(record('t2'));
+    //
+    // D-242: `enqueue()` now awaits its OWN snapshot write, so t2's intake
+    // cannot be awaited while W1 is pinned (it would queue behind it). Start it
+    // without awaiting — the ordering guarantee under test is about the writes,
+    // not about the intake call returning.
+    const t2Intake = queue.enqueue(record('t2'));
     await tick();
     expect(queue.get('t2')?.state).toBe('Completed');
     // 写队列（新）里 W2 排在 W1 之后——两者都还没落盘。
     // 旧实现这里 rewrites 已有 1 条（W2 抢在 W1 之前完成），本断言即红。
-    expect(rewrites).toHaveLength(0);
+    // D-242: rewrites[0] is t1's enqueue record, still the only landed write.
+    expect(rewrites).toHaveLength(1);
 
     releaseFirst();
+    await t2Intake;
     await tick();
-    // 提交序：W1（t1 进度，无 t2）→ W2（t2 入队，未完成）→ W3（t2 Completed）。
-    // 关键不变量：最新的全量快照必是最后落盘的字节。
-    expect(rewrites).toHaveLength(3);
-    expect(parse(rewrites[0] ?? '{}').tasks.some((task) => task.id === 't2')).toBe(false);
-    const mid = parse(rewrites[1] ?? '{}').tasks.find((task) => task.id === 't2');
-    expect(mid?.state).not.toBe('Completed');
-    const last = parse(rewrites[2] ?? '{}');
-    const t2 = last.tasks.find((task) => task.id === 't2');
-    expect(t2?.state).toBe('Completed');
+    // 提交序：W1（t1 进度，无 t2）→ W2（t2 入队，未完成）→ …（t2 自己的 tick）
+    // → 最后一份（t2 Completed）。关键不变量：最新的全量快照必是最后落盘的
+    // 字节，且在它之前落盘的快照绝不能宣称 t2 已完成。
+    expect(rewrites.length).toBeGreaterThanOrEqual(4);
+    expect(parse(rewrites[1] ?? '{}').tasks.some((task) => task.id === 't2')).toBe(false);
+    for (const text of rewrites.slice(1, -1)) {
+      const state = parse(text).tasks.find((task) => task.id === 't2')?.state;
+      expect(state).not.toBe('Completed');
+    }
+    const last = parse(rewrites[rewrites.length - 1] ?? '{}');
+    expect(last.tasks.find((task) => task.id === 't2')?.state).toBe('Completed');
   });
 });
 
@@ -311,11 +328,11 @@ describe('Task-2 audit · 并发快照按提交顺序落盘（新快照必是最
  * lived only in RAM: quitting (or crashing) in that window lost a download the
  * UI had already shown as queued.
  *
- * The fix persists inside `enqueue()` *only when the record parked* — a task
- * that started is covered by its own lifecycle (first tick + final write), and
- * writing on every intake would break the D-163 "no rewrite on pure progress"
- * contract. `enqueueBatch()` nests the same rule so a 200-line TXT import costs
- * ONE serialisation instead of 200.
+ * The fix persists the record inside `enqueue()` before it returns. D-242
+ * extended it to the immediately-started case: a run's first snapshot is its
+ * first progress tick, so a crash during `probe()` left that task in no file at
+ * all. `enqueueBatch()` nests the same rule so a 200-line TXT import costs ONE
+ * serialisation instead of 200.
  */
 describe('D-231 · 排队任务在 enqueue 返回前落盘', () => {
   /** A download that never emits an event: the run hangs in `Running`. */
@@ -359,9 +376,10 @@ describe('D-231 · 排队任务在 enqueue 返回前落盘', () => {
 
     await queue.enqueue(record('t2'));
     // Parked, and already on disk — no tick, no task end required.
+    // D-242: t1's own enqueue record is write #1 now; t2 lands in write #2.
     expect(queue.get('t2')?.state).toBe('Idle');
-    expect(rewrites).toHaveLength(1);
-    const persisted = parse(rewrites[0] ?? '{}');
+    expect(rewrites).toHaveLength(2);
+    const persisted = parse(rewrites[1] ?? '{}');
     expect(persisted.tasks.map((task) => task.id).sort()).toEqual(['t1', 't2']);
     expect(persisted.tasks.find((task) => task.id === 't2')?.state).toBe('Idle');
   });
@@ -371,18 +389,22 @@ describe('D-231 · 排队任务在 enqueue 返回前落盘', () => {
     await queue.enqueue(record('b1'));
     await queue.enqueueBatch([record('b2'), record('b3')]);
 
-    expect(rewrites).toHaveLength(1);
-    const persisted = parse(rewrites[0] ?? '{}');
+    // D-242: b1's intake is write #1; the whole batch is still ONE write.
+    expect(rewrites).toHaveLength(2);
+    const persisted = parse(rewrites[1] ?? '{}');
     expect(persisted.tasks.map((task) => task.id).sort()).toEqual(['b1', 'b2', 'b3']);
     expect(persisted.tasks.filter((task) => task.state === 'Idle')).toHaveLength(2);
   });
 
-  it('槽位空闲时启动的任务不额外写一次（D-163 计数不变）', async () => {
+  it('槽位空闲时启动的任务同样在 enqueue 返回前落盘（D-242）', async () => {
     const { queue, rewrites } = parkedSession(3);
     await queue.enqueue(record('s1'));
-    // Started, not parked: its own run lifecycle owns the write.
+    // Started, not parked — and STILL on disk before `enqueue()` returned. The
+    // old rule ("a started task is covered by its run lifecycle") left the
+    // whole probe phase unpersisted, so a crash there lost the row entirely.
     expect(queue.activeTaskIds).toEqual(['s1']);
-    expect(rewrites).toHaveLength(0);
+    expect(rewrites).toHaveLength(1);
+    expect(parse(rewrites[0] ?? '{}').tasks.map((task) => task.id)).toEqual(['s1']);
   });
 });
 
@@ -518,5 +540,99 @@ describe('D-236 · tasks.json 不携带代理密码', () => {
     const snapshot = parse(JSON.stringify({ tasks: [recordWithProxy('t1', null)] }));
     await queue.restore(snapshot);
     expect(queue.get('t1')?.request?.network.proxy).toBeNull();
+  });
+});
+
+/**
+ * D-240 (audit P1) · a private-mode row never reaches the snapshot.
+ *
+ * The old cleanup hook only ran on window close, and skipped running tasks —
+ * but the running task was ALREADY in `tasks.json`, so a crash / kill (no hook
+ * at all) restored it as a `Canceled` row on the next launch: the very record
+ * the user asked not to keep. Privacy is now a property of the WRITE, so every
+ * shutdown path is covered without killing a live download.
+ */
+describe('D-240 · 无痕任务不落盘，重启不会复活', () => {
+  it('privateMode 记录被排除在 tasks.json 之外，普通记录照常落盘', async () => {
+    const { queue, rewrites } = session('complete');
+    await queue.enqueue({ ...record('normal'), privateMode: false });
+    await queue.enqueue({ ...record('secret'), privateMode: true });
+    await tick();
+
+    const persisted = parse(rewrites[rewrites.length - 1] ?? '{}');
+    expect(persisted.tasks.map((task) => task.id)).toEqual(['normal']);
+    expect(JSON.stringify(persisted)).not.toContain('secret');
+    // In memory it still exists and behaves like any other task.
+    expect(queue.get('secret')?.privateMode).toBe(true);
+  });
+
+  it('只有无痕任务时，快照里一条都不剩', async () => {
+    const { queue, rewrites } = session('complete');
+    await queue.enqueue({ ...record('only-private'), privateMode: true });
+    await tick();
+
+    expect(rewrites.length).toBeGreaterThan(0);
+    expect(parse(rewrites[rewrites.length - 1] ?? '{}').tasks).toHaveLength(0);
+  });
+
+  it('旧快照里的无痕记录在 restore 时被丢弃，且不再出现在重写后的文件里', async () => {
+    const { queue, rewrites } = session('complete');
+    const legacy = parse(JSON.stringify({
+      tasks: [
+        { ...record('old-private'), privateMode: true, state: 'Running' },
+        { ...record('old-normal'), privateMode: false, state: 'Canceled' },
+      ],
+    }));
+    const restored = await queue.restore(legacy);
+
+    expect(restored).toBe(1);
+    expect(queue.get('old-private')).toBeUndefined();
+    expect(queue.get('old-normal')?.state).toBe('Canceled');
+    const persisted = parse(rewrites[rewrites.length - 1] ?? '{}');
+    expect(persisted.tasks.map((task) => task.id)).toEqual(['old-normal']);
+  });
+});
+
+/**
+ * D-242 (audit P2) · a swallowed snapshot failure must not be reported as
+ * success. The two user-visible lies were "the task is queued" (nothing on
+ * disk) and "the private row was cleaned up" (the row was still on disk).
+ */
+describe('D-242 · 快照写盘失败不再谎报成功', () => {
+  /** Ports whose tasks.json write always fails, like a full / locked disk. */
+  const failingSession = () => {
+    const mem = createInMemoryPorts();
+    const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (path.endsWith('tasks.json')) throw new Error('ENOSPC: no space left on device');
+      await inner(path, text);
+    };
+    const queue = new TaskQueue({
+      ports: mem.ports,
+      engine: fakeEngine({ mode: 'complete', downloadCalls: 0 }),
+      verifier: okVerifier,
+      history: new HistoryStore({ ports: mem.ports }),
+      taskStore: new TaskStore({ ports: mem.ports }),
+      jsRuntimePath: 'C:/runtime/node.exe',
+      persistIntervalMs: 0,
+    });
+    return { mem, queue };
+  };
+
+  it('入队时快照写失败 → enqueue 抛错，而不是静默成功', async () => {
+    const { queue } = failingSession();
+    await expect(queue.enqueue(record('t1'))).rejects.toThrow(/快照未能写入磁盘/);
+    // The task is still in memory — the message says "已加入队列 … 可能丢失",
+    // which is the honest description of this state.
+    expect(queue.get('t1')).toBeDefined();
+  });
+
+  it('删除时快照写失败 → remove 抛错且记录留在内存（与磁盘一致）', async () => {
+    const { queue } = failingSession();
+    await queue.enqueue(record('t1')).catch(() => undefined);
+    await tick(); // let the run finish so the slot is free
+
+    await expect(queue.remove('t1')).rejects.toThrow(/未能从队列快照中删除/);
+    expect(queue.get('t1')).toBeDefined();
   });
 });

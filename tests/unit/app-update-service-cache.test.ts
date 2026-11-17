@@ -72,6 +72,8 @@ function setup(
   digest: string | null = GOOD_HASH,
   /** D-233: override what the "network" delivers (default: the real installer). */
   respond?: (request: DownloadRequest) => Promise<DownloadResult>,
+  /** D-243: override the publish hop (the rename onto the release name). */
+  overrides: { renameFile?: (from: string, to: string) => Promise<void> } = {},
 ): Setup {
   const dir = mkdtempSync(join(tmpdir(), 'ytvdlt-updater-'));
   const base = createInMemoryPorts();
@@ -116,6 +118,7 @@ function setup(
     openPath: async (path: string) => { opened.push(path); return ''; },
     quit: () => undefined,
     downloadInstaller,
+    ...(overrides.renameFile === undefined ? {} : { renameFile: overrides.renameFile }),
   });
 
   return {
@@ -320,5 +323,48 @@ describe('D-233 · publish only verified bytes, never overwrite the old copy', (
     expect(h.opened[0]).toContain(ASSET_NAME);
     expect(h.opened[0]).not.toContain('.download');
     expect(h.opened[0]).not.toContain('.replaced-');
+  });
+});
+
+/**
+ * D-243 (audit P2) · a failed publish is not an installable installer.
+ *
+ * D-233 deliberately kept the verified bytes when the rename onto the release
+ * name failed, and handed the STAGING path back as "the installer". That was
+ * wrong one layer up: the staging name is `<asset>.<uuid>.download`, so
+ * `download()` marked it `ready` and `install()` passed a `.download` file to
+ * `shell.openPath()`. Windows resolves that by FILE ASSOCIATION — either
+ * nothing happens (the old code reported a launch error) or some other program
+ * opens while the app says "installer started" and quits. A verified file that
+ * cannot be published is a FAILED UPDATE, and must say so.
+ */
+describe('D-243 · publish 失败 ⇒ 不可安装（不把 .download 交给系统）', () => {
+  it('rename 发布失败时状态为 error、install 被拒、没有任何路径被打开', async () => {
+    const h = setup(GOOD_HASH, undefined, {
+      renameFile: async () => { throw new Error('EPERM: operation not permitted'); },
+    });
+    // A same-name copy is already there, so the isolate/restore path runs too.
+    const previous = Uint8Array.from([0x4d, 0x5a, 1, 2, 3, 4, 5, 6]);
+    h.writeCache(previous);
+
+    await h.service.check({ manual: true });
+    const state = await h.service.download();
+
+    expect(state.phase).toBe('error');
+    expect(state.message).toContain('无法发布');
+    expect(state.message).toContain('.download');
+    // The verified bytes survive under their staging name (never deleted)...
+    const staged = readdirSync(h.dir).filter((name) => name.endsWith('.download'));
+    expect(staged).toHaveLength(1);
+    expect(readFileSync(join(h.dir, staged[0] as string)).equals(Buffer.from(INSTALLER))).toBe(true);
+    // ...and the previous copy was restored, not lost.
+    expect(readFileSync(h.target).equals(Buffer.from(previous))).toBe(true);
+
+    const attempt = await h.service.install();
+    expect(attempt.ok).toBe(false);
+    expect(attempt.message).toContain('尚未就绪');
+    // The decisive assertion: nothing (in particular no `.download`) reached
+    // the shell, so no unrelated program can be launched on its behalf.
+    expect(h.opened).toHaveLength(0);
   });
 });
