@@ -355,6 +355,154 @@ describe('D-249 · 损坏 JSON：先字节级备份再回落空表，后续 pers
   });
 });
 
+// ---------------------------------------------------------------------------
+// D-256 · persist-first commit-after（外部审计 P3-01）。
+//
+// 旧 create/update/remove 先改内存再落盘：persist 失败时调用方拿到异常，但
+// 内存已改——list()/get() 返回新状态、磁盘是旧状态；下一次成功保存还会把失败
+// 的操作一并写盘（D-222 在 HistoryStore 修过的同款形态）。以下用例钉死修复后
+// 的契约：构造候选（不碰 this.templates）→ persist → 成功才提交，整段串进
+// 既有写队列；D-249 的单飞 init / 损坏备份 / 写队列不毒化钉点保持不变。
+// ---------------------------------------------------------------------------
+describe('D-256 · persist-first commit-after：写失败内存零变更、错误如实抛出', () => {
+  const templatePath = (mem: ReturnType<typeof createInMemoryPorts>): string =>
+    `${mem.state.env.configDir}/command-templates.json`;
+
+  const diskIds = (mem: ReturnType<typeof createInMemoryPorts>, path: string): string[] =>
+    (JSON.parse(mem.state.files.get(path) as string) as { templates: Array<{ id: string }> })
+      .templates.map((t) => t.id);
+
+  /** Wrap the fake fs so writes to the live template file fail while armed. */
+  const armedWritePorts = (mem: ReturnType<typeof createInMemoryPorts>, path: string) => {
+    let failing = false;
+    let writeAttempts = 0;
+    const ports = {
+      ...mem.ports,
+      fs: {
+        ...mem.ports.fs,
+        writeTextAtomic: async (p: string, text: string): Promise<void> => {
+          if (p === path) writeAttempts += 1;
+          if (failing && p === path) throw new Error('EIO: disk on fire');
+          return mem.ports.fs.writeTextAtomic(p, text);
+        },
+      },
+    };
+    return {
+      ports,
+      arm: (): void => { failing = true; },
+      disarm: (): void => { failing = false; },
+      writeAttempts: (): number => writeAttempts,
+    };
+  };
+
+  const setup = () => {
+    const mem = createInMemoryPorts();
+    const path = templatePath(mem);
+    const { ports, arm, disarm, writeAttempts } = armedWritePorts(mem, path);
+    const store = new CommandTemplateStore({ ports });
+    return { mem, path, store, arm, disarm, writeAttempts };
+  };
+
+  it('create 写失败：内存零变更、磁盘逐字未动、错误如实抛出', async () => {
+    const { mem, path, store, arm } = setup();
+    const first = await store.create({ name: 'A', args: ['--embed-subs'] });
+    arm();
+    await expect(store.create({ name: 'B', args: ['-R', '3'] })).rejects.toThrow('EIO');
+    // list()/get() observe the last COMMITTED state — the failed create left
+    // no residue in memory and the atomic write left none on disk.
+    expect(store.list().map((t) => t.id)).toEqual([first.id]);
+    expect(store.get(first.id)?.name).toBe('A');
+    expect(diskIds(mem, path)).toEqual([first.id]);
+  });
+
+  it('update 写失败：内存回旧值（list/get 观察已提交状态）、磁盘不变', async () => {
+    const { mem, path, store, arm } = setup();
+    const first = await store.create({ name: 'A', args: ['--embed-subs'] });
+    arm();
+    await expect(store.update(first.id, { name: '改名失败', args: ['-R', '3'] }))
+      .rejects.toThrow('EIO');
+    const after = store.get(first.id);
+    expect(after?.name).toBe('A');
+    expect(after?.args).toEqual(['--embed-subs']);
+    const disk = JSON.parse(mem.state.files.get(path) as string) as {
+      templates: Array<{ name: string; args: string[] }>;
+    };
+    expect(disk.templates[0]?.name).toBe('A');
+    expect(disk.templates[0]?.args).toEqual(['--embed-subs']);
+  });
+
+  it('remove 写失败：双侧不动；恢复后重试成功且内存与磁盘一致', async () => {
+    const { mem, path, store, arm, disarm } = setup();
+    const first = await store.create({ name: 'A', args: ['--embed-subs'] });
+    const second = await store.create({ name: 'B', args: ['-R', '3'] });
+    arm();
+    await expect(store.remove(first.id)).rejects.toThrow('EIO');
+    expect(store.list().map((t) => t.id)).toEqual([first.id, second.id]);
+    expect(diskIds(mem, path)).toEqual([first.id, second.id]);
+    disarm();
+    expect(await store.remove(first.id)).toBe(true);
+    expect(store.list().map((t) => t.id)).toEqual([second.id]);
+    expect(diskIds(mem, path)).toEqual([second.id]);
+  });
+
+  it('失败后紧跟一次成功保存：失败操作不被顺手复活，磁盘与内存逐字一致', async () => {
+    const { mem, path, store, arm, disarm } = setup();
+    const first = await store.create({ name: 'A', args: ['--embed-subs'] });
+    // A failed create ('B'), a failed update (name 'X') and a failed remove
+    // leave NO residue anywhere; the next successful save serializes exactly
+    // the committed state. (The old commit-early code resurrected all three
+    // onto disk with the very next persist.)
+    arm();
+    await expect(store.create({ name: 'B', args: ['-R', '3'] })).rejects.toThrow('EIO');
+    await expect(store.update(first.id, { name: 'X' })).rejects.toThrow('EIO');
+    await expect(store.remove(first.id)).rejects.toThrow('EIO');
+    disarm();
+    const third = await store.create({ name: 'C', args: ['--embed-subs'] });
+    expect(store.list().map((t) => t.id)).toEqual([first.id, third.id]);
+    expect(diskIds(mem, path)).toEqual([first.id, third.id]);
+    const disk = JSON.parse(mem.state.files.get(path) as string) as {
+      templates: Array<{ id: string; name: string }>;
+    };
+    expect(disk.templates.map((t) => t.name)).toEqual(['A', 'C']);
+    expect(JSON.stringify(disk)).not.toContain('"B"');
+    expect(JSON.stringify(disk)).not.toContain('"X"');
+  });
+
+  it('并发 create×2：整段进写队列，不丢更新（磁盘与内存同为两行、id 不撞）', async () => {
+    const { mem, path, store } = setup();
+    const [a, b] = await Promise.all([
+      store.create({ name: 'P', args: ['--embed-subs'] }),
+      store.create({ name: 'Q', args: ['-R', '3'] }),
+    ]);
+    expect(a.id).not.toBe(b.id);
+    expect(store.list().map((t) => t.id)).toEqual([a.id, b.id]);
+    expect(diskIds(mem, path)).toEqual([a.id, b.id]);
+  });
+
+  it('并发 create + remove：各自基于已提交状态构造候选，两效皆达、不互相覆盖', async () => {
+    const { mem, path, store } = setup();
+    const first = await store.create({ name: 'A', args: ['--embed-subs'] });
+    const [created, removed] = await Promise.all([
+      store.create({ name: 'B', args: ['-R', '3'] }),
+      store.remove(first.id),
+    ]);
+    expect(removed).toBe(true);
+    expect(store.list().map((t) => t.id)).toEqual([created.id]);
+    expect(diskIds(mem, path)).toEqual([created.id]);
+  });
+
+  it('remove 不存在的 id：返回 false、零写盘、零内存变更', async () => {
+    const { mem, path, store, writeAttempts } = setup();
+    const first = await store.create({ name: 'A', args: ['--embed-subs'] });
+    const writesBefore = writeAttempts();
+    const listBefore = store.list();
+    expect(await store.remove('tpl-does-not-exist')).toBe(false);
+    expect(writeAttempts()).toBe(writesBefore);
+    expect(store.list()).toEqual(listBefore);
+    expect(diskIds(mem, path)).toEqual([first.id]);
+  });
+});
+
 describe('M4-5 · buildCustomDownload argv', () => {
   it('keeps the compliance prefix/suffix, exactly one -- and the URL last', () => {
     const argv = buildCustomDownload(['-f', 'best', '--embed-subs'], 'https://example.org/v', CTX);

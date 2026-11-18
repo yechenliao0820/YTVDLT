@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest';
 import {
   sanitizeToken, sanitizeFileName, renderTemplate, buildOutputDir,
   resolveOutputPath, truncateWindowsPath, analyzeWindowsPath, expandEnvVars,
+  hasUnresolvedEnvToken,
   BUILTIN_OUTPUT_TEMPLATES,
   WINDOWS_MAX_PATH, WINDOWS_SAFE_PATH, LONG_PATH_PREFIX, LONG_UNC_PREFIX,
   ConfigStore, DEFAULT_DOMAINS, createDefaultConfig,
@@ -303,5 +304,35 @@ describe('D-79 · expandEnvVars', () => {
   it('is a no-op for strings without % and does not touch output templates', () => {
     expect(expandEnvVars('D:/Videos', env)).toBe('D:/Videos');
     expect(expandEnvVars('%(title).200B [%(id)s].%(ext)s', env)).toBe('%(title).200B [%(id)s].%(ext)s');
+  });
+});
+
+/**
+ * D-254: the fail-closed companion of `expandEnvVars`. Where `expandEnvVars`
+ * keeps an unresolvable token verbatim ON PURPOSE, a DIRECTORY whose expansion
+ * still carries a `%NAME%` token must never reach an argv (spawn has no shell,
+ * D-79): yt-dlp would create a literal `%LOCALAPPDATA%` folder. Intake code
+ * calls this predicate and refuses the request when it answers true.
+ */
+describe('D-254 · hasUnresolvedEnvToken', () => {
+  const env = { LOCALAPPDATA: 'C:/Users/leo/AppData/Local' };
+
+  it('flags a directory whose %VAR% did not resolve', () => {
+    expect(hasUnresolvedEnvToken('%LOCALAPPDATA%/YTVDLT/private')).toBe(true);
+    expect(hasUnresolvedEnvToken('C:/Users/leo/AppData/Local/YTVDLT/private')).toBe(false);
+  });
+
+  it('uses the SAME token rule as expandEnvVars (unknown and empty names verbatim)', () => {
+    // Whatever expandEnvVars could not replace is, by definition, unresolved.
+    expect(hasUnresolvedEnvToken(expandEnvVars('%LOCALAPPDATA%/YTVDLT/private', {}))).toBe(true);
+    expect(hasUnresolvedEnvToken(expandEnvVars('%LOCALAPPDATA%/YTVDLT/private', env))).toBe(false);
+  });
+
+  it('never flags output templates — the predicate is a DIRECTORY check only', () => {
+    expect(hasUnresolvedEnvToken('%(title)s.%(ext)s')).toBe(true); // templates DO match the token rule…
+    // …which is exactly why intake must only ever run it on the private ROOT,
+    // never on `paths.outputTemplate`. Pinned here so nobody "generalizes" it.
+    expect(hasUnresolvedEnvToken('')).toBe(false);
+    expect(hasUnresolvedEnvToken('C:/100%')).toBe(false); // a lone % is not a token
   });
 });

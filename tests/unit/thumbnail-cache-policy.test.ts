@@ -140,3 +140,44 @@ describe('thumbnail cache policy · config normalisation', () => {
     expect(normalizeThumbnailCachePolicy({ enabled: false }, NOW).enabled).toBe(false);
   });
 });
+
+/**
+ * D-252 · purge-pending：无痕关窗在 index 上留下的「定向回收」标记。
+ * 隐私是正确性承诺，不是空间卫生 —— 标记条目无视 enabled 开关，但仍受
+ * live 引用保护与 pruneBatch 上限约束。
+ */
+describe('thumbnail cache policy · D-252 purge-pending (privacy, switch-independent)', () => {
+  it('schedules a marked cover even when auto-clean is disabled, and only that one', () => {
+    const entries = [
+      entry('priv.jpg', { taskIds: ['p1'], untracked: false, purgePending: true }),
+      entry('norm.jpg', { taskIds: ['gone'], untracked: false }),
+    ];
+    const plan = planThumbnailPrune(entries, [], policy({ enabled: false }));
+    expect(plan.remove).toEqual([{ name: 'priv.jpg', bytes: 100, reason: 'purge-pending' }]);
+    expect(plan.removedByReason['purge-pending']).toBe(1);
+    // The switch still gates regular space hygiene: the plain lost-reference stays.
+    expect(plan.keep.map((item) => item.name)).toContain('norm.jpg');
+  });
+
+  it('keeps a marked cover that a live task has re-attached to (live guard wins)', () => {
+    const reattached = entry('back.jpg', { taskIds: ['p1', 't1'], untracked: false, purgePending: true });
+    expect(planThumbnailPrune([reattached], ['t1'], policy({ enabled: false })).remove).toEqual([]);
+  });
+
+  it('prefers the privacy reason over lost-reference when both would apply', () => {
+    const marked = entry('a.jpg', { taskIds: ['p1'], untracked: false, purgePending: true });
+    const plan = planThumbnailPrune([marked], [], policy());
+    expect(plan.remove[0]?.reason).toBe('purge-pending');
+    expect(plan.removedByReason['lost-reference']).toBe(0);
+  });
+
+  it('bounds one pass by pruneBatch even for privacy entries, reporting the leftovers', () => {
+    const entries = Array.from({ length: 5 }, (_, i) => entry(`p${i}.jpg`, {
+      taskIds: [`p${i}`], untracked: false, purgePending: true, lastUsedAt: NOW - i,
+    }));
+    const plan = planThumbnailPrune(entries, [], policy({ enabled: false, pruneBatch: 2 }));
+    expect(plan.remove).toHaveLength(2);
+    expect(plan.remove.every((item) => item.reason === 'purge-pending')).toBe(true);
+    expect(plan.truncated).toBe(true);
+  });
+});

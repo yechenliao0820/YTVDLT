@@ -20,7 +20,7 @@ import type {
 import {
   CommandTemplateStore, NotificationCenter, TaskDetailService,
   buildDownloadRequest, buildErrorReport, buildPlaylistBatchRecordsByUrl, expandEnvVars, formatErrorReport,
-  PRIVATE_OUTPUT_DIR, resolveDownloadTempDir, toRateLimit,
+  hasUnresolvedEnvToken, PRIVATE_OUTPUT_DIR, resolveDownloadTempDir, toRateLimit,
   type ClipboardPort, type IArtifactVerifier, type DesktopNotification,
 } from '@ytvdlt/core';
 import { createTaskHost, type TaskHost } from './task-host.js';
@@ -160,6 +160,45 @@ export interface SingleEnqueueInput {
   readonly mediaInfo?: MediaInfo;
 }
 
+/**
+ * D-254: stable refusal code for a private-output directory that could not be
+ * expanded to an absolute path. `expandEnvVars` keeps an unresolvable token
+ * verbatim, so on a box where `%LOCALAPPDATA%` is missing (or an injected
+ * expander that does not know the token) the private dir would degrade to the
+ * LITERAL string `%LOCALAPPDATA%/YTVDLT/private` — a relative path that spawn
+ * would turn into a real folder named `%LOCALAPPDATA%` (D-79 failure mode, pit
+ * 3/43) and that the artifact containment gate would refuse wholesale. The
+ * intake refuses BEFORE any request is built: no tokened path ever reaches
+ * argv, an output root, or a TaskRecord.
+ */
+export const PRIVATE_DIR_UNRESOLVABLE = 'PRIVATE_DIR_UNRESOLVABLE';
+
+/** D-254: the user-facing sentence carried by the refusal (renderer shows it verbatim). */
+const PRIVATE_DIR_UNRESOLVABLE_MESSAGE =
+  '无痕下载目录无法展开（系统缺少 %LOCALAPPDATA% 环境变量），已取消本次下载，避免文件写入字面量目录';
+
+/** D-254: the tagged refusal error — stable code on the object, Chinese message inside. */
+function privateDirUnresolvableError(): Error {
+  const error = new Error(PRIVATE_DIR_UNRESOLVABLE_MESSAGE);
+  (error as Error & { code?: string }).code = PRIVATE_DIR_UNRESOLVABLE;
+  return error;
+}
+
+/**
+ * D-254: type guard for the refusal above. The DOWNLOAD_START handler uses it
+ * to answer the renderer with `{code, reason}` instead of letting the error
+ * surface as a raw IPC rejection (`IPC_ERROR` + an Electron-prefixed sentence).
+ */
+export function isPrivateDirUnresolvableError(error: unknown): error is Error {
+  return error instanceof Error
+    && (error as Error & { code?: string }).code === PRIVATE_DIR_UNRESOLVABLE;
+}
+
+/** D-254: `<STABLE_CODE>：<中文原因>` — the form rendered verbatim in failure rows. */
+function privateDirUnresolvableReason(error: Error): string {
+  return `${PRIVATE_DIR_UNRESOLVABLE}：${error.message}`;
+}
+
 function readDefaults(
   config: TaskHost['config'],
   bundledAria2cPath?: string,
@@ -201,6 +240,16 @@ function readDefaults(
     ? (expandPath ?? ((raw: string): string => expandEnvVars(raw, process.env)))(PRIVATE_OUTPUT_DIR)
       .replace(/[\\/]+$/, '')
     : '';
+  // D-254: fail-closed. `expandEnvVars` leaves a missing variable verbatim, so
+  // when the token cannot resolve the string above is STILL a `%…%` token —
+  // relative, never absolute. Writing it into the request would put the literal
+  // directory into `-P` (spawn has no shell, D-79) and every artifact would be
+  // judged outside the request's own roots (D-184/203). Refuse HERE, before the
+  // request exists: callers answer with `PRIVATE_DIR_UNRESOLVABLE` instead of
+  // silently enqueuing a download that cannot land where promised.
+  if (privateMode && hasUnresolvedEnvToken(privateDir)) {
+    throw privateDirUnresolvableError();
+  }
   const paths: Partial<PathsDomain> = {
     ...expandedPaths,
     privateMode,
@@ -509,7 +558,22 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
       };
     }
 
-    const defaults = readDefaults(task.config, options.bundledAria2cPath, options.expandPath);
+    // D-254: the private-dir refusal is a WHOLE-BATCH refusal — every entry
+    // would have received the same unresolvable root. Same honest shape as the
+    // probe failure above: nothing enqueued, one per-id reason the dialog can
+    // render, instead of a throw that the renderer only sees as a raw IPC error.
+    let defaults: ReturnType<typeof readDefaults>;
+    try {
+      defaults = readDefaults(task.config, options.bundledAria2cPath, options.expandPath);
+    } catch (error) {
+      if (!isPrivateDirUnresolvableError(error)) throw error;
+      return {
+        requested, enqueued: 0, failed: requested, taskIds: [],
+        failures: input.selectedIds.map((id) => ({
+          id, reason: privateDirUnresolvableReason(error),
+        })),
+      };
+    }
     const hasChoice = input.quality !== undefined
       || input.audioQuality !== undefined || input.audioFormat !== undefined;
     // Absent choices keep the legacy M3 behaviour byte-for-byte; present ones
@@ -622,7 +686,19 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
    */
   const enqueueTxtBatch = async (input: TxtBatchRequest): Promise<TxtBatchResult> => {
     const failures: TxtBatchFailure[] = [];
-    const defaults = readDefaults(task.config, options.bundledAria2cPath, options.expandPath);
+    // D-254: same whole-batch refusal as the playlist path — the private root
+    // is shared by every member, so all URLs get the tagged reason (code +
+    // Chinese message) and nothing is enqueued.
+    let defaults: ReturnType<typeof readDefaults>;
+    try {
+      defaults = readDefaults(task.config, options.bundledAria2cPath, options.expandPath);
+    } catch (error) {
+      if (!isPrivateDirUnresolvableError(error)) throw error;
+      return {
+        enqueued: 0, taskIds: [],
+        failures: input.urls.map((url) => ({ url, reason: privateDirUnresolvableReason(error) })),
+      };
+    }
     const choice: SingleEnqueueInput = {
       url: input.urls[0] ?? '',
       kind: input.kind,

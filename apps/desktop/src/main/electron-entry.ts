@@ -189,20 +189,41 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
    * of reporting a removal that never reached disk; the catch below still
    * swallows it because shutdown must not be blocked by a broken disk, but the
    * failure is no longer silent to the queue's own logging.
+   *
+   * D-252: the purge now also settles the COVER cache layer. `forget()` only
+   * dropped the in-memory reference, so a private task's cover file and its
+   * `index.json` entry waited for a prune pass — one gated by the
+   * `autoCleanThumbnailCache` SPACE-hygiene switch and by future `ensure()`
+   * traffic, which let the jpg sit in `<dataDir>/thumbs/` indefinitely. After
+   * the rows are removed, `purgeCovers(report.removed)` recycles the covers
+   * those ids own EXCLUSIVELY through the cache's regular guarded trash path
+   * (isSafeCacheName + directory prefix + shell.trashItem — the same primitive
+   * the settings-page button and every prune pass already use during a live
+   * session; the cover cache is application-internal bytes, NOT the user media
+   * D-232 protects). A close-to-tray keeps the app alive, so touching the cache
+   * there is ordinary housekeeping; on the real-quit path the call already runs
+   * inside the 3 s budget race below and `purgeCovers` never throws. Before any
+   * byte is touched the entries are marked `purgePending` in `index.json` (a
+   * boolean, no private data), so a trash failure or an exit mid-delete is
+   * recovered by the NEXT boot's prune pass — switch-independent, never
+   * indefinite. Shared covers (any other task id in the entry) and files of
+   * tasks that are still running are left alone, exactly like `prune()`.
    */
   const clearPrivateHistory = async (): Promise<void> => {
     const host = hostRef;
     if (host === null) return;
     try {
-      await purgePrivateRecords(
+      const report = await purgePrivateRecords(
         {
           list: () => host.m4.task.queue.list(),
           remove: (taskId) => host.m4.task.queue.remove(taskId),
         },
-        // D-103: drop the cover reference too; the file is recycled by a later
-        // prune pass, never here (shutdown must not touch the filesystem).
+        // D-103: drop the cover reference too. The FILE decision now happens
+        // right below (D-252) — exclusivity-proven covers go to the recycle
+        // bin, everything else waits for a prune pass as before.
         (taskId) => thumbnailsRef?.forget(taskId),
       );
+      if (report.removed.length > 0) await thumbnailsRef?.purgeCovers(report.removed);
     } catch {
       // Best effort: a failed snapshot write must never block shutdown.
     }
@@ -219,8 +240,11 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
   // bounded exit-evidence wait, D-142/D-156/坑 21/坑 27); the wait for the
   // slots to drain is bounded by SHUTDOWN_CANCEL_BUDGET_MS and a budget
   // expiry only degrades to a WARNING — a hung taskkill must not wedge the
-  // quit. Cancelled tasks settle as `Canceled` and are retried BY HAND after a
-  // restart (D-209: startup never auto-resumes). The second `before-quit` (the
+  // quit. D-255: the same budget now also covers every cancel PROMISE (a
+  // queued task settles via the D-242 snapshot write) and the report's
+  // per-task outcomes are logged below — a silent write failure can no longer
+  // read as a clean cancel. Cancelled tasks settle as `Canceled` and are
+  // retried BY HAND after a restart (D-209: startup never auto-resumes). The second `before-quit` (the
   // real one, after `app.quit()` below) passes straight through: the
   // `cleanupStarted` latch keeps its exact pass-through semantics, and the
   // close→tray policy (D-60/D-197) is untouched — hiding to the tray never
@@ -234,11 +258,25 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       const queue = hostRef?.m4.task.queue ?? null;
       if (queue !== null) {
         const report = await cancelRunningTasksForShutdown(queue);
+        // D-255: per-task cancel evidence. `persist-failed` (D-242: the record
+        // was put back and is still on disk — it revives after a restart),
+        // `kill-unconfirmed` (D-142) and `unsettled` (pending at budget
+        // expiry) must no longer read as a clean cancel in this log.
+        const failed = report.tasks.filter((task) => task.outcome !== 'confirmed');
+        const failedNote = failed
+          .map((task) => `${task.taskId}=${task.outcome}${task.reason === undefined ? '' : ` (${task.reason})`}`)
+          .join(', ');
         if (!report.drained) {
           forwardLog('warn', 'shutdown', 'quit proceeded while downloads were still stopping', {
             requested: report.requested,
             stillActive: report.stillActive.join(', '),
             budgetMs: SHUTDOWN_CANCEL_BUDGET_MS,
+            ...(failedNote === '' ? {} : { cancelFailures: failedNote }),
+          });
+        } else if (failedNote !== '') {
+          forwardLog('warn', 'shutdown', 'quit proceeded with unconfirmed cancel results', {
+            requested: report.requested,
+            cancelFailures: failedNote,
           });
         } else if (report.requested > 0) {
           forwardLog('info', 'shutdown', 'in-flight downloads cancelled before quit', {
@@ -628,8 +666,11 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     }
     // Never delay the first frame, and never prune before the references above
     // have been attached. A failed/slow fetch cannot block housekeeping.
+    // D-252: the boot pass runs regardless of the auto-clean switch — with the
+    // switch off, `prune()` internally recycles ONLY the `purgePending` entries
+    // a private-mode close marked (privacy correctness), never the regular
+    // age/budget/lost-reference sweep.
     void Promise.allSettled(bootCoverAttempts).then(async () => {
-      if (configRef?.get('advanced', 'autoCleanThumbnailCache') === false) return;
       await thumbnails.prune();
     }).catch(() => undefined);
 

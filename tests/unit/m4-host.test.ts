@@ -420,3 +420,121 @@ describe('D-229 · 无痕开关的单一真相源', () => {
     host.dispose();
   });
 });
+
+/**
+ * D-254（草案编号，以 DECISIONS.md 最终登记为准）· 无痕目录展开失败必须当场拒绝。
+ *
+ * `expandEnvVars` 刻意把解析不了的 `%NAME%` 原样保留（拼错要可见，D-79），
+ * 但这条策略的产物绝不能进请求：私有目录常量是 `%LOCALAPPDATA%/YTVDLT/private`，
+ * 系统缺这个环境变量（或注入的展开器不认识它）时，D-229 的入口展开退化成
+ * 字面量相对路径——spawn 不经 shell（§9 坑 3/43），yt-dlp 会真的建一个叫
+ * `%LOCALAPPDATA%` 的目录，随后产物封链门（D-184/203）把每个产物判「根外」。
+ * 修复后 `readDefaults()` 在写请求之前抛出稳定码 `PRIVATE_DIR_UNRESOLVABLE`
+ * 的拒绝：三条入口（单条 / TXT / 播放列表）都拿不到坏请求，调用方把稳定码与
+ * 中文原因带到渲染层，而不是静默产出坏请求。
+ */
+describe('D-254 · 无痕目录展开失败当场拒绝（fail-closed）', () => {
+  /** Hide %LOCALAPPDATA% from the default expander (which reads process.env) for one async run. */
+  const withoutLocalAppData = async <T>(run: () => Promise<T>): Promise<T> => {
+    const saved = process.env['LOCALAPPDATA'];
+    delete process.env['LOCALAPPDATA'];
+    try {
+      return await run();
+    } finally {
+      if (saved !== undefined) process.env['LOCALAPPDATA'] = saved;
+    }
+  };
+
+  it('单条入口：缺 LOCALAPPDATA 时拒绝入队（稳定码 + 中文 message），队列零新增', async () => {
+    const { host } = await setup();
+    await host.task.config.set('general', 'privateMode', true);
+    const before = host.task.queue.list().length;
+
+    await withoutLocalAppData(async () => {
+      await expect(host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' }))
+        .rejects.toMatchObject({ code: 'PRIVATE_DIR_UNRESOLVABLE' });
+      await expect(host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' }))
+        .rejects.toThrow(/无痕下载目录无法展开/);
+    });
+    // fail-closed 的另一半：坏请求从未存在过，队列里一个任务都没多。
+    expect(host.task.queue.list().length).toBe(before);
+    host.dispose();
+  });
+
+  it('TXT 批量入口：整批拒绝，每条 URL 的 reason 带稳定码与中文原因', async () => {
+    const { host } = await setup();
+    await host.task.config.set('general', 'privateMode', true);
+    const before = host.task.queue.list().length;
+
+    const result = await withoutLocalAppData(() => host.enqueueTxtBatch({
+      urls: ['https://example.org/t1', 'https://example.org/t2'], kind: 'video',
+    }));
+    expect(result.enqueued).toBe(0);
+    expect(result.taskIds).toEqual([]);
+    expect(result.failures).toHaveLength(2);
+    for (const failure of result.failures) {
+      expect(failure.reason).toContain('PRIVATE_DIR_UNRESOLVABLE');
+      expect(failure.reason).toContain('无痕下载目录无法展开');
+    }
+    expect(host.task.queue.list().length).toBe(before);
+    host.dispose();
+  });
+
+  it('播放列表入口：整批失败报告（failures 逐条带码），不抛原始异常', async () => {
+    const { host } = await setup();
+    await host.task.config.set('general', 'privateMode', true);
+    const before = host.task.queue.list().length;
+
+    const report = await withoutLocalAppData(() => host.enqueuePlaylistBatchWithReport({
+      selectedIds: ['a1', 'a2'],
+      playlistUrl: 'https://example.org/playlist?list=PL_fixture_01',
+      kind: 'video',
+    }));
+    expect(report.requested).toBe(2);
+    expect(report.enqueued).toBe(0);
+    expect(report.failed).toBe(2);
+    expect(report.taskIds).toEqual([]);
+    for (const failure of report.failures) {
+      expect(failure.reason).toContain('PRIVATE_DIR_UNRESOLVABLE');
+      expect(failure.reason).toContain('无痕下载目录无法展开');
+    }
+    expect(host.task.queue.list().length).toBe(before);
+    host.dispose();
+  });
+
+  it('注入的 expandPath 不认识 %LOCALAPPDATA% 时同样拒绝；能展开时照常入队（对照）', async () => {
+    // 拒绝侧：展开器只认识用户视频令牌（D-117 注入形态），不认识 %LOCALAPPDATA%。
+    const blind = await setup({
+      expandPath: (raw: string) => raw.split('%USERVIDEOS%').join('C:/Users/leo/Videos'),
+    });
+    await blind.host.task.config.set('general', 'privateMode', true);
+    await expect(blind.host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' }))
+      .rejects.toMatchObject({ code: 'PRIVATE_DIR_UNRESOLVABLE' });
+    blind.host.dispose();
+
+    // 对照侧：同一注入形态、令牌可解析 → 行为与 D-229 既有钉点一致。
+    const healthy = await setup({
+      expandPath: (raw: string) => raw
+        .split('%USERVIDEOS%').join('C:/Users/leo/Videos')
+        .split('%USERPROFILE%').join('C:/Users/leo')
+        .split('%LOCALAPPDATA%').join('C:/Users/leo/AppData/Local'),
+    });
+    await healthy.host.task.config.set('general', 'privateMode', true);
+    const ids = await healthy.host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' });
+    const request = healthy.host.task.queue.get(ids[0] as string)?.request;
+    expect(request?.paths.privateMode).toBe(true);
+    expect(request?.paths.videoDir).toMatch(/YTVDLT[\\/]private$/);
+    expect(request?.paths.videoDir).not.toContain('%');
+    healthy.host.dispose();
+  });
+
+  it('非无痕模式不受影响：LOCALAPPDATA 缺失仍照常入队（不误伤普通下载）', async () => {
+    const { host } = await setup();
+    const ids = await withoutLocalAppData(() =>
+      host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' }));
+    const record = host.task.queue.get(ids[0] as string);
+    expect(record?.privateMode).toBe(false);
+    expect(record?.request?.paths.privateMode).toBe(false);
+    host.dispose();
+  });
+});

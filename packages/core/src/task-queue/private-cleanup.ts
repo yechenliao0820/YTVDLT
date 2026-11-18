@@ -30,8 +30,48 @@
  * minimal port shape below keeps this testable and keeps `task-queue.ts` the
  * only state owner). The caller supplies the covers' `forget` callback because
  * the thumbnail cache lives in the desktop layer.
+ *
+ * D-252 closes the cache-layer gap of the same promise: `forget()` only drops
+ * the in-memory reference, so the cover FILE and its `index.json` entry used to
+ * wait for a prune pass — which is gated by the `autoCleanThumbnailCache`
+ * SPACE-hygiene switch and by future `ensure()` traffic. Privacy is a
+ * correctness promise, not space hygiene, so a close must also decide WHICH
+ * covers may be recycled now. `coverNamesOwnedOnlyBy()` is that decision as a
+ * pure set rule (a cover goes only when EVERY index-recorded task id belongs
+ * to the purge — a cover shared with any other task, or never attributed at
+ * all, is left to the existing prune rules). The desktop adapter turns the
+ * returned names into guarded recycle-bin deletes.
  */
 import type { TaskRecord, TaskState } from '@ytvdlt/shared';
+
+/** The minimum a cover-index entry must expose for the ownership decision. */
+export interface PrivateCoverEntry {
+  /** Task ids recorded in the thumbnail cache index; empty = never attributed. */
+  readonly taskIds: readonly string[];
+}
+
+/**
+ * D-252 · which cache cover names a private-mode close may recycle.
+ *
+ * A name qualifies only when the index attributes it to at least one task and
+ * EVERY attributed id is in `ownerIds` (the ids that were just purged). This
+ * keeps the exact reference-counting semantics of the prune pass: a cover
+ * shared with any task outside the purge — live, settled, or an unknown id
+ * from an older session — survives, and untracked files (`taskIds: []`) stay
+ * with the age/budget rules that own them.
+ */
+export function coverNamesOwnedOnlyBy<E extends PrivateCoverEntry>(
+  entries: Readonly<Record<string, E>>,
+  ownerIds: ReadonlySet<string>,
+): string[] {
+  const names: string[] = [];
+  for (const [name, entry] of Object.entries(entries)) {
+    if (entry.taskIds.length === 0) continue;
+    if (!entry.taskIds.every((id) => ownerIds.has(id))) continue;
+    names.push(name);
+  }
+  return names;
+}
 
 /** The minimum a purge needs from a queue — structurally satisfied by TaskQueue. */
 export interface PrivateCleanupQueue {

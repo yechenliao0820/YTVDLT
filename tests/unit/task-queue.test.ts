@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import {
   canTransition, assertTransition, allTransitions, TASK_STATES,
   LEGAL_TRANSITIONS, IllegalTaskTransitionError, TaskQueue, HistoryStore, TaskStore,
-  purgePrivateRecords, shouldPurgeOnPrivateClose,
+  coverNamesOwnedOnlyBy, purgePrivateRecords, shouldPurgeOnPrivateClose,
 } from '@ytvdlt/core';
 import type {
   DownloadEngine, EngineEvent, DownloadRequest, HistoryEntry, HistoryQuery, MediaInfo, TaskRecord,
@@ -1011,5 +1011,47 @@ describe('D-232 · 无痕清理的作用域', () => {
     });
     expect(report.removed).toEqual([]);
     expect(report.keptRunning).toEqual([]);
+  });
+});
+
+/**
+ * D-252 · 无痕关窗的封面独占判定（`coverNamesOwnedOnlyBy`）。
+ *
+ * 关窗清理的隐私承诺必须落到缓存层：只有「index 里记录的全部引用 id 都属于
+ * 本次清理」的封面才允许定向回收；与任何范围之外的 id（在册任务、旧会话遗留）
+ * 共享的封面一律交给既有 prune 规则，未归属条目（taskIds 为空）同理。
+ */
+describe('D-252 · 无痕关窗的封面独占判定', () => {
+  const covers = {
+    'solo.jpg': { taskIds: ['p1'] },
+    'both-private.jpg': { taskIds: ['p1', 'p2'] },
+    'shared-with-normal.jpg': { taskIds: ['p1', 'n1'] },
+    'ghosted.jpg': { taskIds: ['p1', 'ghost-from-crash'] },
+    'untracked.jpg': { taskIds: [] },
+  };
+
+  it('only a cover owned exclusively by purged task ids is a recycle target', () => {
+    expect(coverNamesOwnedOnlyBy(covers, new Set(['p1', 'p2'])).sort())
+      .toEqual(['both-private.jpg', 'solo.jpg']);
+  });
+
+  it('a cover shared with any id outside the purge survives (live or stale)', () => {
+    expect(coverNamesOwnedOnlyBy(covers, new Set(['p1']))).toEqual(['solo.jpg']);
+  });
+
+  it('an empty owner set and never-attributed entries never match', () => {
+    expect(coverNamesOwnedOnlyBy(covers, new Set())).toEqual([]);
+    expect(coverNamesOwnedOnlyBy({ 'e.jpg': { taskIds: [] } }, new Set(['p1']))).toEqual([]);
+  });
+
+  it('purgePrivateRecords().removed plugs straight into the ownership rule', async () => {
+    const rows = [record('p1', true), record('n1', false), { ...record('p2', true), state: 'Running' as const }];
+    const report = await purgePrivateRecords({
+      list: () => rows,
+      remove: async (taskId) => taskId !== 'p2',
+    });
+    expect(report.removed).toEqual(['p1']);
+    // p2 is still running → its (hypothetical) shares must not be touched.
+    expect(coverNamesOwnedOnlyBy(covers, new Set(report.removed))).toEqual(['solo.jpg']);
   });
 });
