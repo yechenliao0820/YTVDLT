@@ -1735,6 +1735,14 @@
     store('ytvdlt.locale', target);
     call('SETTINGS_SET', { language: target }).then(function () { /* best effort */ });
     var finalUrl = localeSwitchUrl(target);
+    // D-244: the reload stays D-141's by-design full page reload; the shared
+    // shell veil only softens its optics (marker + fade in -> reload -> fade
+    // out on boot). app-nav declines (returns false) for static preview /
+    // e2e fixture URLs / reduced motion — and the plain replace below is the
+    // unchanged fallback for every decline, including sandboxes where
+    // shell/app-nav.js is not loaded at all.
+    var nav = global.YTVDLTNav;
+    if (nav && typeof nav.localeReload === 'function' && nav.localeReload(finalUrl) === true) return;
     if (global.location && typeof global.location.replace === 'function') global.location.replace(finalUrl);
   }
 

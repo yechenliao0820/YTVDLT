@@ -5,9 +5,16 @@
  * and NO `process` usage. Concurrency of `set()` is serialized by an internal
  * promise queue. Corrupt files are backed up (never deleted) before falling
  * back to defaults.
+ *
+ * D-246: existence is answered by the READ (`ENOENT`/`ENOTDIR` = first run,
+ * any other read error blocks the load and every write path) — an
+ * `fs.exists()` pre-probe is never used to decide "no config yet", because
+ * the production port maps every probe error to `false` and a transient
+ * EACCES/EBUSY would then persist defaults over the real file.
  */
 import type { CorePorts } from '@ytvdlt/shared';
 import type { IConfigStore, ConfigDomainName, LogEvent } from '../ports.js';
+import { isMissingFileError } from '../fs-errors.js';
 import {
   CONFIG_SCHEMA_VERSION, createDefaultConfig, isValidConfigFile, type ConfigFile,
 } from './defaults.js';
@@ -36,9 +43,13 @@ export class ConfigStore implements IConfigStore {
    * D-201: memoized first-load attempt. `load()` used to set `loaded` BEFORE
    * any await, so of two concurrent callers the second returned immediately and
    * read the constructor defaults (a following `set()` could even persist them
-   * over the real file). Concurrent callers now share one attempt; `loaded`
-   * settles only after the whole attempt finished — failure included, so a
-   * later `load()` stays a no-op exactly like the pre-D-201 failure semantics.
+   * over the real file). Concurrent callers now share one attempt.
+   *
+   * D-246: a FAILED attempt no longer counts as "loaded". The promise is
+   * cleared on rejection (same retry contract as `HistoryStore.init()`,
+   * D-227/D-241), so the next `load()` retries instead of running forever on
+   * the constructor defaults — where the first `set()` would have persisted
+   * those defaults over the real (merely unreadable) config file.
    */
   private loadPromise: Promise<void> | null = null;
 
@@ -53,25 +64,60 @@ export class ConfigStore implements IConfigStore {
   async load(): Promise<void> {
     if (this.loaded) return;
     if (this.loadPromise === null) {
-      // D-201: `loaded` is NOT set here — only after the attempt settles, so a
-      // caller arriving mid-load shares the promise instead of reading defaults.
-      this.loadPromise = this.performLoad().finally(() => {
-        this.loaded = true;
-      });
+      // D-201: concurrent callers share the SAME attempt instead of reading
+      // defaults mid-load. D-246: only a SUCCESSFUL attempt sets `loaded`;
+      // a failed one clears the memo so the next `load()` retries (the
+      // HistoryStore D-227 contract) — every caller of the failed attempt
+      // still shares that one rejection.
+      this.loadPromise = this.performLoad().then(
+        () => { this.loaded = true; },
+        (error: unknown) => {
+          this.loadPromise = null; // allow a retry on the next call
+          throw error;
+        },
+      );
     }
     await this.loadPromise;
   }
 
-  /** The single real load attempt; concurrent `load()` callers share it. */
+  /**
+   * The single real load attempt; concurrent `load()` callers share it.
+   *
+   * D-246 (external online audit): "does the config file exist?" is answered
+   * by the READ itself, never by an `fs.exists()` probe. The old order was
+   * `exists()` → `readText()`, and the production `exists()` port maps EVERY
+   * error to `false` (`try { stat } catch { return false }`), so one
+   * transient stat failure — antivirus lock, busy disk, flaky network drive —
+   * looked exactly like a first run and `persist()` wrote the defaults over
+   * the real file (download dirs, proxy, cookies path, language: all gone).
+   * It also removed the probe's TOCTOU window. Now:
+   *  - `ENOENT` / `ENOTDIR` (via `isMissingFileError`, the shared D-241
+   *    classifier in `core/src/fs-errors.ts`) is the only "first run" —
+   *    defaults are persisted;
+   *  - every other read error propagates: NO rename, NO default fallback,
+   *    NO write. `load()` rejects, the memo is cleared and retried on the
+   *    next call, and every write path (`set` / `setDomain` / `import`, all
+   *    of which `await load()` first) rejects with it — the in-memory
+   *    defaults may still be DISPLAYED, but nothing can reach the disk and
+   *    overwrite the user's config while it is merely unreadable.
+   *
+   * Real JSON / structure damage still goes through `handleCorrupt`
+   * (backup + defaults), unchanged.
+   */
   private async performLoad(): Promise<void> {
     await this.ports.fs.mkdir(this.ports.env.configDir());
-    const exists = await this.ports.fs.exists(this.filePath);
-    if (!exists) {
-      await this.persist();
-      return;
-    }
+    let text: string;
     try {
-      const text = await this.ports.fs.readText(this.filePath);
+      text = await this.ports.fs.readText(this.filePath);
+    } catch (error) {
+      if (isMissingFileError(error)) {
+        await this.persist(); // genuine first run: the file does not exist
+        return;
+      }
+      throw error; // D-246: a read failure is never "no config"
+    }
+    let needsWriteBack = false;
+    try {
       const parsed: unknown = JSON.parse(text);
       if (!isValidConfigFile(parsed)) throw new Error('config structure validation failed');
       if (isDowngrade(parsed.schemaVersion)) {
@@ -79,11 +125,18 @@ export class ConfigStore implements IConfigStore {
       }
       const migrated = applyMigrations(parsed, this.migrations);
       this.state = clone(migrated);
-      if (migrated.schemaVersion !== parsed.schemaVersion) {
-        await this.persist();
-      }
+      needsWriteBack = migrated.schemaVersion !== parsed.schemaVersion;
     } catch (error) {
       await this.handleCorrupt(error);
+      return;
+    }
+    // D-246: the migration write-back is a PLAIN IO step, not corruption —
+    // only JSON/structure failures above may rename the file away. A transient
+    // write failure here propagates as a load failure (retryable, file
+    // untouched, write paths blocked by the rejected load) instead of being
+    // mis-classified as "corrupt" and resetting a VALID config to defaults.
+    if (needsWriteBack) {
+      await this.persist();
     }
   }
 
@@ -92,9 +145,13 @@ export class ConfigStore implements IConfigStore {
     const reason = error instanceof Error ? error.message : String(error);
     const backup = `${this.ports.env.configDir()}/config.corrupt-${this.ports.clock.nowEpochMs()}.json`;
     try {
-      if (await this.ports.fs.exists(this.filePath)) {
-        await this.ports.fs.rename(this.filePath, backup);
-      }
+      // D-246: no `exists()` pre-probe (same reason as `performLoad`). The
+      // rename IS the existence test: `ENOENT` / `ENOTDIR` means there is no
+      // file to back up (it vanished between read and rename); every other
+      // failure stays best-effort and must not block the corrupt fallback
+      // path — the file is unparseable garbage at this point, and the app
+      // must keep working on defaults.
+      await this.ports.fs.rename(this.filePath, backup);
     } catch {
       // Best-effort backup; never let it crash the fallback path.
     }

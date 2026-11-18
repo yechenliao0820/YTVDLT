@@ -14,6 +14,10 @@
 /** Every option `buildDownload` is allowed to emit (option names, not values). */
 export const ALLOWED_DOWNLOAD_OPTIONS: readonly string[] = [
   // A · fixed prefix
+  // A0 · D-245 config/plugin isolation — emitted by the app itself on EVERY
+  //      spawn, never derived from user input; without this entry the
+  //      defence-in-depth scan below would reject the app's own prefix.
+  '--ignore-config', '--no-plugin-dirs',
   '--no-playlist', '--no-warnings', '--newline', '--socket-timeout', '-R',
   // A′ · M4-4 playlist batch (position 1 replaces --no-playlist)
   '--yes-playlist', '--playlist-items',

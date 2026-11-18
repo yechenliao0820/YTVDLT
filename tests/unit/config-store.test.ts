@@ -293,7 +293,7 @@ describe('D-201 · concurrent load() calls share one attempt', () => {
     expect(store.get('network', 'maxRate')).toBe(500);
   });
 
-  it('a failing load rejects every concurrent caller once and is not retried', async () => {
+  it('a failing load rejects every concurrent caller once, then retries after recovery (D-246)', async () => {
     const { ports } = createInMemoryPorts();
     let fail = true;
     let mkdirCalls = 0;
@@ -315,10 +315,245 @@ describe('D-201 · concurrent load() calls share one attempt', () => {
     await expect(first).rejects.toThrow('simulated disk failure');
     await expect(second).rejects.toThrow('simulated disk failure');
 
-    // Failure counts as attempted: a later load() stays a no-op and the I/O is
-    // not retried (pre-D-201 failure semantics preserved).
+    // D-246: a failed attempt is NOT "loaded" — the memo is cleared and the
+    // next load() is a REAL retry (HistoryStore D-227 contract; the pre-D-246
+    // no-op-until-restart semantics intentionally replaced). The I/O runs again.
     fail = false;
     await expect(store.load()).resolves.toBeUndefined();
-    expect(mkdirCalls).toBe(1);
+    expect(mkdirCalls).toBe(2);
+  });
+});
+
+// --- D-246 · 读失败 ≠ 第一次运行；写入阻断 + 可重试 ----------------------------
+
+describe('D-246 · 存在性探测拆除：读失败阻断写入、恢复后重试', () => {
+  /** Config on disk whose value would be DESTROYED if defaults were persisted. */
+  const seededPorts = (): ReturnType<typeof createInMemoryPorts> => {
+    const mem = createInMemoryPorts();
+    const base = createDefaultConfig('2026-11-05T00:00:00.000Z');
+    const onDisk = {
+      ...base,
+      domains: {
+        ...base.domains,
+        network: { ...base.domains['network'], maxRate: 500 },
+        paths: { ...base.domains['paths'], videoDir: 'D:/my/videos' },
+      },
+    };
+    mem.state.files.set(CONFIG_PATH, JSON.stringify(onDisk));
+    return mem;
+  };
+
+  const errnoError = (code: string): Error =>
+    // Same shape as the production adapter's raw `fs.readFile` rejections
+    // (Node ErrnoException): message + `code` field.
+    Object.assign(new Error(`${code}: transient failure`), { code });
+
+  it('(a) readText 抛 EACCES：load 拒绝、磁盘原样、无 corrupt 备份、set() 拒绝', async () => {
+    const { ports, state } = seededPorts();
+    const original = state.files.get(CONFIG_PATH) ?? '';
+    ports.fs.readText = async (): Promise<string> => {
+      throw errnoError('EACCES');
+    };
+
+    const store = new ConfigStore({ ports });
+    await expect(store.load()).rejects.toThrow('EACCES');
+
+    // The file on disk is byte-for-byte the original: no defaults were
+    // written, no `config.corrupt-*` rename happened (a READ failure is not
+    // corruption — the old code took the rename+defaults path here).
+    expect(state.files.get(CONFIG_PATH)).toBe(original);
+    expect([...state.files.keys()].filter((k) => k.includes('config.corrupt-'))).toHaveLength(0);
+
+    // Every write path goes through load() first and refuses with the same
+    // error — the in-memory defaults can never reach the disk.
+    await expect(store.set('general', 'theme', 'dark')).rejects.toThrow('EACCES');
+    await expect(store.setDomain('network', { maxRate: 5 })).rejects.toThrow('EACCES');
+    await expect(store.import(JSON.stringify({ schemaVersion: CONFIG_SCHEMA_VERSION, config: createDefaultConfig('x') })))
+      .rejects.toThrow('EACCES');
+    expect(state.files.get(CONFIG_PATH)).toBe(original);
+
+    // Sync getters still answer for display (constructor defaults), but that
+    // state is memory-only — proven by the untouched file above.
+    expect(store.get('general', 'theme')).toBe('system');
+    expect(store.get('network', 'maxRate')).toBe(0);
+  });
+
+  it('(b) 错误恢复后 load() 真重试成功，set() 随之恢复', async () => {
+    const { ports, state } = seededPorts();
+    const innerRead = ports.fs.readText.bind(ports.fs);
+    let failures = 1;
+    let readCalls = 0;
+    ports.fs.readText = async (path: string): Promise<string> => {
+      readCalls += 1;
+      if (failures > 0) {
+        failures -= 1;
+        throw errnoError('EIO');
+      }
+      return innerRead(path);
+    };
+
+    const store = new ConfigStore({ ports });
+    await expect(store.load()).rejects.toThrow('EIO');
+    // The failed attempt did not flip the store to "loaded": the next call
+    // re-runs the read instead of serving the constructor defaults forever.
+    await store.load();
+    expect(readCalls).toBe(2);
+    expect(store.get('network', 'maxRate')).toBe(500);
+    expect(store.get('paths', 'videoDir')).toBe('D:/my/videos');
+
+    // Writes work again, and they build on the REAL loaded file.
+    await store.set('saved_links', 'items', ['https://example.org/x']);
+    const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as {
+      domains: Record<string, Record<string, unknown>>;
+    };
+    expect(persisted.domains.saved_links?.['items']).toEqual(['https://example.org/x']);
+    expect(persisted.domains.network?.['maxRate']).toBe(500);
+    expect(persisted.domains.paths?.['videoDir']).toBe('D:/my/videos');
+  });
+
+  it('(b2) 并发调用共享同一次读失败；恢复后重试一次成功（D-201 单飞不回退）', async () => {
+    const { ports } = seededPorts();
+    const innerRead = ports.fs.readText.bind(ports.fs);
+    let failures = 1;
+    let readCalls = 0;
+    ports.fs.readText = async (path: string): Promise<string> => {
+      readCalls += 1;
+      if (failures > 0) {
+        failures -= 1;
+        throw errnoError('EBUSY');
+      }
+      return innerRead(path);
+    };
+
+    const store = new ConfigStore({ ports });
+    const first = store.load();
+    const second = store.load();
+    // Both callers share ONE attempt and ONE rejection (no second read).
+    await expect(first).rejects.toThrow('EBUSY');
+    await expect(second).rejects.toThrow('EBUSY');
+    expect(readCalls).toBe(1);
+
+    failures = 0;
+    await store.load();
+    expect(readCalls).toBe(2);
+    expect(store.get('network', 'maxRate')).toBe(500);
+  });
+
+  it('(c) 真正的 ENOENT 仍按首次运行：默认配置落盘', async () => {
+    const { ports, state } = createInMemoryPorts();
+    const store = new ConfigStore({ ports });
+    await store.load();
+    expect(state.files.has(CONFIG_PATH)).toBe(true);
+    const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as Record<string, unknown>;
+    expect(persisted['schemaVersion']).toBe(CONFIG_SCHEMA_VERSION);
+    expect(store.get('general', 'theme')).toBe('system');
+    expect(store.get('paths', 'videoDir')).toBe('%USERVIDEOS%/YTVDLT');
+    // The ENOENT path must not be confused with a failure: no WARNING, and a
+    // following set() persists normally.
+    expect(state.logLines.filter((l) => l.includes('config.corrupt'))).toHaveLength(0);
+    await store.set('general', 'theme', 'dark');
+    expect((JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as { domains: Record<string, Record<string, unknown>> })
+      .domains.general?.['theme']).toBe('dark');
+  });
+
+  it('生产端口的 exists() 即使撒谎也不再有影响：探测零调用（误判不存在 + TOCTOU 双路径拆除）', async () => {
+    const { ports, state } = seededPorts();
+    let probes = 0;
+    ports.fs.exists = async (): Promise<boolean> => {
+      // Exactly what the production adapter does with a stat error — and what
+      // the OLD performLoad consumed to decide "first run".
+      probes += 1;
+      return false;
+    };
+
+    const store = new ConfigStore({ ports });
+    await store.load();
+    // The read itself decides; the probe is never consulted.
+    expect(probes).toBe(0);
+    expect(store.get('network', 'maxRate')).toBe(500);
+    expect(store.get('paths', 'videoDir')).toBe('D:/my/videos');
+    const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as {
+      domains: Record<string, Record<string, unknown>>;
+    };
+    expect(persisted.domains.network?.['maxRate']).toBe(500);
+    expect(state.files.get(CONFIG_PATH)?.includes('"D:/my/videos"')).toBe(true);
+  });
+
+  it('handleCorrupt：备份 rename 报 ENOENT（文件已消失）视为无可备份，回落默认不中断', async () => {
+    const { ports, state } = createInMemoryPorts();
+    state.files.set(CONFIG_PATH, fixture('config-corrupt.json'));
+    let renameCalls = 0;
+    ports.fs.rename = async (from: string, _to: string): Promise<void> => {
+      renameCalls += 1;
+      // The file vanished between the read and the backup rename.
+      throw Object.assign(new Error(`ENOENT: ${from}`), { code: 'ENOENT' });
+    };
+
+    const store = new ConfigStore({ ports });
+    await store.load();
+    expect(renameCalls).toBe(1);
+    // The fallback still completed: defaults in memory, WARNING emitted.
+    expect(store.get('general', 'concurrency')).toBe(3);
+    const warnings = state.logLines.map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((l) => l['level'] === 'WARNING' && l['event'] === 'config.corrupt');
+    expect(warnings.length).toBe(1);
+    await store.set('general', 'theme', 'dark');
+    expect(state.files.get(CONFIG_PATH)?.includes('"dark"')).toBe(true);
+  });
+
+  it('handleCorrupt：备份 rename 其它错误（EBUSY）仍 best-effort 吞掉，不阻断损坏回落', async () => {
+    const { ports, state } = createInMemoryPorts();
+    state.files.set(CONFIG_PATH, fixture('config-corrupt.json'));
+    ports.fs.rename = async (): Promise<void> => {
+      throw Object.assign(new Error('EBUSY: file locked'), { code: 'EBUSY' });
+    };
+
+    const store = new ConfigStore({ ports });
+    await store.load();
+    expect(store.get('general', 'concurrency')).toBe(3);
+    const warnings = state.logLines.map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((l) => l['level'] === 'WARNING' && l['event'] === 'config.corrupt');
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]?.['payload']).toMatchObject({ fallback: 'defaults' });
+    // No rename happened, so the corrupt original is still in place and no
+    // backup copy exists (best-effort means exactly that).
+    expect(state.files.get(CONFIG_PATH)).toBe(fixture('config-corrupt.json'));
+    expect([...state.files.keys()].filter((k) => k.includes('config.corrupt-'))).toHaveLength(0);
+  });
+
+  it('迁移写回失败是普通 IO 错误：不走 handleCorrupt（好文件不被改名回落），load 失败可重试', async () => {
+    const { ports, state } = seededPorts();
+    // A v0 config that NEEDS the migration write-back on load.
+    const base = createDefaultConfig('2026-11-05T00:00:00.000Z');
+    const legacy = { ...base, schemaVersion: 0, domains: { ...base.domains, general: { theme: 'light' } } };
+    state.files.set(CONFIG_PATH, JSON.stringify(legacy));
+    const original = state.files.get(CONFIG_PATH) ?? '';
+
+    let failures = 1;
+    const innerWrite = ports.fs.writeTextAtomic.bind(ports.fs);
+    ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (failures > 0) {
+        failures -= 1;
+        throw Object.assign(new Error('EIO: migration write failed'), { code: 'EIO' });
+      }
+      return innerWrite(path, text);
+    };
+
+    const store = new ConfigStore({ ports, migrations: MIGRATIONS });
+    // The OLD code caught this inside the corrupt-try: the VALID file was
+    // renamed to config.corrupt-* and defaults took over. Now it is a load
+    // failure: no rename, no WARNING, file untouched.
+    await expect(store.load()).rejects.toThrow('EIO');
+    expect(state.files.get(CONFIG_PATH)).toBe(original);
+    expect([...state.files.keys()].filter((k) => k.includes('config.corrupt-'))).toHaveLength(0);
+    expect(state.logLines.filter((l) => l.includes('config.corrupt'))).toHaveLength(0);
+
+    // Recovery: the retry re-reads, migrates and writes back successfully.
+    await store.load();
+    expect(store.get('general', 'theme')).toBe('light');
+    const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as Record<string, unknown>;
+    expect(persisted['schemaVersion']).toBe(CONFIG_SCHEMA_VERSION);
+    await store.set('general', 'concurrency', 2);
+    expect(store.get('general', 'concurrency')).toBe(2);
   });
 });

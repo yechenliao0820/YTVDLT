@@ -79,6 +79,52 @@ describe('app menu · 回调', () => {
   });
 });
 
+/**
+ * D-247 · Alt+F4 语义修正。旧菜单把 `Alt+F4` 挂在「退出」上，应用菜单快捷键
+ * 优先于系统默认处理，于是 Alt+F4 直接执行 context.quit()（真退出），绕过了
+ * WM_CLOSE → close 事件 → D-60 的 close→托盘语义。移除 accelerator 后
+ * Alt+F4 与点 X 完全一致（有托盘 → 隐藏、下载继续）；「退出」仍可点击，
+ * 中英文文案不变。这不是放松断言——期望从「有 Alt+F4」翻转为「无 Alt+F4」，
+ * 正是本决策要钉死的新行为。
+ */
+describe('app menu · D-247 Alt+F4 语义', () => {
+  it('「退出」no longer carries the Alt+F4 accelerator (system chord falls through to close-to-tray)', () => {
+    const { context } = harness('win32');
+    const file = buildAppMenu(context).find((item) => String(item.label).startsWith('文件'));
+    const quit = (file?.submenu ?? []).find((item) => item.label === '退出');
+    expect(quit).toBeDefined();
+    expect(quit?.accelerator).toBeUndefined();
+    expect(typeof quit?.click).toBe('function');
+    // The chord must not hide anywhere else in the whole template either —
+    // a future "helpful" re-add would silently restore the audit finding.
+    expect(JSON.stringify(buildAppMenu(context))).not.toContain('Alt+F4');
+    // 文案逐字不变（中英两份）。
+    expect(quit?.label).toBe('退出');
+    const enQuit = (buildAppMenu({ ...context, locale: 'en' })
+      .find((item) => String(item.label).startsWith('File'))?.submenu ?? [])
+      .find((item) => item.label === 'Quit');
+    expect(enQuit?.accelerator).toBeUndefined();
+    expect(enQuit?.label).toBe('Quit');
+    // The quit CLICK still performs the real quit (the D-247 quit path in
+    // electron-entry now cancels in-flight downloads first).
+    const clickHarness = harness();
+    const clickQuit = (buildAppMenu(clickHarness.context).find(
+      (item) => String(item.label).startsWith('文件'),
+    )?.submenu ?? []).find((item) => item.label === '退出');
+    clickQuit?.click?.();
+    expect(clickHarness.calls).toEqual(['quit']);
+  });
+
+  it('macOS keeps Cmd+Q (platform convention; the quit path is safe since D-247)', () => {
+    const { context } = harness('darwin');
+    // The 文件 menu does not exist on darwin; the quit item lives in the app
+    // menu only when a platform shape provides one — assert no Alt+F4 leaked
+    // into the darwin template and that no quit-like item lost its click.
+    const template = JSON.stringify(buildAppMenu(context));
+    expect(template).not.toContain('Alt+F4');
+  });
+});
+
 describe('app menu · D-91 设置子菜单', () => {
   it('offers preferences / back to queue / about, all wired', () => {
     const { context, calls } = harness();

@@ -1,7 +1,9 @@
 /**
  * ArgvBuilder — PURE function `build(ProbeRequest): string[]` (M1: probe branch only).
  *
- * Frozen argv order (HANDOFF §6.5 step 3 / PRD §4 验收④ / A-INF-05):
+ * Frozen argv order (HANDOFF §6.5 step 3 / PRD §4 验收④ / A-INF-05; D-245 prepends
+ * the config/plugin isolation prefix in front of EVERYTHING):
+ *   --ignore-config --no-plugin-dirs
  *   -J --dump-single-json --no-playlist --no-warnings --socket-timeout 5 -R 1
  *   --no-js-runtimes --js-runtimes node:<bundled node.exe abs path>
  *   [ --proxy <v> ] [ --cookies <v> ] [ --add-header <v> ]
@@ -12,8 +14,37 @@
  */
 import type { AppError, ProbeRequest } from '@ytvdlt/shared';
 
-/** Every element of the frozen probe argv prefix (excluding optional network options). */
+/**
+ * D-245 · config/plugin isolation prefix, prepended by EVERY argv this package
+ * produces, always FIRST (before every other token).
+ *
+ * Why: a bundled `yt-dlp.exe` otherwise auto-loads configuration files from the
+ * user config directory AND the portable location next to the binary, plus the
+ * default plugin directories. Whatever those files contain (`--exec`, proxies,
+ * output templates, extractor plugins) never passes through the app's argv
+ * whitelists — every spawn was effectively a bypass around the compliance layer.
+ *
+ * Semantics (verified against the bundled 2026.10.26 `--help`):
+ *  - `--ignore-config` stops ALL default config loading (user dirs, portable
+ *    dir next to yt-dlp.exe, system dirs). An EXPLICIT `--config-locations`
+ *    given LATER on the same command line would still be honoured — which is
+ *    exactly why that option stays on the forbidden lists
+ *    (`M3_FORBIDDEN_OPTIONS` / core `DENIED_CUSTOM_OPTIONS`): no path in this
+ *    app can inject it, so no config file can be loaded at all.
+ *  - `--no-plugin-dirs` clears the default plugin directory list, so plugins
+ *    dropped next to the binary or into user directories are never imported.
+ */
+export const CONFIG_ISOLATION_FLAGS: readonly string[] = [
+  '--ignore-config',
+  '--no-plugin-dirs',
+] as const;
+
+/**
+ * Every FIXED element of the probe argv (D-245 isolation prefix first, then the
+ * A-INF-05 frozen options; excluding optional network options).
+ */
 export const FROZEN_PROBE_PREFIX: readonly string[] = [
+  ...CONFIG_ISOLATION_FLAGS,
   '-J',
   '--dump-single-json',
   '--no-playlist',
@@ -97,7 +128,10 @@ export function assertHttpUrl(raw: string): void {
 export function build(req: ProbeRequest): string[] {
   assertHttpUrl(req.url);
   const opts = req.opts;
+  // D-245: the isolation prefix MUST stay the first two elements — every
+  // builder in this package starts its argv with CONFIG_ISOLATION_FLAGS.
   const argv: string[] = [
+    ...CONFIG_ISOLATION_FLAGS,
     '-J',
     '--dump-single-json',
     ...(opts.noPlaylist === false ? [] : ['--no-playlist']),

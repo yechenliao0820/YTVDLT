@@ -1,7 +1,13 @@
 /**
  * buildCustomDownload — argv for a user command template (M4-5).
  *
- * Security model (two independent layers):
+ * Security model (three independent layers):
+ *   0. `CONFIG_ISOLATION_FLAGS` (D-245) — the user template is EXPLICIT user
+ *      input, but the default config/plugin loading it would otherwise inherit
+ *      is not: the flags stay the first two elements so user- / portable-dir
+ *      config files and plugin directories are never loaded, for every
+ *      template. An explicit `--config-locations` cannot appear either — it is
+ *      denied by `validateTemplateArgs()` (core) and forbidden again by layer 2.
  *   1. `validateTemplateArgs()` — positive allowlist + per-option grammar; the
  *      `--` separator and every known-dangerous option are impossible;
  *   2. `assertNoForbiddenOptions()` — defence in depth over the final argv,
@@ -11,7 +17,7 @@
  */
 import type { AppError } from '@ytvdlt/shared';
 import { validateTemplateArgs, customCommandRejected } from '@ytvdlt/core';
-import { assertHttpUrl } from './argv-builder.js';
+import { assertHttpUrl, CONFIG_ISOLATION_FLAGS } from './argv-builder.js';
 import { assertNoForbiddenOptions } from './argv-compliance.js';
 import { YTVDLT_PROGRESS_TEMPLATE, PROGRESS_DELTA_SECONDS } from './progress-template.js';
 
@@ -31,6 +37,8 @@ export function buildCustomDownload(
   assertHttpUrl(url);
 
   const argv: string[] = [
+    // D-245: isolation prefix first, in front of the user's own arguments too.
+    ...CONFIG_ISOLATION_FLAGS,
     '--no-warnings',
     '--newline',
     '--no-js-runtimes',

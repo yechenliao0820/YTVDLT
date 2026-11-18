@@ -74,8 +74,8 @@ describe('subtitle argv · 1. no subtitle request keeps the old argv', () => {
     expect(argv).not.toContain('--write-auto-subs');
     expect(argv).not.toContain('--embed-subs');
     expect(argv).not.toContain('--convert-subs');
-    // Sanity: the rest of the frozen prefix is still there.
-    expect(argv.slice(0, 2)).toEqual(['--no-playlist', '--no-warnings']);
+    // Sanity: the D-245 isolation prefix + the rest of the frozen prefix is still there.
+    expect(argv.slice(0, 4)).toEqual(['--ignore-config', '--no-plugin-dirs', '--no-playlist', '--no-warnings']);
   });
 
   it('an explicit "enabled:false, autoCaptions:false" is byte-identical to the default', () => {

@@ -23,6 +23,7 @@ import type {
   ChecksumEntry,
 } from '@ytvdlt/shared';
 import type { ILogger } from '@ytvdlt/core';
+import { CONFIG_ISOLATION_FLAGS } from './argv-builder.js';
 
 export interface SelfUpdaterDeps {
   readonly ports: CorePorts;
@@ -101,8 +102,16 @@ export class SelfUpdater {
   }
 
   private async installedVersion(): Promise<string> {
+    // D-245: the engine's own `--version` probe must not inherit default
+    // config/plugin loading either (a broken user config must not break the
+    // version read or, worse, execute config-side effects). aria2c does NOT
+    // know yt-dlp's flags — its own config opt-out is `--no-conf` — so the
+    // prefix applies to the yt-dlp component only.
+    const versionArgv = this.fileName() === 'yt-dlp.exe'
+      ? [...CONFIG_ISOLATION_FLAGS, '--version']
+      : ['--version'];
     try {
-      const run = await this.deps.ports.process.spawn(this.deps.enginePath, ['--version'], {
+      const run = await this.deps.ports.process.spawn(this.deps.enginePath, versionArgv, {
         shell: false,
         windowsHide: true,
         timeoutMs: 15_000,

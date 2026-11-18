@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Logger } from '@ytvdlt/core';
 import type { CorePorts, HttpFetchOptions, HttpPort } from '@ytvdlt/shared';
+import { CONFIG_ISOLATION_FLAGS } from '@ytvdlt/engine-ytdlp';
 import {
   createComponentUpdater, normalizeVersion, componentFetchPolicy, mirrorHopPolicy,
   allowedComponentFeed, type ComponentSpec,
@@ -515,5 +516,48 @@ describe('D-161 · mirror trust model is explicit and bounded', () => {
     expect(mirror.allowPrivateAddresses).toBe(true);
     expect(mirror.urlPolicy?.('https://mirror.example.org/feed/SHA2-256SUMS')).toBe(true);
     expect(mirror.urlPolicy?.('http://mirror.example.org/feed/SHA2-256SUMS')).toBe(false);
+  });
+});
+
+/**
+ * D-247 · D-245 的 apps/desktop 补漏。D-245 给本包（engine-ytdlp）的每一次
+ * yt-dlp spawn 都加上了 CONFIG_ISOLATION_FLAGS 前缀，SelfUpdater 的版本探测
+ * 也已带上；但 component-updater 的 `installedVersion()` 仍是裸
+ * `['--version']` —— 一份放在 yt-dlp.exe 旁边的配置 / 插件目录可以拖慢、
+ * 破坏或篡改更新检查所信任的版本答案。分支按文件名判定（镜像
+ * self-updater.ts）：aria2c 不认识 yt-dlp 的旗标，保持裸 `--version`。
+ */
+describe('D-247 · 版本探测 argv 的配置隔离前缀分支（D-245 补漏）', () => {
+  it('status(): yt-dlp.exe probes with the CONFIG_ISOLATION_FLAGS prefix, aria2c.exe stays bare --version', async () => {
+    const { mem, ports, logger, components } = await setup();
+    const updater = createComponentUpdater({
+      ports, logger, components, baseUrl: 'https://feed.example.org/c/', intakeGate: null,
+    });
+    const status = await updater.status();
+    // The probes still RETURN the versions (the prefix must not break them).
+    expect(status.components.map((item) => item.version)).toEqual(['2026.10.26', '1.35.0']);
+    const argvByFile = new Map(mem.state.spawnCalls.map((call) => [call.file, call.argv]));
+    expect(argvByFile.get('C:/runtime/yt-dlp.exe')).toEqual([...CONFIG_ISOLATION_FLAGS, '--version']);
+    expect(argvByFile.get('C:/runtime/aria2c.exe')).toEqual(['--version']);
+  });
+
+  it('check(): the same branch guards the version answers the update decision trusts', async () => {
+    const { mem, ports, logger, http } = await setup({ releaseJson: '{"tag_name":"2026.11.01"}' });
+    const updater = createComponentUpdater({
+      ports, logger, baseUrl: null, intakeGate: null,
+      components: [
+        { id: 'yt-dlp', label: 'yt-dlp', fileName: 'yt-dlp.exe', path: 'C:/runtime/yt-dlp.exe' },
+        { id: 'aria2c', label: 'aria2c', fileName: 'aria2c.exe', path: 'C:/runtime/aria2c.exe' },
+      ],
+    });
+    await updater.check();
+    const argvByFile = new Map(mem.state.spawnCalls.map((call) => [call.file, call.argv]));
+    expect(argvByFile.get('C:/runtime/yt-dlp.exe')).toEqual(['--ignore-config', '--no-plugin-dirs', '--version']);
+    expect(argvByFile.get('C:/runtime/aria2c.exe')).toEqual(['--version']);
+    expect(http.calls).toEqual([]); // versionApiUrl unset: no network, argv assertion is the subject here
+  });
+
+  it('the prefix is the frozen D-245 pair imported from engine-ytdlp (no local redefinition)', () => {
+    expect(CONFIG_ISOLATION_FLAGS).toEqual(['--ignore-config', '--no-plugin-dirs']);
   });
 });

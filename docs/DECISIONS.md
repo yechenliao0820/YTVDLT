@@ -2599,3 +2599,63 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① `download()`：发布结果不是规范名 → **失败关闭**——`phase = 'error'`、`installerPath = null`、消息写明失败原因与保留下来的暂存文件路径（文件仍不删除，供支持排查），`install()` 因此不可达；② `install()` 增加纵深防御：路径不以 `.exe` 结尾直接拒绝并清空 `installerPath`，永不把非 PE 文件交给 `openPath`；③ `AppUpdateServiceDeps` 追加可选 `renameFile`（默认 `fs/promises.rename`）只为让「发布失败」可离线复现，生产接线不变。 |
 | 验证 | `app-update-service-cache.test.ts` 新增 1 例：注入必失败的 `renameFile` + 预先放一份旧同名包，断言状态为 `error`、消息含「无法发布」与 `.download`、暂存文件仍在且字节等于真实安装包、旧包已回到规范名、`install()` 被拒且 `opened` 为空（旧实现此处会 open 一次 `.download`）。既有 D-233 两例（校验失败不覆盖旧包 / 成功后发布并安装）保持绿。 |
 | 未覆盖 | `.exe` 扩展名断言在正常流程里不可达（`selectInstallerAsset` 只收 `.exe`），属纵深防御，无独立用例；发布失败后暂存文件不自动清理（与 `.replaced-*` / `.rejected-*` 同一策略）；未在真机复现「同名包被占用」的真实 errno。 |
+
+## D-244 · 2026-11-18 · 语言切换的整页重载外包一层过渡遮罩（外部在线审计「轻微」项）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 中文 / EN 切换是整页重载（D-141 有意如此：只有整页重载才能把 fixture 数据挡在 live 页面之外），观感是「旧语言一帧 → 空白 → 新语言一帧」的硬闪；D-217 给文件系统 / 全屏做的那套过渡遮罩没有覆盖这条路径。 |
+| 根因 | 语言切换直接调 `location.replace()`，不经过 shell 的任何状态机；D-217 的遮罩挂在真实窗口状态变化与 fs 操作上，`replace()` 只会把文档整个换掉，来不及做任何过渡。 |
+| 决策 | `shell/app-nav.js` 新增 `localeReload(url)`（点击页）与 `localeVeilConsume()`（启动页），只改观感、不动重载语义：① 点击页先写一次性 `sessionStorage` 标记 → 挂透明遮罩 → 下一帧淡入（约 150 ms）→ 再 `replace()`；② 启动页先删标记（一次性）再挂**不透明**遮罩，首帧即覆盖，页面画完后淡出；③ 三类场景一律**拒绝接管**并返回 false，调用方回落到原来的 `location.replace`：无桥的静态预览、`case=` fixture URL（冻结基线不许多一个节点）、`prefers-reduced-motion` / `data-motion="reduced"`；④ 安全网：`hold + fade + 120 ms` 后若遮罩还在（导航被拒 / 沙箱），自动淡出并清标记，避免下一次跳转继承到一个残标记。 |
+| 验证 | `ui-shell-family.test.ts` 新增 D-244 族（遮罩标记 / 挂载 / 延后导航 / 安全网 / 四类拒绝）；`ui-queue-page.test.ts` 71 项与 `ui-settings-page.test.ts` 61 项各补「委托 / 回落」两例；e2e 31/31 + 反例 5/5，像素差异 0（`case=` 豁免生效，静态基线一字未动）。 |
+| 未覆盖 | 未在真机上肉眼确认 150 ms 淡入的观感；系统级「减少动态效果」只在测试沙箱里模拟，没有在 Windows 设置里真的打开验证。 |
+
+## D-245 · 2026-11-18 · 每一次 yt-dlp spawn 都带配置 / 插件隔离前缀（外部在线审计 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 随包 `yt-dlp.exe` 默认会加载用户配置目录、二进制旁的 portable 配置，以及默认插件目录。这些文件里的 `--exec`、代理、输出模板、提取器插件**完全不经过应用自己的 argv 白名单**——合规层只约束了我们拼出来的 token，没约束 yt-dlp 自己去读什么。一条 `--exec` 写进 portable 配置就等于任意命令执行。 |
+| 根因 | `build()` / `buildDownload()` / `buildCustomDownload()` 只保证「我们自己不加危险选项」，从未传 `--ignore-config` / `--no-plugin-dirs`；引擎的六个 spawn 点（version / probe / probePlaylist / listExtractors / checkUrlSupport / download 流式）与 `SelfUpdater` 的版本探测同样如此。 |
+| 决策 | 新增 `CONFIG_ISOLATION_FLAGS = ['--ignore-config', '--no-plugin-dirs']`（`argv-builder.ts` 导出，append-only 进包入口），并**恒为每个 argv 的前两个元素**：三个 builder + 引擎六个 spawn 点 + `SelfUpdater` 的 yt-dlp 版本探测。① `--config-locations` 仍在 `M3_FORBIDDEN_OPTIONS` / core `DENIED_CUSTOM_OPTIONS` 里——否则命令行后段还能重新指定一份配置；② `argv-compliance.ts::ALLOWED_DOWNLOAD_OPTIONS` 显式放行这两个旗标，否则自家前缀会被自家防御扫描拒绝；③ aria2c 不认识这些旗标，按文件名分支保持裸 `--version`（镜像 `self-updater.ts` 的分支方式）；④ 冻结期望 `DOWNLOAD_ARGV_FROZEN_ORDER` / `EXPECTED_MINIMAL` 整体前移两位——冻结的是**相对顺序**，新增统一前缀属有意的契约变更，不是漂移。 |
+| 验证 | 新增 `config-isolation-argv.test.ts` 13 项：常量本身、三个 builder 的首两元素、六个引擎 spawn 点、SelfUpdater 的 yt-dlp / aria2c 分支、`--config-locations` 仍被拒；`argv-builder` 15 / `argv-builder-m3` / `playlist-batch` 13 / `subtitle-download-argv` 25 同步校正。实测随包 `yt-dlp.exe 2026.10.26` 接受两个旗标并正常输出 `2026.10.26`（不是只靠注释里的 `--help` 断言）。 |
+| 未覆盖 | 未构造「用户目录里放恶意 config / 插件」的实机复现（无法确认 yt-dlp 内部是否还有第三条配置来源）；插件隔离只验证旗标出现在 argv，未验证引擎内部实现。 |
+
+## D-246 · 2026-11-18 · ConfigStore 读取不再用 exists() 探路，失败可重试（外部在线审计 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 与 D-241（历史）同构：`config.json` 的 `stat` 因临时 EACCES / EBUSY / 杀软锁失败时，生产 `exists()` 把**所有**异常归一成 `false`，被当成「首次运行」，`persist()` 随即把默认配置写回去——用户改过的下载目录、代理、cookies 路径、语言设置全部丢失。 |
+| 根因 | `performLoad()` 的顺序是 `exists()` → `readText()`；更糟的是 D-201 的 memo 把**失败**也标成 `loaded`，于是后续 `set()` 在内存默认值上继续走并落盘。 |
+| 决策 | ① 存在性由读取本身回答：直接 `readText`，只有 `ENOENT` / `ENOTDIR`（共用 `fs-errors.ts::isMissingFileError`）才是首次运行并写默认值；② 其他读取错误**传播**：不 rename、不回落默认值、不写入，`load()` 拒绝并把 memo 清空（HistoryStore D-227 契约），下一次调用重试；③ `set` / `setDomain` / `import` 都先 `await load()`，因此全部跟着拒绝，磁盘上的真配置在「只是读不到」期间不可能被覆盖；④ `handleCorrupt` 里的 `exists()` 也删掉——`rename` 本身就是存在性判断，`ENOENT` 当「没有可备份的文件」；⑤ schema 迁移的写回从损坏分支里拆出来，一次写失败不再被误判成「文件损坏」而把有效配置重置。 |
+| 验证 | `config-store.test.ts` 26 项（+243 行）：exists 撒谎时按真实文件读、读失败拒绝且磁盘不变、恢复后重试成功、迁移写回失败不触发损坏回落、并发调用共享同一次失败。 |
+| 未覆盖 | 未在真机用只读 / 被占用目录复现；`ENOTDIR` 并入「首次运行」是刻意放宽（该路径确实没有文件）。 |
+
+## D-247 · 2026-11-18 · 退出应用前取消在跑下载；Alt+F4 归还窗口关闭语义（外部在线审计 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 菜单「退出」/ 真退出路径直接结束进程：`yt-dlp` 子进程变成孤儿，继续占带宽、继续写 `.part`，重启后任务状态与磁盘对不上。同一批还发现「退出」菜单项挂着 `Alt+F4`，把系统的关窗快捷键劫持成「直接退出」，绕过了 D-60 的关窗到托盘（D-197 的 `preventDefault + hide`）。 |
+| 根因 | 取消能力端到端都在（D-142 / D-156 / D-162 / D-200，`killTree()` 有界等待退出证据，手册坑 27），但退出路径从未调用它；菜单把 `Alt+F4` 当成「退出」的 accelerator 写死。 |
+| 决策 | ① 新增 `apps/desktop/src/main/shutdown-cancel.ts`：目标 = 活跃槽位 + FIFO 排队任务（恢复出来但从未启动的 `Idle` / `ReadyWithInfo` **不碰**，它们后面没有子进程）；逐个调用既有 `queue.cancel()`（逐任务隔离异常——D-242 的写失败拒绝不得阻断退出）；以 `activeTaskIds` 清空作为**子进程退出证据**轮询，总预算 5 s（与适配器 `TERMINATION_GRACE_MS` 同量级），到期放行并记 WARNING（卡死的 taskkill 不能把「退出」变成挂起）。② `electron-entry.ts::before-quit` 首段先跑上述取消，再走原有的无痕清理与 3 s 兜底；`cleanupStarted` 的第二次直通语义、close→托盘策略一字未动。③ Windows 的「退出」菜单项去掉 `Alt+F4`（快捷键回到 WM_CLOSE → `close` → 托盘策略，与点 X 一致），macOS 保留 `Cmd+Q`（平台惯例，且退出路径已安全）。④ 同批补齐 D-245 在 `apps/desktop::component-updater.ts` 的版本探测前缀（之前只覆盖了 engine 包）。 |
+| 验证 | 新增 `shutdown-cancel.test.ts` 8 项（假时钟：目标收集、逐任务隔离、槽位清空即返回、预算到期如实报 `stillActive`、无任务零 cancel 零等待）；`app-menu.test.ts` 10 项（Windows 无 accelerator / macOS 有 Cmd+Q / 点击仍真退出）、`bootstrap.test.ts` 30 项（安装后的菜单同样无 Alt+F4，含 `did-finish-load` 重建路径）、`component-updater.test.ts` 26 项（yt-dlp 带前缀 / aria2c 裸 `--version` / 版本结果不受影响）。 |
+| 未覆盖 | 未在真机上退出并观察子进程确实消失（单测用假队列）；「预算到期」分支在健康机器上无法稳定复现；macOS 分支只有单测，无真机。 |
+
+## D-248 · 2026-11-18 · 本地文件状态批量探测：单飞 + 并发上界（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `TASK_LIST` 是 0.4 s / 1.2 s 的轮询通道，还会与动作触发的 `refreshFileStatus`、页面重载叠加。每一次调用都新起一整批 `stat`；网络盘断连时单次 `stat` 会挂到系统超时，批次于是无上界堆积，主进程被自己的轮询拖住。 |
+| 根因 | `probe()` 每次调用都新开一批，既没有 in-flight 去重，也没有并发上界。 |
+| 决策 | ① **单飞**：非强制调用共享正在跑的那一轮结果（轮次开始后才入队的 id 等下一轮，渲染层把缺失的 `fileStatus` 当 unknown，不编造）；② **强制调用不吃别人的结果**：先等当前轮结束，再跑自己的一轮（旧轮可能命中缓存、且缺新记录的路径）；③ 一轮内部 4 worker 池，且每个任务的文件 / 目录两次 `stat` 串行执行，把在途 `stat` 峰值钉死在池大小上；④ `probeTask()`（打开文件 / 文件夹前的即时复核）**不进池**，避免一次点击排在慢轮后面；⑤ 某个 worker 失败只记录第一个错误、不产生未处理拒绝，轮次结束后把该错误报给调用方。 |
+| 验证 | `local-file-status.test.ts` 18 项（+137 行）：重叠调用只跑一轮、强制调用等旧轮再跑新轮、池上界、缓存命中不重复 stat、单 worker 失败不影响其余、错误如实上报。 |
+| 未覆盖 | 断连网络盘的真实挂起时长未实测（用可控延迟的假 `stat` 模拟）。 |
+
+## D-249 · 2026-11-18 · 命令模板存储：init 单飞、损坏先备份、写队列不被一次失败毒化（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | ① `init()` 在第一个 `await` 之前就把 `loaded` 置真，第二个并发调用看到「已加载」，于是在空表上 `create()`，把空基线写回磁盘——D-227 在 `HistoryStore` 修过的同一类缺陷；② 损坏 JSON 直接回落空表，下一次 persist 就把原文件覆盖，用户手写的模板永久丢失；③ 一次写失败后写队列永久处于 rejected，之后每次写入都带着旧错误失败，直到重启。 |
+| 根因 | 三处都与 `HistoryStore` 早期版本同构：先置标志再 await、没有损坏备份、写队列直接把 rejected promise 当链条。 |
+| 决策 | ① `init()` 单飞：并发调用共享同一个 promise，`loaded` 只在读取真正完成后置位，失败清 memo 可重试；② 存在性由读取回答（`ENOENT` / `ENOTDIR` 才算首次运行，共用 D-241 判定），结构不符与解析失败同路；③ 损坏时**先**做字节级备份（`readBytes` → `writeBytesAtomic`，失败回落 `writeTextAtomic`，再失败不阻断——模板是偏好数据，不像 `tasks.json` 那样 fail-closed），备份名带 ISO 时间戳并做 `-2` / `-3` 去重；④ 写队列改为 `run.catch(() => undefined)` 续链，真实错误仍回给调用方（House pattern：HistoryStore / TaskStore）。 |
+| 验证 | `command-template.test.ts` 36 项（+202 行）：并发 init 只读一次、失败可重试、损坏先备份再回落、备份不覆盖原文件、同毫秒多次损坏各自留档、写失败不毒化后续写入。 |
+| 未覆盖 | 备份只在「首次损坏读」时做一次，之后不再重复；非 UTF-8 的原始字节依赖 `readBytes` 端口，若端口不支持则退化为文本备份（会丢非法字节）。 |

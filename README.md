@@ -324,9 +324,16 @@ mode and queue persistence mean exactly what they claim.
 
 0.3.2 is published, and everything landed through D-243 is in it: the six
 private-mode and persistence defects from the second online audit (D-239…D-243),
-on top of the first audit round (D-234…D-238). Nothing is waiting for a release
-right now. Details live in [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) (now at D-243).
+on top of the first audit round (D-234…D-238). Details live in
+[`docs/CHANGELOG.md`](docs/CHANGELOG.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md).
+
+Work landing after 0.3.2 is **not yet released** (D-244…D-249): a transition veil
+for the language reload, `--ignore-config --no-plugin-dirs` on every yt-dlp spawn so
+a stray user/portable config or plugin directory can never bypass the argv
+allowlist, config reads that no longer trust an existence probe, in-flight downloads
+cancelled on quit with a bounded wait for exit evidence (and `Alt+F4` handed back to
+the OS window-close path), single-flight bounded file-status probing, and a
+command-template store that backs up a damaged file before replacing it.
 
 ## Engineering and verification
 

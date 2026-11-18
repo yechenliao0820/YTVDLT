@@ -1178,7 +1178,7 @@ describe('D-187 · 语言切换整页重载语义与视图持久化', () => {
     expect(queue.locale()).toBe('zh-CN');
   });
 
-  it('switchLocale：持久化 + SETTINGS_SET + location.replace 整页重载（D-85）', () => {
+  it('switchLocale：持久化 + SETTINGS_SET + 整页重载（D-85；D-244 起跳转由 shell 遮罩延后）', () => {
     // D-215：switchLocale 现在同时读 location.search 重建 query（真实浏览器里
     // search 恒是 href 的一部分）。引导期注入的 ?prefill= 与本用例无关，先把
     // 假 location 置成一致的干净状态，避免假件 desync 泄进断言。
@@ -1186,14 +1186,21 @@ describe('D-187 · 语言切换整页重载语义与视图持久化', () => {
     win().location.search = '';
     const replaced: string[] = [];
     (win().location as { replace?: (url: string) => void }).replace = (url: string) => { replaced.push(url); };
+    // D-244：本文件装载了真实 shell/app-nav.js 且带桥 → 跳转被语言遮罩接管，
+    // replace 延后到淡入 hold 结束；断言的仍是「委托后的最终 URL」，所以每次
+    // 切换把遮罩生命周期（淡入 16 + hold 150 + 安全网 410 + 淡出移除 630）推进到头。
+    const drainLocaleVeil = () => { vi.advanceTimersByTime(700); };
     queue.switchLocale('en');
     expect(win().localStorage.getItem('ytvdlt.locale')).toBe('en');
     expect(callsTo(SETTINGS_SET).at(-1)?.payload).toEqual({ language: 'en' });
     const base = 'file:///C:/app/pages/queue/index.html';
+    drainLocaleVeil();
     expect(replaced.at(-1)).toBe(base + '?lang=en');
     queue.switchLocale('zh-CN');
+    drainLocaleVeil();
     expect(replaced.at(-1)).toBe(base); // 中文回到不带 lang 的地址
     queue.switchLocale('什么');
+    drainLocaleVeil();
     expect(win().localStorage.getItem('ytvdlt.locale')).toBe('zh-CN');
   });
 
@@ -1207,13 +1214,44 @@ describe('D-187 · 语言切换整页重载语义与视图持久化', () => {
     win().location.href = 'file:///C:/app/pages/queue/index.html?lang=en&v=0.3.1';
     win().location.search = '?lang=en&v=0.3.1';
     queue.switchLocale('zh-CN');
+    vi.advanceTimersByTime(700); // D-244：遮罩 hold 结束才 replace，推进假 timer
     expect(replaced.at(-1)).toBe('file:///C:/app/pages/queue/index.html?v=0.3.1');
     queue.switchLocale('en');
+    vi.advanceTimersByTime(700);
     expect(replaced.at(-1)).toBe('file:///C:/app/pages/queue/index.html?lang=en&v=0.3.1');
     // 其余参数（kind/tab/prefill）原样保留，与旧语义一致。
     win().location.search = '?lang=en&v=0.3.1&kind=audio';
     queue.switchLocale('zh-CN');
+    vi.advanceTimersByTime(700);
     expect(replaced.at(-1)).toBe('file:///C:/app/pages/queue/index.html?v=0.3.1&kind=audio');
+    // 还原引导期状态（href + prefill），不给同文件后续用例留脏 search。
+    win().location.href = 'file:///C:/app/pages/queue/index.html';
+    win().location.search = '?prefill=https%3A%2F%2Fexample.com%2Fwatch%3Fv%3Dabc';
+  });
+
+  it('switchLocale 委托 shell 遮罩（D-244）：标记同步写入、遮罩挂 body、replace 延后、安全网清理', () => {
+    win().location.href = 'file:///C:/app/pages/queue/index.html';
+    win().location.search = '';
+    const replaced: string[] = [];
+    (win().location as { replace?: (url: string) => void }).replace = (url: string) => { replaced.push(url); };
+    queue.switchLocale('en');
+    // 一次性标记在点击时刻同步写入（新页面据此在首帧前铺遮罩）。
+    expect(win().localStorage.getItem('ytvdlt.locale.veil')).not.toBeNull();
+    // 遮罩动态 createElement 挂 body（坑 30：不进静态标记，基线零改动）。
+    const veil = (body().children as UiNode[]).find((c) => c.getAttribute('class') === 'ytv-lang-veil');
+    expect(veil).toBeDefined();
+    expect(veil!.getAttribute('data-active')).toBeNull(); // 此刻仍透明
+    expect(replaced).toEqual([]); // 原有跳转被延后，不再同步执行
+    vi.advanceTimersByTime(16);
+    expect(veil!.getAttribute('data-active')).toBe('true'); // 淡入
+    vi.advanceTimersByTime(150);
+    expect(replaced).toEqual(['file:///C:/app/pages/queue/index.html?lang=en']);
+    // 测试桩不会真的换文档 → 安全网把遮罩淡出移除、标记作废（一次性）。
+    vi.advanceTimersByTime(250);
+    expect(veil!.getAttribute('data-active')).toBe('false');
+    vi.advanceTimersByTime(220);
+    expect((body().children as UiNode[]).some((c) => c.getAttribute('class') === 'ytv-lang-veil')).toBe(false);
+    expect(win().localStorage.getItem('ytvdlt.locale.veil')).toBeNull();
     // 还原引导期状态（href + prefill），不给同文件后续用例留脏 search。
     win().location.href = 'file:///C:/app/pages/queue/index.html';
     win().location.search = '?prefill=https%3A%2F%2Fexample.com%2Fwatch%3Fv%3Dabc';

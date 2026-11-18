@@ -3,10 +3,12 @@
  *
  * Frozen order per ARCHITECTURE-M2 §4.1. M3 (B3) adds ONLY conditional new
  * segments, all driven by `resolveDownloadPlan(req)` (the single decision
- * source). `buildDownload`'s signature, `DownloadContext`, the M2 relative
- * order and `DOWNLOAD_ARGV_FROZEN_ORDER` are UNCHANGED: with a default
- * `DownloadRequest` not a single M3 segment fires, so the hand-written
- * `EXPECTED_MINIMAL` literal still matches element-by-element.
+ * source). `buildDownload`'s signature, `DownloadContext` and the M2 relative
+ * order are UNCHANGED: with a default `DownloadRequest` not a single M3
+ * segment fires. D-245 prepends `CONFIG_ISOLATION_FLAGS` in front of EVERY
+ * argv (both here and in `DOWNLOAD_ARGV_FROZEN_ORDER`), so the hand-written
+ * `EXPECTED_MINIMAL` literal now starts with the two isolation flags and then
+ * still matches element-by-element.
  *
  * Every user-controllable token is sanitized by `sanitizeToken()` in the plan
  * before it enters argv, which keeps `argv.every(e => !/\s/.test(e))` true for
@@ -14,7 +16,7 @@
  */
 import type { DownloadRequest } from '@ytvdlt/shared';
 import { resolveDownloadPlan } from '@ytvdlt/core';
-import { assertHttpUrl } from './argv-builder.js';
+import { assertHttpUrl, CONFIG_ISOLATION_FLAGS } from './argv-builder.js';
 import { assertNoForbiddenOptions } from './argv-compliance.js';
 import { SUBTITLE_MOVES_PREFIX, SUBTITLE_PATHS_PREFIX } from './subtitle-manifest.js';
 import { YTVDLT_PROGRESS_TEMPLATE, PROGRESS_DELTA_SECONDS } from './progress-template.js';
@@ -38,8 +40,13 @@ export interface DownloadContext {
 export const SUBTITLE_PRINT_TEMPLATE = `after_move:${SUBTITLE_PATHS_PREFIX}%(requested_subtitles.:.filepath|[])j`;
 const SUBTITLE_MOVES_TEMPLATE = `post_process:${SUBTITLE_MOVES_PREFIX}%(__files_to_move|{})j`;
 
-/** Documented argument order (tests assert against a literal copy, not this). */
+/**
+ * Documented argument order (tests assert against a literal copy, not this).
+ * D-245: the first two elements are the config/plugin isolation prefix that
+ * EVERY download argv carries in front of the frozen M2 order.
+ */
 export const DOWNLOAD_ARGV_FROZEN_ORDER: readonly string[] = [
+  '--ignore-config', '--no-plugin-dirs',
   '--no-playlist', '--no-warnings', '--newline', '--socket-timeout', '-R',
   '--no-js-runtimes', '--js-runtimes', '--ffmpeg-location',
   '-f', '-S', '-x', '--audio-format', '--audio-multistreams',
@@ -100,8 +107,12 @@ export function buildDownload(req: DownloadRequest, ctx: DownloadContext): strin
 
   const plan = resolveDownloadPlan(req);
   const argv: string[] = [
+    // D-245: the isolation prefix MUST stay the first two elements — before
+    // even the frozen `--no-playlist` (which keeps position 3 for non-batch).
+    ...CONFIG_ISOLATION_FLAGS,
     // M4-4: a batch item needs playlist processing; every other request keeps
-    // the frozen `--no-playlist` element at position 1 (EXPECTED_MINIMAL).
+    // the frozen `--no-playlist` element right after the isolation prefix
+    // (EXPECTED_MINIMAL).
     ...(plan.playlistItems === null
       ? ['--no-playlist']
       : ['--yes-playlist', '--playlist-items', plan.playlistItems]),

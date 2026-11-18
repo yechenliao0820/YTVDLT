@@ -63,6 +63,9 @@ const req = (o: Partial<DownloadRequest> = {}): DownloadRequest => ({
 
 /** The §4.4 eight invariants, asserted for EVERY combination case. */
 function assertInvariants(argv: string[], url = 'https://example.org/v'): void {
+  // D-245: the config/plugin isolation prefix is the first two elements.
+  expect(argv[0]).toBe('--ignore-config');
+  expect(argv[1]).toBe('--no-plugin-dirs');
   expect(argv.filter((x) => x === '--')).toHaveLength(1);
   expect(argv.indexOf('--')).toBe(argv.length - 2);
   expect(argv.at(-1)).toBe(url);
@@ -92,6 +95,8 @@ const RICH_REQUEST: DownloadRequest = req({
 });
 
 const EXPECTED_DOWNLOAD_ARGV: readonly string[] = [
+  // D-245: the config/plugin isolation prefix precedes the frozen M2 order.
+  '--ignore-config', '--no-plugin-dirs',
   '--no-playlist',
   '--no-warnings',
   '--newline',
@@ -114,6 +119,8 @@ const EXPECTED_DOWNLOAD_ARGV: readonly string[] = [
 ];
 
 const EXPECTED_MINIMAL_M3: readonly string[] = [
+  // D-245: the config/plugin isolation prefix precedes the frozen M2 order.
+  '--ignore-config', '--no-plugin-dirs',
   '--no-playlist', '--no-warnings', '--newline', '--socket-timeout', '5',
   '-R', '1', '--no-js-runtimes', '--js-runtimes', 'node:C:/runtime/node.exe',
   '--ffmpeg-location', 'C:/runtime/ffmpeg',
@@ -140,9 +147,11 @@ describe('B3 · literal expectations (EXPECTED_DOWNLOAD_ARGV / EXPECTED_MINIMAL)
     expect(a).not.toBe(b);
   });
 
-  it('DOWNLOAD_ARGV_FROZEN_ORDER is untouched (31 option names + separator)', () => {
-    expect(DOWNLOAD_ARGV_FROZEN_ORDER).toHaveLength(31);
-    expect(DOWNLOAD_ARGV_FROZEN_ORDER[0]).toBe('--no-playlist');
+  it('DOWNLOAD_ARGV_FROZEN_ORDER carries the D-245 prefix + 31 option names + separator', () => {
+    expect(DOWNLOAD_ARGV_FROZEN_ORDER).toHaveLength(33);
+    expect(DOWNLOAD_ARGV_FROZEN_ORDER[0]).toBe('--ignore-config');
+    expect(DOWNLOAD_ARGV_FROZEN_ORDER[1]).toBe('--no-plugin-dirs');
+    expect(DOWNLOAD_ARGV_FROZEN_ORDER[2]).toBe('--no-playlist');
     expect(DOWNLOAD_ARGV_FROZEN_ORDER.at(-1)).toBe('--');
   });
 

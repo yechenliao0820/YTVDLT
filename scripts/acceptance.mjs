@@ -519,7 +519,7 @@ const M3_TEST_FILE_MAP = {
   'task-view.test.ts': ['A-4.4-16'],
   'm5-channels.test.ts': ['A-M5-00', 'A-4.4-16', 'A-D186'],
   'm5-host.test.ts': ['A-M5-00'],
-  'bootstrap.test.ts': ['A-M5-00', 'A-4.1-02', 'A-D147'],
+  'bootstrap.test.ts': ['A-M5-00', 'A-4.1-02', 'A-D147', 'A-D247'],
   'crash-guard.test.ts': ['A-4.5-08'],
   'platform-policy.test.ts': ['A-4.6-07'],
   // M5-4 frozen gate (D-61): one file, both frozen gates.
@@ -533,7 +533,7 @@ const M3_TEST_FILE_MAP = {
   'task-queue-intake.test.ts': ['A-4.4-28', 'A-M4-02'],
   'app-updater.test.ts': ['A-4.4-29'],
   // M5-5 follow-up (D-67): component updates over HTTP + the feed contract.
-  'component-updater.test.ts': ['A-4.4-28', 'A-4.4-29', 'A-D161'],
+  'component-updater.test.ts': ['A-4.4-28', 'A-4.4-29', 'A-D161', 'A-D247'],
   'http-update-source.test.ts': ['A-4.4-28'],
   // D-173…D-187 · 2026-11-14 两轮修复与 UI 覆盖率轮的新测试文件（归属见各 A-Dxxx）。
   'ipc-gateway-config.test.ts': ['A-D175'],
@@ -572,8 +572,14 @@ const M3_TEST_FILE_MAP = {
   'restore-chain-fail-closed.test.ts': ['A-D203'],
   // A-D206 · Windows 真实文件系统符号链接 / junction 安全测试（win-fs-link-security）。
   'win-fs-link-security.test.ts': ['A-D206'],
+  // D-245 · 配置/插件隔离前缀覆盖每一次 yt-dlp spawn（config-isolation-argv）。
+  'config-isolation-argv.test.ts': ['A-D245'],
+  // D-247 · 退出安全：退出路径取消在跑下载 + 有界等待子进程退出证据（shutdown-cancel）；
+  // Alt+F4 语义回归 close→托盘（app-menu / bootstrap 菜单接线）；component-updater
+  // 版本探测补 D-245 前缀。四处测试文件共享同一条 A-D247 断言。
+  'shutdown-cancel.test.ts': ['A-D247'],
   // 0.2.1 (D-91…D-94, D-97): menu wiring, GitHub-release app update, engine check.
-  'app-menu.test.ts': ['A-M5-00'],
+  'app-menu.test.ts': ['A-M5-00', 'A-D247'],
   'app-update.test.ts': ['A-4.4-29'],
   'app-update-service.test.ts': ['A-4.4-29'],
   // 0.2.2 (D-101): repeated downloads get a numbered name instead of an error.
@@ -1453,6 +1459,21 @@ const M5_ASSERTIONS = [
   // D-207 预检关闭（A-2b/A-2c/A-2d 为严格拒绝断言），TOCTOU 竞态登记为已知边界不做抖动测试。
   { id: 'A-D206', layer: 'L1', subject: 'Windows 真实文件系统链接安全（D-203 删除守卫 + D-204 realpath 打开守卫）：指向根外的目录 junction / 悬空 junction / junction 循环在删除面一律拒绝（符号链接/联接无法验证归属、trashItem spy 零误收、目标文件完好、悬空不误入 missing 幂等分支）；打开面经真实 realpath 解析最终目标后重过 containment——junction 指向根外/循环 → REFUSED（含「符号链接/联接」「无法证明路径安全」），指向根内/大小写变体/\\?\\ 前缀 → OK 且 shell 收到原始路径，悬空链接 → FILE_MISSING/目录回退而非安全拒绝；能力探测（文件符号链接 EPERM、UNC 管理员共享稳定性）驱动受限用例显式 ctx.skip 且每个 describe 保留永远执行的探测用例；删除面「中间 junction」逃逸（产物字符串在根内、末段 lstat 穿透）已由 D-207 预检关闭——realpath 解析到根外/父目录不可解析 → 整批拒绝、回收站零调用、记录保留，stat→trashItem TOCTOU 竞态登记为不测边界', tests: ['win-fs-link-security'], needs: ['vitest'], evidence: ['reports/vitest-results.json::win-fs-link-security.test.ts', 'apps/desktop/src/main/adapters/local-file-status-port.ts::createTrashFilesPort', 'packages/core/src/task-detail/task-detail.ts::resolveRealPath', 'apps/desktop/src/main/adapters/node-ports.ts::realpath'] },
   { id: 'A-D228', layer: 'L1', subject: '更新链路传输层的专属离线单测（D-214 遗留缺口）：代理解析含 SOCKS 无尾斜杠写法、HTTPS 降级/环路/策略拒绝的重定向守卫、一配置一 Session 与创建 Promise 缓存、session 建立失败可重试、login 只在固定代理模式安装且只答匹配的代理端点、体积上限', tests: ['electron-update-network'], needs: ['vitest'], evidence: ['reports/vitest-results.json::electron-update-network.test.ts', 'apps/desktop/src/main/adapters/electron-update-network.ts::parseUpdateProxy', 'apps/desktop/src/main/adapters/electron-update-network.ts::evaluateRedirectHop', 'docs/DECISIONS.md::D-228'] },
+  // D-245 · 外部在线审计：yt-dlp 子进程未隔离默认配置/插件加载。修复后所有
+  // builder 与引擎 spawn 的 argv 都以 --ignore-config --no-plugin-dirs 开头
+  // （用户显式 --config-locations 仍被 M3_FORBIDDEN_OPTIONS 与 core 白名单拒绝）。
+  { id: 'A-D245', layer: 'L1', subject: '配置/插件隔离前缀覆盖每一次 yt-dlp spawn：CONFIG_ISOLATION_FLAGS 恒为 --ignore-config --no-plugin-dirs，三个 argv builder（probe/下载/自定义模板）与引擎六个 spawn 点（version/probe/probePlaylist/listExtractors/checkUrlSupport/download 流式）以及 SelfUpdater 的 yt-dlp.exe 版本探测全部以前缀开头（aria2c.exe 除外——它不认识 yt-dlp 的旗标），--config-locations 维持禁用', tests: ['config-isolation-argv'], needs: ['vitest'], evidence: ['reports/vitest-results.json::config-isolation-argv.test.ts', 'packages/engine-ytdlp/src/argv-builder.ts::CONFIG_ISOLATION_FLAGS', 'packages/engine-ytdlp/src/argv-compliance.ts::ALLOWED_DOWNLOAD_OPTIONS', 'docs/DECISIONS.md::D-245'] },
+  // D-247 · 外部在线审计：菜单「退出」/Alt+F4 不检查活跃下载——退出直接结束
+  // 进程，yt-dlp 子进程变孤儿继续跑。修复后：真退出（before-quit 首段）先经
+  // TaskQueue 公开 cancel API 取消在跑/排队任务，再有界等待（总预算 5s）队列
+  // 槽位清空作为子进程退出证据（坑 27），超预算放行退出并记 WARNING；取消的
+  // 任务落 Canceled、重启后由用户手动重试（D-209 口径）；第二次 before-quit
+  // 直通语义（cleanupStarted）与 close→托盘（D-60/D-197）一字未动；「退出」
+  // 菜单项不再携带 Alt+F4 accelerator（系统 Alt+F4 回归 WM_CLOSE → close →
+  // close→托盘，与点 X 一致；macOS 保留 Cmd+Q）；component-updater 的
+  // installedVersion 为 yt-dlp.exe 版本探测补 D-245 前缀（aria2c 保持裸
+  // --version，按文件名分支镜像 self-updater.ts）。
+  { id: 'A-D247', layer: 'L1', subject: '退出安全（D-247）：shutdownCancelTargets 收集活跃+排队任务且不碰恢复未启动记录；cancelRunningTasksForShutdown 对每个目标调用既有 queue.cancel（逐任务隔离拒绝）、在假时钟下等待 activeTaskIds 清空作为子进程退出证据、预算 5000ms 到期放行并如实报告 stillActive、无在跑任务零 cancel 零等待、D-242 写失败拒绝不阻断退出；app-menu 纯模型与 bootstrap 安装菜单（中英两份、含 did-finish-load 重建）的「退出/Quit」均不再携带 Alt+F4 accelerator 且点击仍执行真退出（macOS 保留 Cmd+Q）；component-updater 的 status/check 版本探测 argv 按 yt-dlp.exe 分支携带 --ignore-config --no-plugin-dirs 前缀、aria2c.exe 保持裸 --version、版本结果不受前缀影响', tests: ['shutdown-cancel', 'app-menu', 'bootstrap', 'component-updater'], needs: ['vitest'], evidence: ['reports/vitest-results.json::shutdown-cancel.test.ts', 'apps/desktop/src/main/shutdown-cancel.ts::cancelRunningTasksForShutdown', 'apps/desktop/src/main/electron-entry.ts::before-quit', 'apps/desktop/src/main/app-menu.ts::buildAppMenu', 'apps/desktop/src/main/component-updater.ts::installedVersion'] },
 ];
 
 /** M5 e2e cases that must exist and pass for the visual assertions. */

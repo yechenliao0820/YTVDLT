@@ -778,6 +778,143 @@ describe('D-187 · app-nav：队列页导航条注入（D-106）', () => {
   });
 });
 
+describe('D-244 · app-nav：语言切换过渡遮罩（localeReload / localeVeilConsume）', () => {
+  // D-244：switchLocale 的整页重载（D-141 语义不变）外包一层 D-217 同款遮罩。
+  // 两个豁免（case= 夹具 URL、reduced-motion）保证 e2e 基线零改动、减动效用户
+  // 行为与旧版完全一致。
+  const veilInBody = (): boolean =>
+    (doc().body.children as UiNode[]).some((c) => c.getAttribute('id') === 'ytvdlt-lang-veil');
+  const veilOf = (): UiNode | undefined =>
+    (doc().body.children as UiNode[]).find((c) => c.getAttribute('id') === 'ytvdlt-lang-veil');
+  /** app-nav 的标记走 viewStore()（sessionStorage 主存，localStorage 兜底）。 */
+  const seedSession = (): Map<string, string> => {
+    const data = new Map<string, string>();
+    win().sessionStorage = {
+      getItem: (key: string) => (data.has(key) ? (data.get(key) as string) : null),
+      setItem: (key: string, value: string) => { data.set(key, String(value)); },
+      removeItem: (key: string) => { data.delete(key); },
+    };
+    return data;
+  };
+
+  afterEach(() => {
+    // 遮罩可能被假 timer 钉在 body 上：推进一个完整生命周期冲干净再还原现场。
+    vi.advanceTimersByTime(800);
+    win().location.href = 'file:///C:/app/pages/queue/index.html?v=9.9.9';
+    win().location.search = '?v=9.9.9';
+    win().sessionStorage = undefined;
+    delete (win().location as any).replace;
+    doc().documentElement.removeAttribute('data-motion');
+  });
+
+  it('localeReload 接管：标记同步写入、遮罩下一帧淡入、replace 延后到 hold 结束', () => {
+    const data = seedSession();
+    const replaced: string[] = [];
+    (win().location as any).replace = (url: string) => { replaced.push(url); };
+    expect(navRef.localeReload('file:///C:/app/pages/queue/index.html?lang=en')).toBe(true);
+    expect(data.get('ytvdlt.locale.veil')).not.toBeUndefined(); // 一次性标记已写入
+    expect(veilInBody()).toBe(true);
+    const veil = veilOf()!;
+    expect(veil.getAttribute('class')).toBe('ytv-lang-veil');
+    expect(veil.getAttribute('data-active')).toBeNull(); // 插入时透明，下一帧才淡入
+    expect(replaced).toEqual([]); // 原有跳转被延后，不再同步执行
+    vi.advanceTimersByTime(16);
+    expect(veil.getAttribute('data-active')).toBe('true'); // CSS 淡入开始
+    vi.advanceTimersByTime(150);
+    expect(replaced).toEqual(['file:///C:/app/pages/queue/index.html?lang=en']); // hold 结束才重载
+    // 安全网：测试桩不会真的换文档 → 遮罩淡出移除、标记作废（一次性语义）。
+    vi.advanceTimersByTime(250);
+    expect(veil.getAttribute('data-active')).toBe('false');
+    vi.advanceTimersByTime(220);
+    expect(veilInBody()).toBe(false);
+    expect(data.has('ytvdlt.locale.veil')).toBe(false);
+  });
+
+  it('case= 夹具 URL 豁免：不接管、无遮罩、无标记（e2e 基线零改动）', () => {
+    const data = seedSession();
+    win().location.href = 'file:///C:/app/pages/settings/index.html?case=settings-en-dark&lang=en';
+    win().location.search = '?case=settings-en-dark&lang=en';
+    expect(navRef.localeReload('file:///C:/app/pages/settings/index.html?case=x&lang=en')).toBe(false);
+    expect(veilInBody()).toBe(false);
+    expect(data.size).toBe(0);
+  });
+
+  it('reduced-motion 跳过动画：清残标、立即放行、无遮罩（html[data-motion] 与媒体查询两条路）', () => {
+    const data = seedSession();
+    data.set('ytvdlt.locale.veil', 'stale'); // 上一轮残标
+    doc().documentElement.setAttribute('data-motion', 'reduced');
+    expect(navRef.localeReload('file:///C:/app/pages/queue/index.html?lang=en')).toBe(false);
+    expect(veilInBody()).toBe(false);
+    expect(data.has('ytvdlt.locale.veil')).toBe(false); // 残标被清掉，重载立即发生
+    // 系统级 prefers-reduced-motion（应用属性缺席时）同样跳过。
+    doc().documentElement.removeAttribute('data-motion');
+    const originalMatch = win().matchMedia;
+    win().matchMedia = (query: string) => ({
+      matches: query === '(prefers-reduced-motion: reduce)',
+      addEventListener() { /* noop */ },
+      addListener() { /* noop */ },
+    });
+    try {
+      expect(navRef.localeReload('file:///C:/app/pages/queue/index.html?lang=en')).toBe(false);
+      expect(veilInBody()).toBe(false);
+    } finally {
+      win().matchMedia = originalMatch;
+    }
+  });
+
+  it('无桥（静态预览 / e2e）不接管不挂遮罩——与 fs-veil 同一 live-only 门', () => {
+    const data = seedSession();
+    const original = win().ytvdltBridge;
+    delete win().ytvdltBridge;
+    try {
+      expect(navRef.localeReload('file:///C:/app/pages/queue/index.html?lang=en')).toBe(false);
+      expect(veilInBody()).toBe(false);
+      expect(data.size).toBe(0);
+    } finally {
+      win().ytvdltBridge = original;
+    }
+  });
+
+  it('localeVeilConsume：无标记不挂；有标记先消费再首帧铺不透明遮罩，reveal 后淡出移除', () => {
+    const data = seedSession();
+    // ① 无标记的正常启动：绝不出现遮罩。
+    navRef.localeVeilConsume();
+    expect(veilInBody()).toBe(false);
+    // ② 有标记：删除标记（一次性）→ 以不透明状态挂遮罩（赶在首帧前）。
+    data.set('ytvdlt.locale.veil', String(Date.now()));
+    navRef.localeVeilConsume();
+    expect(data.has('ytvdlt.locale.veil')).toBe(false); // 已消费，即使后续失败也不会二次触发
+    expect(veilInBody()).toBe(true);
+    const veil = veilOf()!;
+    expect(veil.getAttribute('data-active')).toBe('true'); // 首帧即不透明，无淡入
+    vi.advanceTimersByTime(80);
+    expect(veil.getAttribute('data-active')).toBe('false'); // reveal 期结束开始淡出
+    vi.advanceTimersByTime(220);
+    expect(veilInBody()).toBe(false);
+    // ③ 再次消费：标记已经没了，不再挂第二层。
+    navRef.localeVeilConsume();
+    expect(veilInBody()).toBe(false);
+  });
+
+  it('localeVeilConsume 豁免：case= 夹具 URL 与 reduced-motion 都只消费不挂遮罩', () => {
+    const data = seedSession();
+    win().location.href = 'file:///C:/app/pages/queue/index.html?case=queue-en&lang=en';
+    win().location.search = '?case=queue-en&lang=en';
+    data.set('ytvdlt.locale.veil', '1');
+    navRef.localeVeilConsume();
+    expect(data.has('ytvdlt.locale.veil')).toBe(false); // 标记仍被一次性消费
+    expect(veilInBody()).toBe(false);                   // 但夹具页面没有遮罩
+    doc().documentElement.setAttribute('data-motion', 'reduced');
+    try {
+      data.set('ytvdlt.locale.veil', '1');
+      navRef.localeVeilConsume();
+      expect(veilInBody()).toBe(false);
+    } finally {
+      doc().documentElement.removeAttribute('data-motion');
+    }
+  });
+});
+
 describe('D-187 · app-nav：pageUrl / go / saveView / restoreView（D-106 / D-114）', () => {
   afterEach(() => {
     win().location.href = 'file:///C:/app/pages/queue/index.html?v=9.9.9';
