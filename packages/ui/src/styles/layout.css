@@ -180,6 +180,29 @@ html body #queue-fullscreen { display: none; }
   transition: none;
 }
 
+/* ---------- D-244: language-switch transition veil (live-only) ---------------
+ * Mounted by shell/app-nav.js only around a real language reload (D-141 keeps
+ * the full-page reload; this only softens its optics): the clicking page fades
+ * it in over ~150 ms and navigates while opaque, the booting page mounts it
+ * opaque before the first paint and fades it out. Unlike the fs veil there is
+ * no `transition: none` on the active state — the fade-IN must animate too.
+ * Never mounts for `case=` fixture URLs (e2e baselines untouched) nor under
+ * reduced motion; colours follow the theme background variable, so neither
+ * theme flashes white. */
+.ytv-lang-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  background: var(--bg, #eef2f6);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease-out;
+}
+.ytv-lang-veil[data-active="true"] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 html body .settings-page {
   padding: var(--sp-page) var(--sp-inline) 12px;
   gap: calc(12px + var(--ui-step));

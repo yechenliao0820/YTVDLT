@@ -112,7 +112,18 @@ export function buildAppMenu(context: AppMenuContext): readonly AppMenuItem[] {
         click: () => { context.showWindow(); },
       },
       { type: 'separator' },
-      { label: L.quit, accelerator: isMac ? 'Cmd+Q' : 'Alt+F4', click: () => { context.quit(); } },
+      // D-247: the Windows quit item carries NO accelerator any more. The old
+      // `Alt+F4` hijacked the OS window-close chord INSIDE the app menu, so
+      // Alt+F4 ran `context.quit()` directly instead of falling through to
+      // WM_CLOSE -> the `close` event -> the D-60 close-to-tray policy
+      // (D-197 preventDefault+hide). Without the accelerator Alt+F4 behaves
+      // exactly like clicking X: with a tray the app hides and downloads keep
+      // running; quitting stays an explicit 「退出」/ tray action (and the real
+      // quit path now cancels in-flight downloads — D-247 in electron-entry).
+      // macOS keeps Cmd+Q: the menu-driven quit there is the platform
+      // convention and the quit path is safe since D-247.
+      ...(isMac ? [{ label: L.quit, accelerator: 'Cmd+Q', click: () => { context.quit(); } }]
+        : [{ label: L.quit, click: () => { context.quit(); } }]),
     ],
   };
 

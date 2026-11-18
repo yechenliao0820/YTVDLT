@@ -254,9 +254,14 @@ live 模式下注入，所以不会出现在这些静态截图里。）
 | **0.3.1** | **2026-11-15** | 0.3.0 之后全部增量，经真机验证：出站连接 DNS 钉扎、每页 CSP + 会话权限一律拒绝、配置原子写入与损坏快照备份、配置域白名单、URL 预检可取消、首启跟随系统语言、深链预填修复、下载目录盘符根拒绝、校验超时如实记 SKIPPED | D-140…D-213 | [v0.3.1](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.1) |
 
 0.3.2 已发布，到 D-243 为止的工作全部在包里：第二轮在线审计的六条无痕与持久化
-缺陷（D-239…D-243），以及第一轮审计的修复（D-234…D-238）。当前没有待发版的
-内容。明细见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) 与
-[`docs/DECISIONS.md`](docs/DECISIONS.md)（已到 D-243）。
+缺陷（D-239…D-243），以及第一轮审计的修复（D-234…D-238）。明细见
+[`docs/CHANGELOG.md`](docs/CHANGELOG.md) 与 [`docs/DECISIONS.md`](docs/DECISIONS.md)。
+
+0.3.2 之后的工作**尚未发版**（D-244…D-249）：语言整页重载的过渡遮罩；每次
+yt-dlp spawn 都带 `--ignore-config --no-plugin-dirs`，让散落的用户/便携配置与插件
+目录无法绕过 argv 白名单；配置读取不再信任存在性探测；退出前取消在跑下载并有界
+等待退出证据（`Alt+F4` 归还原生关窗路径）；文件状态批量探测单飞且有并发上界；
+命令模板存储在覆盖损坏文件前先做字节级备份。
 
 版本流水见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)，每条决策的现象 / 根因 /
 取舍 / 验证见 [`docs/DECISIONS.md`](docs/DECISIONS.md)。

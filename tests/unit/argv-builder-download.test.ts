@@ -52,6 +52,9 @@ const req = (overrides: Partial<DownloadRequest> = {}): DownloadRequest => ({
 
 /** Hand-written expectation for the minimal request. */
 const EXPECTED_MINIMAL: readonly string[] = [
+  // D-245: the config/plugin isolation prefix precedes the frozen M2 order.
+  '--ignore-config',
+  '--no-plugin-dirs',
   '--no-playlist',
   '--no-warnings',
   '--newline',
@@ -190,8 +193,9 @@ describe('A-M2-25 buildDownload · optional segments', () => {
   });
 });
 
-// M3 append-only (F064): the 9 frozen assertions and EXPECTED_MINIMAL above
-// are deliberately left byte-for-byte unchanged.
+// M3 append-only (F064): the 9 frozen assertions above are deliberately kept
+// at full strength; D-245 extended EXPECTED_MINIMAL with the two isolation
+// flags in front (positions 1-2) — nothing else in the literal changed.
 describe('M3 buildDownload · conditional segments do not disturb the frozen minimal', () => {
   it('default request still equals the hand-written minimal literal', () => {
     expect(buildDownload(req(), CTX)).toEqual([...EXPECTED_MINIMAL]);

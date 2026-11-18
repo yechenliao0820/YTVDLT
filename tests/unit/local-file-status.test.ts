@@ -170,3 +170,140 @@ describe('D-120 · on-demand probe, cache and recovery', () => {
     expect(f.statCalls()).toBe(6);
   });
 });
+
+/**
+ * D-248 · single flight and bounded concurrency.
+ *
+ * A `stat` on a disconnected network drive hangs for the OS timeout. The queue
+ * polls `TASK_LIST` every 0.4 s / 1.2 s and action handlers fire extra forced
+ * refreshes, so per-call fresh batches used to stack one full batch of pending
+ * stats on top of the last, without bound. The port now runs at most ONE batch
+ * round at a time, with at most 4 stat calls pending inside it.
+ */
+function hangingFixture(initial: Record<string, StatOutcome> = {}) {
+  const table: Record<string, StatOutcome> = { ...initial };
+  let clock = 1_000;
+  let calls = 0;
+  let pending = 0;
+  let peak = 0;
+  const hung: Array<{ path: string; release: (value: StatOutcome) => void }> = [];
+  const fallback = (path: string): StatOutcome => (path.includes('.') ? { kind: 'file' } : { kind: 'dir' });
+  const probe = createLocalFileStatusProbe({
+    stat: (path: string) => {
+      calls += 1;
+      pending += 1;
+      peak = Math.max(peak, pending);
+      return new Promise<StatOutcome>((resolve) => {
+        hung.push({ path, release: (value) => { pending -= 1; resolve(value); } });
+      });
+    },
+    now: () => clock,
+    cacheTtlMs: 1000,
+  });
+  return {
+    probe: (tasks: readonly { id: string; state: string; artifacts: readonly string[] }[], force?: boolean) =>
+      probe.probe(tasks, force),
+    probeTask: (task: { id: string; state: string; artifacts: readonly string[] }) => probe.probeTask(task),
+    table,
+    setTable: (path: string, outcome: StatOutcome) => { table[path] = outcome; },
+    statCalls: () => calls,
+    inFlight: () => pending,
+    peakInFlight: () => peak,
+    /** Resolves every hung stat with the CURRENT table value for its path. */
+    releaseAll: () => {
+      for (const hang of hung.splice(0)) hang.release(table[hang.path] ?? fallback(hang.path));
+    },
+    tick: (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 0); }),
+    advance: (ms: number) => { clock += ms; },
+  };
+}
+
+describe('D-248 · single flight and bounded concurrency', () => {
+  it('overlapping probes share ONE round while the stats hang', async () => {
+    const f = hangingFixture();
+    const tasks = [completed('t1'), completed('t2')];
+    const first = f.probe(tasks);
+    const second = f.probe(tasks); // overlaps the still-running first round
+    await f.tick();
+    // One round: 2 workers × 1 file stat each. A second independent round
+    // would have started 2 more stat calls on top of the hung ones.
+    expect(f.statCalls()).toBe(2);
+    expect(f.inFlight()).toBe(2);
+    f.releaseAll(); // file stats land, the dir stats are issued next
+    await f.tick();
+    expect(f.statCalls()).toBe(4);
+    f.releaseAll(); // dir stats land, the round completes
+    const [roundOne, roundTwo] = await Promise.all([first, second]);
+    expect(roundTwo).toBe(roundOne); // the second caller got the SAME round result
+    expect(f.statCalls()).toBe(4); // 8 would mean two independent rounds
+  });
+
+  it('keeps at most 4 stat calls pending inside one round', async () => {
+    const f = hangingFixture();
+    const tasks = Array.from({ length: 12 }, (_, index) =>
+      completed(`t${index}`, [`C:/Videos/v${index}.mp4`]));
+    const running = f.probe(tasks);
+    await f.tick();
+    expect(f.inFlight()).toBe(4); // pool saturated exactly — not 12 × 2 = 24
+    // 12 tasks × 2 sequential stats = 24 stats, released in waves of 4.
+    for (let wave = 0; wave < 6; wave += 1) {
+      expect(f.inFlight()).toBe(4);
+      f.releaseAll();
+      await f.tick();
+    }
+    const result = await running;
+    expect(Object.keys(result)).toHaveLength(12);
+    expect(f.statCalls()).toBe(24);
+    expect(f.peakInFlight()).toBe(4);
+  });
+
+  it('a forced probe waits out the running round, then re-stats and overwrites the cache', async () => {
+    const f = hangingFixture({
+      'C:/Videos/clip.mp4': { kind: 'file' },
+      'C:/Videos': { kind: 'dir' },
+    });
+    const tasks = [completed('t1')];
+    const first = f.probe(tasks); // hangs on the batch file stat
+    const forced = f.probe(tasks, true); // must NOT be answered by the running round
+    await f.tick();
+    expect(f.statCalls()).toBe(1); // the forced call started NO second batch early
+    let forcedDone = false;
+    forced.then(() => { forcedDone = true; });
+    f.releaseAll(); // round 1 file stat lands, dir stat issued
+    await f.tick();
+    expect(f.statCalls()).toBe(2);
+    f.releaseAll(); // round 1 completes; the queued forced round starts
+    await f.tick();
+    expect(f.statCalls()).toBe(3);
+    expect(forcedDone).toBe(false); // never answered by the earlier round
+    f.setTable('C:/Videos/clip.mp4', { kind: 'error', code: 'ENOENT' });
+    f.releaseAll(); // forced file stat lands (ENOENT), dir stat issued
+    await f.tick();
+    expect(f.statCalls()).toBe(4);
+    expect(forcedDone).toBe(false);
+    f.releaseAll(); // forced dir stat lands, forced round completes
+    const fresh = await forced;
+    expect(fresh['t1']).toEqual({ status: 'missing', dirStatus: 'present' });
+    // The forced round OVERWROTE the cache: a plain probe now reports the new
+    // state without a single additional stat call.
+    const cached = await f.probe(tasks);
+    expect(cached['t1']).toEqual({ status: 'missing', dirStatus: 'present' });
+    expect(f.statCalls()).toBe(4);
+  });
+
+  it('probeTask does not queue behind a hanging round', async () => {
+    const f = hangingFixture({ 'C:/Videos/clip.mp4': { kind: 'file' }, 'C:/Videos': { kind: 'dir' } });
+    const round = f.probe([completed('t1')]); // the batch stat hangs
+    await f.tick();
+    const before = f.statCalls();
+    const observed = f.probeTask(completed('t1')); // must stat right away
+    await f.tick();
+    expect(f.statCalls()).toBe(before + 2); // both pair stats issued immediately
+    f.releaseAll(); // lands the hung batch stat AND the whole probeTask pair
+    await f.tick();
+    expect(await observed).toEqual({ status: 'present', dirStatus: 'present' });
+    f.releaseAll(); // lands the batch dir stat, round completes
+    await round;
+    expect(f.statCalls()).toBe(4); // 2 (batch) + 2 (probeTask), never re-batched
+  });
+});

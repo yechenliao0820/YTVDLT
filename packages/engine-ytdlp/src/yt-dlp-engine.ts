@@ -26,7 +26,7 @@ import {
 } from '@ytvdlt/shared';
 import type { ILogger, IErrorMapper } from '@ytvdlt/core';
 import { classifyArtifact } from '@ytvdlt/core';
-import { build } from './argv-builder.js';
+import { build, CONFIG_ISOLATION_FLAGS } from './argv-builder.js';
 import { buildDownload } from './argv-builder-download.js';
 import { toMediaInfo, toPlaylistInfo } from './json-mapper.js';
 import { parseProgressChunk } from './progress-parser.js';
@@ -158,15 +158,20 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
   }
 
   async version(): Promise<string> {
-    const result = await this.deps.ports.process.spawn(this.deps.enginePath, ['--version'], {
-      ...this.spawnBase([this.ffmpegDir()]),
-      timeoutMs: 30_000,
-      // D-133: `--version` prints one short line; a bounded spawn keeps it out of
-      // the unbounded path for free (the ceiling can never be reached in
-      // practice — it exists so every bounded metadata job looks the same).
-      maxStdoutBytes: METADATA_MAX_STDOUT_BYTES,
-      maxStderrBytes: METADATA_MAX_STDERR_BYTES,
-    });
+    // D-245: even `--version` inherits default config loading; keep the
+    // isolation prefix first (a broken user config must not break the probe).
+    const result = await this.deps.ports.process.spawn(
+      this.deps.enginePath,
+      [...CONFIG_ISOLATION_FLAGS, '--version'],
+      {
+        ...this.spawnBase([this.ffmpegDir()]),
+        timeoutMs: 30_000,
+        // D-133: `--version` prints one short line; a bounded spawn keeps it out of
+        // the unbounded path for free (the ceiling can never be reached in
+        // practice — it exists so every bounded metadata job looks the same).
+        maxStdoutBytes: METADATA_MAX_STDOUT_BYTES,
+        maxStderrBytes: METADATA_MAX_STDERR_BYTES,
+      });
     if (!probeSucceeded(result)) return '';
     return result.stdout.trim().split(/\r?\n/)[0] ?? '';
   }
@@ -744,7 +749,8 @@ export class YtDlpEngine implements DownloadEngine, SiteDiscovery {
    * that a caller might catch and paper over.
    */
   async listExtractors(): Promise<ExtractorCatalogResult> {
-    const argv = ['--list-extractors'];
+    // D-245: the isolation prefix rides on every engine spawn, this one too.
+    const argv = [...CONFIG_ISOLATION_FLAGS, '--list-extractors'];
     const spawnOptions = {
       ...this.spawnBase([this.ffmpegDir()]),
       timeoutMs: 30_000,

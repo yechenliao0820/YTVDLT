@@ -153,6 +153,12 @@
       try { bridge.invoke('ytvdlt:settings:set', { language: locale }); } catch (error) { /* offline */ }
     }
     try { if (global.localStorage) global.localStorage.setItem('ytvdlt.locale', locale); } catch (error) { /* offline */ }
+    // D-244: same reload, shared shell veil. localeReload returns true only
+    // when it took over (live bridge, non-fixture URL, motion allowed); the
+    // plain replace below is the unchanged fallback for every decline and for
+    // sandboxes without shell/app-nav.js.
+    var nav = global.YTVDLTNav;
+    if (nav && typeof nav.localeReload === 'function' && nav.localeReload(next) === true) return;
     if (global.location && typeof global.location.replace === 'function') global.location.replace(next);
   }
 

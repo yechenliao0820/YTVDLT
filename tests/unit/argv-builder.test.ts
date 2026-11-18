@@ -20,6 +20,8 @@ const request = (overrides: Partial<ProbeRequest> = {}, opts: Partial<ProbeOptio
 });
 
 const EXPECTED_BASE = [
+  // D-245: the config/plugin isolation prefix precedes every fixed option.
+  '--ignore-config', '--no-plugin-dirs',
   '-J', '--dump-single-json', '--no-playlist', '--no-warnings',
   '--socket-timeout', '5', '-R', '1',
   '--no-js-runtimes', '--js-runtimes', `node:${NODE}`,
@@ -30,6 +32,7 @@ describe('A-INF-05 ArgvBuilder · frozen argv order', () => {
     const argv = build(request());
     expect(argv).toEqual([...EXPECTED_BASE, '--', 'https://example.org/watch?v=abc']);
     expect(FROZEN_PROBE_PREFIX).toEqual([
+      '--ignore-config', '--no-plugin-dirs',
       '-J', '--dump-single-json', '--no-playlist', '--no-warnings',
       '--socket-timeout', '5', '-R', '1', '--no-js-runtimes',
     ]);
@@ -67,6 +70,7 @@ describe('A-INF-05 ArgvBuilder · frozen argv order', () => {
 
   it('honours timeoutMs / retries and the noPlaylist=false branch', () => {
     expect(build(request({}, { timeoutMs: 12_000, retries: 3 }))).toEqual([
+      '--ignore-config', '--no-plugin-dirs',
       '-J', '--dump-single-json', '--no-playlist', '--no-warnings',
       '--socket-timeout', '12', '-R', '3',
       '--no-js-runtimes', '--js-runtimes', `node:${NODE}`,
@@ -74,7 +78,7 @@ describe('A-INF-05 ArgvBuilder · frozen argv order', () => {
     ]);
     const withoutNoPlaylist = build(request({}, { noPlaylist: false }));
     expect(withoutNoPlaylist).not.toContain('--no-playlist');
-    expect(withoutNoPlaylist[2]).toBe('--no-warnings');
+    expect(withoutNoPlaylist[4]).toBe('--no-warnings');
   });
 
   it('omits optional network options when empty / undefined', () => {
@@ -85,8 +89,8 @@ describe('A-INF-05 ArgvBuilder · frozen argv order', () => {
 
   it('clamps non-positive timeout/retries to safe values', () => {
     const argv = build(request({}, { timeoutMs: 0, retries: -5 }));
-    expect(argv[5]).toBe('1');
-    expect(argv[7]).toBe('0');
+    expect(argv[7]).toBe('1');
+    expect(argv[9]).toBe('0');
   });
 });
 

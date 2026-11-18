@@ -123,9 +123,12 @@ describe('M4-4 · argv contract', () => {
     const record = build(['a3']).records[0];
     if (record?.request === null || record?.request === undefined) throw new Error('missing request');
     const argv = buildDownload(record.request, CTX);
-    expect(argv[0]).toBe('--yes-playlist');
-    expect(argv[1]).toBe('--playlist-items');
-    expect(argv[2]).toBe('3');
+    // D-245: the isolation prefix occupies the first two positions.
+    expect(argv[0]).toBe('--ignore-config');
+    expect(argv[1]).toBe('--no-plugin-dirs');
+    expect(argv[2]).toBe('--yes-playlist');
+    expect(argv[3]).toBe('--playlist-items');
+    expect(argv[4]).toBe('3');
     expect(argv).not.toContain('--no-playlist');
     expect(argv.filter((x) => x === '--playlist-items')).toHaveLength(1);
     expect(argv.at(-1)).toBe(PLAYLIST.webpage_url);
@@ -133,7 +136,10 @@ describe('M4-4 · argv contract', () => {
 
   it('a normal single-video request is byte-for-byte unchanged', () => {
     const argv = buildDownload(baseRequest(), CTX);
-    expect(argv[0]).toBe('--no-playlist');
+    // D-245: the isolation prefix occupies the first two positions.
+    expect(argv[0]).toBe('--ignore-config');
+    expect(argv[1]).toBe('--no-plugin-dirs');
+    expect(argv[2]).toBe('--no-playlist');
     expect(argv).not.toContain('--yes-playlist');
     expect(argv).not.toContain('--playlist-items');
   });
@@ -144,7 +150,7 @@ describe('M4-4 · argv contract', () => {
       advanced: { ...baseRequest().advanced, playlistItems: '1; rm -rf /' },
     };
     const argv = buildDownload(request, CTX);
-    expect(argv[0]).toBe('--no-playlist');
+    expect(argv[2]).toBe('--no-playlist');
     expect(argv).not.toContain('--playlist-items');
   });
 });

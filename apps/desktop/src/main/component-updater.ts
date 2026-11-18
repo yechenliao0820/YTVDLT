@@ -34,7 +34,7 @@ import type {
 import type { ILogger } from '@ytvdlt/core';
 import { compareVersions } from '@ytvdlt/core';
 import {
-  HttpUpdateSource, SelfUpdater, normalizeToolVersion,
+  CONFIG_ISOLATION_FLAGS, HttpUpdateSource, SelfUpdater, normalizeToolVersion,
 } from '@ytvdlt/engine-ytdlp';
 import { isTrustedReleaseHost } from './github-releases.js';
 
@@ -256,7 +256,18 @@ export function createComponentUpdater(deps: ComponentUpdaterDeps): ComponentUpd
 
   const installedVersion = async (path: string): Promise<string> => {
     try {
-      const run = await ports.process.spawn(path, ['--version'], {
+      // D-245 parity (D-247 backfill for apps/desktop): a version probe of
+      // yt-dlp.exe must carry the CONFIG_ISOLATION_FLAGS prefix, exactly like
+      // SelfUpdater's own probe and every engine spawn — otherwise a stray
+      // yt-dlp config / plugin dir next to the binary (or in the user profile)
+      // could slow, break or alter the `--version` answer the update check
+      // trusts. aria2c does not know yt-dlp's flags — its probe stays a bare
+      // `--version`. The branch is by file name, mirroring self-updater.ts.
+      const fileName = path.split(/[\\/]/).pop() ?? '';
+      const versionArgv = fileName === 'yt-dlp.exe'
+        ? [...CONFIG_ISOLATION_FLAGS, '--version']
+        : ['--version'];
+      const run = await ports.process.spawn(path, versionArgv, {
         shell: false, windowsHide: true, timeoutMs: 15_000,
       });
       return normalizeToolVersion(run.stdout ?? '');

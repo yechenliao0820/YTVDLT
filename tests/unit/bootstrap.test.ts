@@ -693,6 +693,27 @@ describe('bootstrap · 中文应用菜单（D-82）', () => {
       .toEqual(['文件(&F)', '编辑(&E)', '视图(&V)', '窗口(&W)', '设置(&S)']);
     handle?.dispose();
   });
+
+  // D-247 integration pin: whatever app-menu.ts builds, the INSTALLED menu
+  // (built here through the real bootstrap wiring, both locales, including the
+  // did-finish-load rebuild) must not carry Alt+F4 on 「退出」/ Quit — the
+  // accelerator used to hijack the OS chord away from the D-60 close-to-tray
+  // semantics. app-menu.test.ts pins the pure model; this pins the wiring.
+  it('installed app menu carries no Alt+F4 accelerator on the quit item (D-247)', async () => {
+    for (const locale of ['zh-CN', 'en'] as const) {
+      const { electron, log } = fakeElectron();
+      const { host } = fakeHost();
+      const localizedHost = { ...host, appearance: async () => ({ language: locale }) } as unknown as M5Host;
+      const handle = await bootstrap(electron, { ...baseOptions, createHost: async () => localizedHost });
+      const template = log.appMenu as readonly MenuItemLike[];
+      const file = template.find((item) => String(item.label).startsWith(locale === 'en' ? 'File' : '文件'));
+      const quit = (file?.submenu ?? []).find((item) => item.label === (locale === 'en' ? 'Quit' : '退出'));
+      expect(quit?.accelerator).toBeUndefined();
+      expect(typeof quit?.click).toBe('function');
+      expect(JSON.stringify(template)).not.toContain('Alt+F4');
+      handle?.dispose();
+    }
+  });
 });
 
 describe('bootstrap · IPC trust boundary (D-137)', () => {

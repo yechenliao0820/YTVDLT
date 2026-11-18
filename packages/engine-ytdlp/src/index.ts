@@ -4,6 +4,8 @@
  */
 export {
   build, assertHttpUrl, invalidUrlError, ArgvBuilder, FROZEN_PROBE_PREFIX,
+  // D-245 (append-only): the config/plugin isolation prefix every spawn carries.
+  CONFIG_ISOLATION_FLAGS,
 } from './argv-builder.js';
 export {
   toMediaInfo, toPlaylistInfo, mapProbeResult, JsonMapper,

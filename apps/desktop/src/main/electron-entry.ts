@@ -50,6 +50,9 @@ import { readSiteSupportNetwork } from './site-support-network.js';
 import { createTxtFilePicker } from './adapters/txt-file-picker.js';
 import { createSubtitlePreviewService, type SubtitlePreviewService } from './subtitle-preview-service.js';
 import { bootstrap, type BootstrapHandle, type ElectronLike } from './bootstrap.js';
+import {
+  SHUTDOWN_CANCEL_BUDGET_MS, cancelRunningTasksForShutdown,
+} from './shutdown-cancel.js';
 import type { AppUpdatePortLike } from './m5-channels.js';
 
 /** The public repository the updater reads (D-93). */
@@ -207,21 +210,54 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
 
   // Give the async snapshot write a chance to finish before the process exits.
   // `preventDefault` is used exactly once; the second quit passes through.
+  //
+  // D-247: the first (real) quit now ALSO stops in-flight downloads. Until this
+  // fix the quit path ended the process while `yt-dlp` children kept running —
+  // orphans consuming bandwidth, writing `.part` files and desynchronising task
+  // state across restarts. Cancellation goes through the queue's EXISTING
+  // public API (`TaskQueue.cancel()` -> engine handle -> `killTree()` with a
+  // bounded exit-evidence wait, D-142/D-156/坑 21/坑 27); the wait for the
+  // slots to drain is bounded by SHUTDOWN_CANCEL_BUDGET_MS and a budget
+  // expiry only degrades to a WARNING — a hung taskkill must not wedge the
+  // quit. Cancelled tasks settle as `Canceled` and are retried BY HAND after a
+  // restart (D-209: startup never auto-resumes). The second `before-quit` (the
+  // real one, after `app.quit()` below) passes straight through: the
+  // `cleanupStarted` latch keeps its exact pass-through semantics, and the
+  // close→tray policy (D-60/D-197) is untouched — hiding to the tray never
+  // reaches this handler.
   let cleanupStarted = false;
   app.on('before-quit', (event) => {
     if (cleanupStarted) return;
     cleanupStarted = true;
     event.preventDefault();
-    // Subtitle preview (stage 2): tickets are pure main-process memory; drop
-    // them synchronously so an expired/abandoned id can never survive a quit.
-    subtitlePreviewRef?.dispose();
-    // Playlist preview tickets hold full PlaylistInfo (entry URLs included);
-    // they are main-process memory only and must not survive a quit.
-    hostRef?.playlistPreview.clear();
-    void Promise.race([
-      clearPrivateHistory(),
-      new Promise<void>((resolve) => { setTimeout(resolve, 3000); }),
-    ]).finally(() => { app.quit(); });
+    void (async () => {
+      const queue = hostRef?.m4.task.queue ?? null;
+      if (queue !== null) {
+        const report = await cancelRunningTasksForShutdown(queue);
+        if (!report.drained) {
+          forwardLog('warn', 'shutdown', 'quit proceeded while downloads were still stopping', {
+            requested: report.requested,
+            stillActive: report.stillActive.join(', '),
+            budgetMs: SHUTDOWN_CANCEL_BUDGET_MS,
+          });
+        } else if (report.requested > 0) {
+          forwardLog('info', 'shutdown', 'in-flight downloads cancelled before quit', {
+            requested: report.requested,
+          });
+        }
+      }
+      // Subtitle preview (stage 2): tickets are pure main-process memory; drop
+      // them synchronously so an expired/abandoned id can never survive a quit.
+      subtitlePreviewRef?.dispose();
+      // Playlist preview tickets hold full PlaylistInfo (entry URLs included);
+      // they are main-process memory only and must not survive a quit.
+      hostRef?.playlistPreview.clear();
+    })().finally(() => {
+      void Promise.race([
+        clearPrivateHistory(),
+        new Promise<void>((resolve) => { setTimeout(resolve, 3000); }),
+      ]).finally(() => { app.quit(); });
+    });
   });
 
   const createHost = async () => {

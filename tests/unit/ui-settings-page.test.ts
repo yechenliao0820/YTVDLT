@@ -1328,6 +1328,41 @@ describe('语言切换（重载语义 + D-85 SETTINGS_SET）', () => {
       win.location.search = savedSearch;
     }
   });
+
+  it('D-244：YTVDLTNav.localeReload 接管时委托导航、不再直连 location.replace', () => {
+    // 本文件不装载 shell/app-nav.js（settings.js 只做委托，不复制遮罩逻辑），
+    // 这里用桩代替 nav：接管（返回 true）时 switchLocale 必须把跳转让出去。
+    const savedNav = win.YTVDLTNav;
+    const reloadCalls: string[] = [];
+    win.YTVDLTNav = { localeReload: (url: string) => { reloadCalls.push(url); return true; } };
+    const beforeCount = (locationReplace as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+    try {
+      settings.switchLocale('en');
+      expect(reloadCalls).toEqual(['file:///C:/app/pages/queue/index.html?v=9.9.9&lang=en']);
+      expect((locationReplace as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(beforeCount);
+      // 持久化与 SETTINGS_SET 照旧发生在委托之前（D-85 语义不变）。
+      expect(win.localStorage.getItem('ytvdlt.locale')).toBe('en');
+      expect(lastCall('ytvdlt:settings:set')?.payload).toEqual({ language: 'en' });
+    } finally {
+      if (savedNav === undefined) delete win.YTVDLTNav; else win.YTVDLTNav = savedNav;
+    }
+    // 桩替换不改变页面状态；恢复 zh-CN 给同文件后续用例留干净口径。
+    settings.state.locale = 'zh-CN';
+    win.localStorage.setItem('ytvdlt.locale', 'zh-CN');
+  });
+
+  it('D-244：localeReload 拒绝（返回 false）时回退原有整页 location.replace', () => {
+    const savedNav = win.YTVDLTNav;
+    win.YTVDLTNav = { localeReload: () => false };
+    try {
+      settings.switchLocale('zh-CN');
+      // 拒绝路径 = 静态预览 / e2e 夹具 / reduced-motion 的行为：立即整页重载。
+      expect(locationReplace).toHaveBeenLastCalledWith('file:///C:/app/pages/queue/index.html?v=9.9.9');
+      expect(lastCall('ytvdlt:settings:set')?.payload).toEqual({ language: 'zh-CN' });
+    } finally {
+      if (savedNav === undefined) delete win.YTVDLTNav; else win.YTVDLTNav = savedNav;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

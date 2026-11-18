@@ -229,6 +229,179 @@
     return button;
   }
 
+  // ---------- D-244: language-switch transition veil (live-only decoration) --
+  // Switching 中文/EN is a full page reload BY DESIGN (D-141: the reload is what
+  // keeps fixture data from flowing back into the live page), and that reload
+  // reads as a hard flash: old frame -> blank -> new frame in another language.
+  // This wraps the SAME reload in the D-217 optics: the clicking page writes a
+  // one-shot sessionStorage marker, fades a theme-coloured veil in (~150 ms),
+  // and only then navigates; the booting page consumes the marker (deleting it
+  // FIRST is what makes it one-shot), mounts the veil opaque from its first
+  // frame, and fades it away once the page has painted underneath. The reload
+  // semantics are untouched — only its optics change. Exemptions keep the
+  // frozen e2e baselines and reduced-motion users exactly where they are:
+  // `case=` fixture URLs never mount anything and reduced motion skips both the
+  // hold and the cover (instant reload / instant display).
+  var LANG_VEIL_ID = 'ytvdlt-lang-veil';
+  var LANG_VEIL_KEY = 'ytvdlt.locale.veil';
+  var LANG_VEIL_FRAME_MS = 16;   // next-frame delay so the fade-in transition runs
+  var LANG_VEIL_HOLD_MS = 150;   // fade-in window before the reload lands
+  var LANG_VEIL_FADE_MS = 140;   // CSS fade duration (layout.css)
+  var LANG_VEIL_REVEAL_MS = 80;  // opaque hold on boot before fading out
+  var langVeilNode = null;
+
+  function langVeilDetach(veil) {
+    try {
+      if (typeof global.clearTimeout === 'function') {
+        if (veil.__inTimer !== null && veil.__inTimer !== undefined) global.clearTimeout(veil.__inTimer);
+        if (veil.__goTimer !== null && veil.__goTimer !== undefined) global.clearTimeout(veil.__goTimer);
+        if (veil.__cleanupTimer !== null && veil.__cleanupTimer !== undefined) global.clearTimeout(veil.__cleanupTimer);
+        if (veil.__outTimer !== null && veil.__outTimer !== undefined) global.clearTimeout(veil.__outTimer);
+      }
+      // Detach via the mount point, not via parentNode: test-sandbox nodes may
+      // not carry a parent link (坑 32), and a real node is always a body child
+      // here. Removing twice throws in real DOM — caught below.
+      if (doc && typeof doc.body.removeChild === 'function') doc.body.removeChild(veil);
+    } catch (error) { /* best effort: already detached */ }
+    if (langVeilNode === veil) langVeilNode = null;
+  }
+
+  function langVeilMark() {
+    var store = viewStore();
+    if (store === null) return false;
+    try { store.setItem(LANG_VEIL_KEY, String(global.Date ? Date.now() : 1)); return true; }
+    catch (error) { return false; }
+  }
+
+  function langVeilForget() {
+    var store = viewStore();
+    if (store === null) return;
+    try { store.removeItem(LANG_VEIL_KEY); } catch (error) { /* best effort */ }
+  }
+
+  /** D-141 fixture capture (`case=` URLs) never animates: baselines stay frozen. */
+  function isFixtureUrl() {
+    try {
+      var params = new global.URLSearchParams(String(global.location ? global.location.search : ''));
+      return params.has('case');
+    } catch (error) {
+      // No URLSearchParams (never true in a real renderer): substring guard.
+      return String(global.location ? global.location.search : '').indexOf('case=') !== -1;
+    }
+  }
+
+  /**
+   * theme.css kills transitions under `html[data-motion="reduced"]`; the hold
+   * would still lag the click there, so reduced motion skips the veil outright
+   * (the app attribute resolves `system` through the same media query).
+   */
+  function motionReduced() {
+    var root = doc && doc.documentElement && typeof doc.documentElement.getAttribute === 'function'
+      ? doc.documentElement : null;
+    if (root !== null && root.getAttribute('data-motion') === 'reduced') return true;
+    try {
+      if (typeof global.matchMedia === 'function') {
+        var query = global.matchMedia('(prefers-reduced-motion: reduce)');
+        if (query && query.matches === true) return true;
+      }
+    } catch (error) { /* media queries unavailable: keep the animation */ }
+    return false;
+  }
+
+  /**
+   * D-244: shared reload path behind both pages' `switchLocale`. Returns true
+   * when it took over the navigation (the caller must then NOT replace the
+   * location itself); false means "do the plain reload" — the unchanged
+   * behaviour for every decline: no bridge (static preview / e2e), fixture URL,
+   * reduced motion, storage unavailable, or a degenerate DOM.
+   */
+  function localeReload(url) {
+    var target = String(url || '');
+    if (target === '') return false;
+    if (bridge() === null) return false; // live-only, same gate as the fs veil
+    if (isFixtureUrl()) return false;    // no marker either: the reload is already exempt
+    if (motionReduced()) { langVeilForget(); return false; }
+    if (langVeilMark() === false) return false; // no marker -> no asymmetric half-veil
+    var veil = null;
+    try {
+      if (!doc || !doc.body || typeof doc.createElement !== 'function') return false;
+      if (typeof doc.body.appendChild !== 'function' || typeof doc.body.removeChild !== 'function') return false;
+      if (typeof global.setTimeout !== 'function') return false;
+      if (langVeilNode !== null) langVeilDetach(langVeilNode); // re-arm: one veil, fresh phase
+      veil = doc.createElement('div');
+      veil.id = LANG_VEIL_ID;
+      veil.className = 'ytv-lang-veil';
+      doc.body.appendChild(veil); // inserted transparent; the timer below fades it in
+      langVeilNode = veil;
+      veil.__inTimer = global.setTimeout(function () {
+        if (langVeilNode !== veil) return;
+        veil.setAttribute('data-active', 'true'); // CSS fades opacity 0 -> 1
+      }, LANG_VEIL_FRAME_MS);
+      veil.__goTimer = global.setTimeout(function () {
+        try {
+          if (global.location && typeof global.location.replace === 'function') {
+            global.location.replace(target);
+          } else if (global.location) {
+            global.location.href = target;
+          }
+        } catch (error) { /* navigation refused: the safety net below recovers */ }
+      }, LANG_VEIL_HOLD_MS);
+      // Safety net: a landed reload destroys this document, so a live veil past
+      // the hold window means the navigation never happened (refused URL,
+      // blocked navigation, test harness): fade the veil away and void the
+      // marker so a later page hop cannot inherit it.
+      veil.__cleanupTimer = global.setTimeout(function () {
+        langVeilForget();
+        if (langVeilNode !== veil) return;
+        veil.setAttribute('data-active', 'false'); // CSS fades opacity 1 -> 0
+        if (typeof global.setTimeout !== 'function') { langVeilDetach(veil); return; }
+        veil.__outTimer = global.setTimeout(function () { langVeilDetach(veil); },
+          LANG_VEIL_FADE_MS + 80);
+      }, LANG_VEIL_HOLD_MS + LANG_VEIL_FADE_MS + 120);
+      return true;
+    } catch (error) {
+      langVeilForget();
+      if (veil !== null) langVeilDetach(veil);
+      return false; // caller falls through to the plain replace
+    }
+  }
+
+  /**
+   * D-244: boot-side half, run once at script evaluation (end of body, before
+   * DOMContentLoaded) — as early as a classic script can get, so the opaque
+   * cover beats the first paint. Consumes the one-shot marker left by the
+   * previous page's switchLocale: delete FIRST, then decide.
+   */
+  function localeVeilConsume() {
+    var store = viewStore();
+    if (store === null) return;
+    var raw = null;
+    try { raw = store.getItem(LANG_VEIL_KEY); } catch (error) { return; }
+    if (raw === null || raw === undefined || raw === '') return;
+    langVeilForget(); // consume FIRST: one-shot, whatever happens below
+    if (isFixtureUrl()) return;  // e2e fixture capture: baselines stay frozen
+    if (motionReduced()) return; // reduced motion: instant display, no cover
+    try {
+      if (!doc || !doc.body || typeof doc.createElement !== 'function') return;
+      if (typeof doc.body.appendChild !== 'function' || typeof doc.body.removeChild !== 'function') return;
+      if (typeof global.setTimeout !== 'function') return;
+      if (langVeilNode !== null) langVeilDetach(langVeilNode);
+      var veil = doc.createElement('div');
+      veil.id = LANG_VEIL_ID;
+      veil.className = 'ytv-lang-veil';
+      veil.setAttribute('data-active', 'true'); // opaque from the first frame (no fade-in)
+      doc.body.appendChild(veil);
+      langVeilNode = veil;
+      veil.__outTimer = global.setTimeout(function () {
+        if (langVeilNode !== veil) return;
+        veil.setAttribute('data-active', 'false'); // CSS fades the cover away
+        veil.__outTimer = global.setTimeout(function () { langVeilDetach(veil); },
+          LANG_VEIL_FADE_MS + 80);
+      }, LANG_VEIL_REVEAL_MS);
+    } catch (error) { /* best effort */ }
+  }
+  localeVeilConsume();
+
   // ------------------------------------------------------------------- install
 
   function currentPage() {
@@ -321,6 +494,9 @@
     bindFullscreenButton: bindFullscreenButton,
     toggleFullscreen: toggleFullscreen,
     setFullscreenState: setFullscreenState,
+    // D-244: language-switch reload veil (both pages' switchLocale delegate).
+    localeReload: localeReload,
+    localeVeilConsume: localeVeilConsume,
     state: state
   };
   // Short alias used by the main process's executeJavaScript push.
