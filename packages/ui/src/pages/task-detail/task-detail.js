@@ -158,17 +158,45 @@
     });
   }
 
-  function runAction(action, withFiles) {
+  /**
+   * D-251: 动作反馈不再住在一个永远空着的黑框里。`index.html` 的
+   * `<pre id="ytvdlt-output">{}</pre>` 是 file:// 截图基线的调试占位，live 模式
+   * 启动即隐藏；反馈到达时才以主题化状态条显现：成功走 `--ok` 左边条 + 软底，
+   * 失败走 `--danger`，正文语义与旧版逐字一致。样式经 setAttribute('style')
+   * 注入（display:block 同时压过 UA 对 [hidden="false"] 的原生隐藏），fixture
+   * 分支在此提前返回——静态基线的 DOM 与外观逐字节不变。
+   */
+  function presentOutput(text, ok) {
     var output = doc.getElementById('ytvdlt-output');
+    if (output === null) return;
+    output.textContent = text;
+    if (!live) return;
+    output.setAttribute('hidden', 'false');
+    output.setAttribute('style', [
+      'margin:12px 0 0', 'padding:10px 12px', 'border-radius:8px',
+      'border:1px solid var(--line,#d5dde5)',
+      ok
+        ? 'border-left:3px solid var(--ok,#1c7a48);background:color-mix(in srgb, var(--ok,#1c7a48) 12%, var(--panel,#fff))'
+        : 'border-left:3px solid var(--danger,#b1283a);background:color-mix(in srgb, var(--danger,#b1283a) 10%, var(--panel,#fff))',
+      'display:block', 'font-size:12px', 'line-height:1.6',
+      'color:var(--ink,#111827)', 'white-space:pre-wrap',
+      'max-height:220px', 'overflow:auto',
+    ].join(';'));
+  }
+
+  function runAction(action, withFiles) {
     var payload = { taskId: current.model.id, action: action };
     // D-87: `withFiles` is interpreted by the main process, which moves the
     // task's artifacts to the OS Recycle Bin before dropping the record.
     if (withFiles === true) payload.withFiles = true;
     invoke('TASK_ACTION', payload).then(function (result) {
       var ok = result && result.ok === true;
-      output.textContent = ok
-        ? '已执行：' + action + (result && result.clipboardText ? '（已复制到剪贴板）' : '')
-        : '「' + action + '」未执行：' + ((result && (result.message || result.code)) || '未知原因');
+      presentOutput(
+        ok
+          ? '已执行：' + action + (result && result.clipboardText ? '（已复制到剪贴板）' : '')
+          : '「' + action + '」未执行：' + ((result && (result.message || result.code)) || '未知原因'),
+        ok
+      );
       if (!ok) return;
       if (action === 'remove') { global.location.href = queueUrl(); return; }
       load(current.model.id);
@@ -303,6 +331,14 @@
     });
   }
   if (live) blankFixture();
+
+  // D-251: live 模式把静态 `{}` 调试框（file:// 截图基线占位）收起来——平时不再
+  // 迎面一个突兀的空黑框；按钮反馈到达时才由 presentOutput 以主题化状态条显现。
+  // fixture 分支（无桥）不进这里，静态基线的 DOM 逐字节不变。
+  if (live) {
+    var outputBox = doc.getElementById('ytvdlt-output');
+    if (outputBox !== null) outputBox.setAttribute('hidden', 'true');
+  }
 
   ACTIONS.forEach(function (action) {
     var button = doc.querySelector('[data-action="' + action + '"]');

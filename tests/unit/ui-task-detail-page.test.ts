@@ -132,6 +132,9 @@ describe('D-187 · 世界 A：静态 SAMPLE 基线（file:// 截图路径，无�
     expect(detail('detail-artifacts').textContent).toBe('C:/V/fixture.mp4');
     expect(detail('detail-url').textContent).toBe('https://example.org/v?token=***');
     expect(detail('ytvdlt-task-detail').getAttribute('data-state')).toBe('error');
+    // D-251：fixture 分支的输出框保持静态原样（可见、无隐藏属性、无内联样式）
+    expect(detail('ytvdlt-output').getAttribute('hidden')).toBeNull();
+    expect(detail('ytvdlt-output').getAttribute('style')).toBeNull();
     // live 专属注入不出现：无返回链接、无删除确认框
     expect(byId('detail-back')).toBeNull();
     expect(byId('detail-remove-modal')).toBeNull();
@@ -371,6 +374,8 @@ describe('D-187 · 世界 C：live 模式（D-141 不闪夹具 / D-146 取消矩
     expect(back!.getAttribute('data-action')).toBe('back');
     expect(back!.textContent).toBe('← 返回队列');
     expect(detail('ytvdlt-task-detail').children[0]).toBe(back);
+    // D-251：静态 {} 调试框在 live 平时隐藏（反馈到达才由状态条显现）
+    expect(detail('ytvdlt-output').getAttribute('hidden')).toBe('true');
     // 引导期恰好一次 TASK_DETAIL，且载荷只带 taskId
     expect(callsOn('ytvdlt:task:detail')).toHaveLength(1);
     expect(callsOn('ytvdlt:task:detail')[0]?.payload).toEqual({ taskId: 't9' });
@@ -433,6 +438,22 @@ describe('D-187 · 世界 C：live 模式（D-141 不闪夹具 / D-146 取消矩
     const detailCalls = callsOn('ytvdlt:task:detail');
     expect(detailCalls.length).toBeGreaterThanOrEqual(1);
     expect(detailCalls.at(-1)?.payload).toEqual({ taskId: 't9' });
+  });
+
+  it('D-251：反馈状态条 —— 平时隐藏的 {} 框只在有反馈时显现，成功/失败各套主题左边条', async () => {
+    // boot 态（hidden="true"）已由上方 D-141 用例钉住；本用例钉「反馈到达才显现」。
+    const output = detail('ytvdlt-output');
+    bridgeState.actionReply = { ok: true, clipboardText: 'https://example.org/real' };
+    actionNode('copy-url').dispatch('click');
+    await tick();
+    expect(output.getAttribute('hidden')).toBe('false');
+    expect(String(output.getAttribute('style'))).toContain('--ok');
+    expect(output.textContent).toBe('已执行：copy-url（已复制到剪贴板）');
+    bridgeState.actionReply = { ok: false, message: '文件被占用' };
+    actionNode('open-file').dispatch('click'); // REAL_TASK 有产物 → open-file 可用
+    await tick();
+    expect(String(output.getAttribute('style'))).toContain('--danger');
+    expect(output.textContent).toBe('「open-file」未执行：文件被占用');
   });
 
   it('copy-url 带 clipboardText → 「（已复制到剪贴板）」；四个只读动作的成功简报', async () => {

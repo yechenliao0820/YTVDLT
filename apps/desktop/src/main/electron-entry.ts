@@ -189,20 +189,41 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
    * of reporting a removal that never reached disk; the catch below still
    * swallows it because shutdown must not be blocked by a broken disk, but the
    * failure is no longer silent to the queue's own logging.
+   *
+   * D-252: the purge now also settles the COVER cache layer. `forget()` only
+   * dropped the in-memory reference, so a private task's cover file and its
+   * `index.json` entry waited for a prune pass — one gated by the
+   * `autoCleanThumbnailCache` SPACE-hygiene switch and by future `ensure()`
+   * traffic, which let the jpg sit in `<dataDir>/thumbs/` indefinitely. After
+   * the rows are removed, `purgeCovers(report.removed)` recycles the covers
+   * those ids own EXCLUSIVELY through the cache's regular guarded trash path
+   * (isSafeCacheName + directory prefix + shell.trashItem — the same primitive
+   * the settings-page button and every prune pass already use during a live
+   * session; the cover cache is application-internal bytes, NOT the user media
+   * D-232 protects). A close-to-tray keeps the app alive, so touching the cache
+   * there is ordinary housekeeping; on the real-quit path the call already runs
+   * inside the 3 s budget race below and `purgeCovers` never throws. Before any
+   * byte is touched the entries are marked `purgePending` in `index.json` (a
+   * boolean, no private data), so a trash failure or an exit mid-delete is
+   * recovered by the NEXT boot's prune pass — switch-independent, never
+   * indefinite. Shared covers (any other task id in the entry) and files of
+   * tasks that are still running are left alone, exactly like `prune()`.
    */
   const clearPrivateHistory = async (): Promise<void> => {
     const host = hostRef;
     if (host === null) return;
     try {
-      await purgePrivateRecords(
+      const report = await purgePrivateRecords(
         {
           list: () => host.m4.task.queue.list(),
           remove: (taskId) => host.m4.task.queue.remove(taskId),
         },
-        // D-103: drop the cover reference too; the file is recycled by a later
-        // prune pass, never here (shutdown must not touch the filesystem).
+        // D-103: drop the cover reference too. The FILE decision now happens
+        // right below (D-252) — exclusivity-proven covers go to the recycle
+        // bin, everything else waits for a prune pass as before.
         (taskId) => thumbnailsRef?.forget(taskId),
       );
+      if (report.removed.length > 0) await thumbnailsRef?.purgeCovers(report.removed);
     } catch {
       // Best effort: a failed snapshot write must never block shutdown.
     }
@@ -628,8 +649,11 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     }
     // Never delay the first frame, and never prune before the references above
     // have been attached. A failed/slow fetch cannot block housekeeping.
+    // D-252: the boot pass runs regardless of the auto-clean switch — with the
+    // switch off, `prune()` internally recycles ONLY the `purgePending` entries
+    // a private-mode close marked (privacy correctness), never the regular
+    // age/budget/lost-reference sweep.
     void Promise.allSettled(bootCoverAttempts).then(async () => {
-      if (configRef?.get('advanced', 'autoCleanThumbnailCache') === false) return;
       await thumbnails.prune();
     }).catch(() => undefined);
 

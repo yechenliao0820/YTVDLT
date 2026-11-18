@@ -21,6 +21,7 @@ import { assertPreviewId, MAX_URL_CHARS, validateM5Payload } from './m5-contract
 import type { M5HandlerContext, M5Handler, M5HandlerMap } from './m5-channels.js';
 import type { AudioFormatChoice, AudioQualityChoice, M5ChannelDeps, VideoQualityChoice } from './m5-channels.js';
 import type { TxtImportEnqueueDto, TxtImportPickDto } from './txt-import-service.js';
+import { isPrivateDirUnresolvableError, PRIVATE_DIR_UNRESOLVABLE } from './m4-host.js';
 import { failedPlaylistPreview, isPlaylistEntryAvailable } from './playlist-preview-service.js';
 import { blockedEntriesByUrl, precheckBatch } from './site-precheck-gate.js';
 
@@ -263,22 +264,36 @@ export function createDownloadHandlers(ctx: M5HandlerContext): M5HandlerMap {
       subtitlePatch = merged.patch;
     }
 
-    const taskIds = await deps.enqueueSingle({
-      url,
-      kind,
-      // A video resolution says nothing about an audio task (and vice versa),
-      // so each field is only forwarded to the mode that consumes it.
-      ...(kind === 'video' && rawQuality !== undefined
-        ? { quality: rawQuality as VideoQualityChoice } : {}),
-      ...(kind === 'audio' && rawAudioQuality !== undefined
-        ? { audioQuality: rawAudioQuality as AudioQualityChoice } : {}),
-      ...(kind === 'audio' && rawAudioFormat !== undefined
-        ? { audioFormat: rawAudioFormat as AudioFormatChoice } : {}),
-      ...(subtitlePatch === undefined ? {} : { subtitlePatch }),
-      // Requirement 13 (phase 2): the already-probed MediaInfo travels with the
-      // enqueue, so TaskQueue does NOT probe a second time.
-      ...(consumption === null ? {} : { mediaInfo: consumption.media }),
-    });
+    // D-254: an unresolvable private-output directory is a REFUSAL, not a crash.
+    // The intake (m4 readDefaults) throws the tagged error before any request
+    // exists; answer here in the SAME normalized shape as the pre-check
+    // refusals above, so the renderer shows the Chinese reason instead of a
+    // raw `IPC_ERROR` rejection with an Electron-prefixed sentence.
+    let taskIds: readonly string[];
+    try {
+      taskIds = await deps.enqueueSingle({
+        url,
+        kind,
+        // A video resolution says nothing about an audio task (and vice versa),
+        // so each field is only forwarded to the mode that consumes it.
+        ...(kind === 'video' && rawQuality !== undefined
+          ? { quality: rawQuality as VideoQualityChoice } : {}),
+        ...(kind === 'audio' && rawAudioQuality !== undefined
+          ? { audioQuality: rawAudioQuality as AudioQualityChoice } : {}),
+        ...(kind === 'audio' && rawAudioFormat !== undefined
+          ? { audioFormat: rawAudioFormat as AudioFormatChoice } : {}),
+        ...(subtitlePatch === undefined ? {} : { subtitlePatch }),
+        // Requirement 13 (phase 2): the already-probed MediaInfo travels with the
+        // enqueue, so TaskQueue does NOT probe a second time.
+        ...(consumption === null ? {} : { mediaInfo: consumption.media }),
+      });
+    } catch (error) {
+      if (!isPrivateDirUnresolvableError(error)) throw error;
+      return {
+        accepted: false, enqueued: false, taskIds: [],
+        code: PRIVATE_DIR_UNRESOLVABLE, reason: error.message,
+      };
+    }
     return {
       accepted: true, enqueued: taskIds.length > 0, taskIds,
       // D-137: fail-open outcomes are NOT silent any more. The page can say

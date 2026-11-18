@@ -114,6 +114,21 @@ export function expandEnvVars(
   });
 }
 
+/**
+ * D-254: fail-closed companion of `expandEnvVars()`. `expandEnvVars()` keeps an
+ * unresolvable token verbatim ON PURPOSE (a typo stays visible), but the RESULT
+ * of that policy must never reach an argv: a directory still carrying a
+ * `%NAME%` token is spawned literally (no shell, D-79) — yt-dlp creates a
+ * folder named `%LOCALAPPDATA%` and the artifact containment gate (D-184/203)
+ * then refuses every file. This predicate uses the SAME `%([^%]+)%` rule as
+ * `expandEnvVars()`, so "true" means exactly "expandEnvVars still had a token
+ * it could not resolve". It is a DIRECTORY check only — never run it on an
+ * output template, where `%(title)s` is supposed to survive.
+ */
+export function hasUnresolvedEnvToken(value: string): boolean {
+  return typeof value === 'string' && /%([^%]+)%/.test(value);
+}
+
 /** Render the five supported yt-dlp output-template tokens. Unknown tokens survive. */export function renderTemplate(template: string, vars: TemplateVars): string {
   if (typeof template !== 'string' || template.length === 0) return '';
   return template.replace(TEMPLATE_RE, (match, key: string, limit: string | undefined) => {

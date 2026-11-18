@@ -145,6 +145,12 @@ function safeFileName(name: string): string {
  */
 function sidecarPath(target: string): string { return `${target}.sha256`; }
 
+/**
+ * Diagnostic read of the `.sha256` sidecar. D-219: this record is NOT a trust
+ * baseline — not for install, not for cache reuse. The only caller re-syncs
+ * the diagnostic file AFTER the published-digest check has already decided
+ * (see `verifiedCachedFile`); never use it to authorize anything.
+ */
 async function readSidecar(target: string): Promise<string | null> {
   try {
     const raw = (await readFile(sidecarPath(target), 'utf8')).trim().toLowerCase();
@@ -164,6 +170,30 @@ async function isolateFile(target: string, tag: string): Promise<string> {
   const isolated = `${target}.${tag}-${Date.now()}`;
   await rename(target, isolated).catch(() => undefined);
   return isolated;
+}
+
+/**
+ * D-219 · the ONLY trust baselines `install()` may verify against, in priority
+ * order:
+ *  1. `verifiedSha256` — a hash verified on the exact bytes now sitting in
+ *     `installerPath` (recorded by the ready paths, D-104);
+ *  2. `asset.sha256` — the release's PUBLISHED digest, the root that still
+ *     holds when a ready path ever fails to record `verifiedSha256`.
+ *
+ * There is deliberately NO third leg. `install()` used to fall back to
+ * `?? readSidecar(executable)`: the moment any ready path left
+ * `verifiedSha256` null, a locally written `.sha256` file — a hash THIS app
+ * computed itself — would silently become the trust root, exactly the
+ * contradiction D-219 removed (a self-computed hash proves nothing about the
+ * first download's authenticity). The signature accepts no path and no
+ * sidecar, so the baseline physically cannot reach one; `null` means "no
+ * trusted baseline" and the install gate must fail closed on it.
+ */
+export function installBaseline(
+  verifiedSha256: string | null,
+  asset: AppReleaseAsset | null,
+): string | null {
+  return verifiedSha256 ?? asset?.sha256 ?? null;
 }
 
 export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateService {
@@ -629,9 +659,11 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
     }
     // D-104: the file may have been swapped or damaged AFTER `ready`. Re-run
     // all three checks on the exact bytes we are about to hand to the OS.
+    // D-219: the baseline is a hash verified on these bytes or the published
+    // digest — the local sidecar is never consulted here.
     const asset = latest?.installer ?? null;
-    const baseline = verifiedSha256 ?? asset?.sha256 ?? await readSidecar(executable);
-    const expected = baseline === null || baseline === undefined ? null : baseline.toLowerCase();
+    const baseline = installBaseline(verifiedSha256, asset);
+    const expected = baseline === null ? null : baseline.toLowerCase();
     const problems: string[] = [];
     if (!(await looksLikeExecutable(executable).catch(() => false))) problems.push('PE 文件头无效');
     const size = await fileSize(executable);

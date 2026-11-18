@@ -20,6 +20,17 @@
  *     cache-image paths to the injected recycle-bin port. A failure is logged
  *     and swallowed: the download queue is never blocked by cache housekeeping.
  *
+ * D-252 closes the privacy gap in that retention: `forget()` (the private-mode
+ * close path) only drops the in-memory reference, which left a private task's
+ * cover FILE and index entry waiting for a prune pass — one that is gated by
+ * the `autoCleanThumbnailCache` SPACE switch and by future `ensure()` traffic.
+ * `purgeCovers()` is the close-time counterpart: it marks the covers owned
+ * ONLY by the just-removed private task ids (`purgePending` in `index.json` —
+ * a boolean, no private data) and immediately recycles them through the SAME
+ * guarded trash path as `prune()`. The marker makes the cleanup recoverable:
+ * if the trash call fails or the process exits first, the next prune pass —
+ * boot included — recycles marked entries with the switch OFF.
+ *
  * Failures are never fatal: every method resolves to a value, the card keeps
  * its letter badge, and a task with a broken URL costs exactly one request.
  */
@@ -28,7 +39,9 @@ import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promi
 import { join, resolve, sep } from 'node:path';
 import type { HttpPort } from '@ytvdlt/shared';
 import { isPublicHttpsUrl } from './adapters/http-policy.js';
+import { upgradeThumbnailUrl } from './thumbnail-url.js';
 import {
+  coverNamesOwnedOnlyBy,
   normalizeThumbnailCachePolicy, planThumbnailPrune,
   type ThumbnailCacheEntry, type ThumbnailCachePolicy, type ILogger,
 } from '@ytvdlt/core';
@@ -83,9 +96,19 @@ export interface ThumbnailPruneReport {
   readonly freedBytes: number;
   readonly removed: number;
   readonly failed: number;
-  readonly removedByReason: Readonly<Record<'lost-reference' | 'expired' | 'over-budget', number>>;
+  readonly removedByReason: Readonly<Record<'purge-pending' | 'lost-reference' | 'expired' | 'over-budget', number>>;
   readonly truncated: boolean;
   readonly lastPrunedAt: string | null;
+}
+
+/** What `purgeCovers()` reports to the caller (the close / quit path logs it). */
+export interface ThumbnailCoverPurgeReport {
+  /** Cover names the exclusivity rule identified for the given task ids. */
+  readonly marked: number;
+  /** Names actually handed to the recycle bin in this pass. */
+  readonly removed: number;
+  /** Names left in the index (marked `purgePending`) after a failed recycle. */
+  readonly failed: number;
 }
 
 export interface ThumbnailCache {
@@ -95,6 +118,13 @@ export interface ThumbnailCache {
   ensure(taskId: string, url: string | null | undefined): Promise<string | null>;
   /** Drop the task reference (the file survives until the next prune). */
   forget(taskId: string): void;
+  /**
+   * D-252: recycle the covers owned ONLY by the given (just-removed private)
+   * task ids — switch-independent, trash-port only, never throws. Covers
+   * shared with any other task, untracked files, and anything the rule cannot
+   * prove exclusive are left to the regular prune rules.
+   */
+  purgeCovers(taskIds: readonly string[]): Promise<ThumbnailCoverPurgeReport>;
   /** Current occupancy; never throws. */
   status(): Promise<ThumbnailCacheStatus>;
   /** Recycle unreferenced / expired / over-budget covers; never throws. */
@@ -117,6 +147,12 @@ interface IndexEntry {
   taskIds: string[];
   /** Disk scan found this file but no index record (pre-D-103 cache). */
   untracked?: boolean;
+  /**
+   * D-252: a private-mode close proved this entry is owned only by tasks the
+   * purge removed. Pure boolean, no private data — but it makes the next prune
+   * pass recycle the file even with the auto-clean switch off.
+   */
+  purgePending?: true;
 }
 
 interface IndexFile {
@@ -184,6 +220,7 @@ function parseIndex(raw: string): IndexFile {
         lastUsedAt,
         taskIds,
         ...(item['untracked'] === true ? { untracked: true } : {}),
+        ...(item['purgePending'] === true ? { purgePending: true } : {}),
       };
     }
   }
@@ -199,7 +236,7 @@ function emptyReport(reason: string, lastPrunedAt: string | null): ThumbnailPrun
     ok: false, reason,
     filesBefore: 0, bytesBefore: 0, filesAfter: 0, bytesAfter: 0, freedBytes: 0,
     removed: 0, failed: 0,
-    removedByReason: { 'lost-reference': 0, expired: 0, 'over-budget': 0 },
+    removedByReason: { 'purge-pending': 0, 'lost-reference': 0, expired: 0, 'over-budget': 0 },
     truncated: false, lastPrunedAt,
   };
 }
@@ -296,6 +333,10 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       if (entry === undefined) continue;
       if (!entry.taskIds.includes(taskId)) entry.taskIds.push(taskId);
       delete entry.untracked;
+      // A live mapping also outranks a privacy-purge marker (D-252): the task
+      // re-ensured the cover after the close marked it, so it is referenced
+      // again and the regular retention rules own it from here on.
+      delete entry.purgePending;
     }
   }
 
@@ -313,6 +354,10 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       entry.lastUsedAt = now();
       if (!entry.taskIds.includes(taskId)) entry.taskIds.push(taskId);
       delete entry.untracked;
+      // Same as reconcile(): a fresh reference clears the D-252 marker — the
+      // policy's live-task guard would protect the file anyway, and clearing
+      // here keeps the index free of stale "pending privacy purge" flags.
+      delete entry.purgePending;
       current.entries[name] = entry;
     });
   }
@@ -340,15 +385,16 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
     void prune().catch(() => undefined);
   }
 
-  async function fetchAndStore(taskId: string, url: string): Promise<string | null> {
+  /** `fetchUrl` 已经 `upgradeThumbnailUrl()` 归一（D-250），恒为 https 形式。 */
+  async function fetchAndStore(taskId: string, fetchUrl: string): Promise<string | null> {
     if (http === undefined) return null;
     // D-137: the same predicate is handed to the HTTP adapter as a PER-HOP
     // policy, so a 302 to loopback/private or an http downgrade cannot slip past
     // this initial check. The adapter also enforces `maxBytes` while streaming,
     // instead of buffering the whole body and checking its length afterwards.
-    if (!isPublicHttpsUrl(url)) return null;
+    if (!isPublicHttpsUrl(fetchUrl)) return null;
     try {
-      const bytes = await http.getBytes(url, {
+      const bytes = await http.getBytes(fetchUrl, {
         timeoutMs,
         maxBytes: maxBytesPerFile,
         urlPolicy: isPublicHttpsUrl,
@@ -359,7 +405,7 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       const ext = signatureOf(bytes);
       if (ext === null) return null;
 
-      const name = `${createHash('sha1').update(url).digest('hex')}.${ext}`;
+      const name = `${createHash('sha1').update(fetchUrl).digest('hex')}.${ext}`;
       const target = join(dir, name);
       const existing = await stat(target).catch(() => null);
       if (existing === null || !existing.isFile() || existing.size !== bytes.byteLength) {
@@ -409,6 +455,7 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
           lastUsedAt: item.lastUsedAt,
           taskIds: [...item.taskIds],
           ...(item.untracked === true ? { untracked: true } : {}),
+          ...(item.purgePending === true ? { purgePending: true } : {}),
         });
       }
       const plan = planThumbnailPrune(policyEntries, live, config);
@@ -455,6 +502,7 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
         lastUsedAt: item.lastUsedAt,
         taskIds: [...item.taskIds],
         ...(item.untracked === true ? { untracked: true } : {}),
+        ...(item.purgePending === true ? { purgePending: true } : {}),
       }));
       const plan = planThumbnailPrune(policyEntries, live, effective);
       const beforeBytes = policyEntries.reduce((sum, item) => sum + item.bytes, 0);
@@ -469,7 +517,12 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
         lastPrunedAt: index.lastPrunedAt,
       });
 
-      if (config.enabled !== true && request.force !== true) return untouched(true, 'auto-clean-disabled');
+      // D-252: with the switch off the policy schedules ONLY purge-pending
+      // entries (privacy correctness, switch-independent). An empty plan means
+      // there is genuinely nothing privacy-owed — keep the historical reason.
+      if (config.enabled !== true && request.force !== true && plan.remove.length === 0) {
+        return untouched(true, 'auto-clean-disabled');
+      }
       if (options.trash === undefined) return untouched(false, 'recycle-bin-unavailable');
 
       let removed = 0;
@@ -531,6 +584,81 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
     };
   }
 
+  /**
+   * D-252: close-time counterpart of `prune()`, driven by the private-mode
+   * purge. The caller passes the task ids that were JUST removed from the
+   * queue; the pure Core rule (`coverNamesOwnedOnlyBy`) narrows them to the
+   * covers those ids own EXCLUSIVELY — anything shared with a task outside the
+   * purge, and any untracked file, stays with the regular retention rules.
+   *
+   * Order matters: entries are marked `purgePending` in `index.json` BEFORE
+   * any byte is touched, so a failed or interrupted recycle below is picked up
+   * by the next prune pass (boot included) with the auto-clean switch OFF.
+   * Deletion reuses the exact prune guards (`isSafeCacheName` + directory
+   * prefix + injected recycle-bin port) — no new primitive, and a failure is
+   * logged and swallowed: closing the window must never block or throw.
+   */
+  async function purgeCovers(taskIds: readonly string[]): Promise<ThumbnailCoverPurgeReport> {
+    try {
+      await indexReady;
+      await writeChain;
+      await reconcile();
+      const names = coverNamesOwnedOnlyBy(index.entries, new Set(taskIds));
+      if (names.length === 0) return { marked: 0, removed: 0, failed: 0 };
+      await commit((current) => {
+        for (const name of names) {
+          const entry = current.entries[name];
+          if (entry !== undefined) current.entries[name] = { ...entry, purgePending: true };
+        }
+      });
+      if (options.trash === undefined) {
+        // Nothing can be recycled safely; the marker keeps the debt visible
+        // and recoverable. No fallback deletion primitive exists by design.
+        void logger.warn('thumbnail-cache', 'private cover purge deferred; recycle bin unavailable', {
+          count: names.length,
+        });
+        return { marked: names.length, removed: 0, failed: 0 };
+      }
+      let removed = 0;
+      let failed = 0;
+      const removedNames: string[] = [];
+      for (const name of names) {
+        // Defence in depth: NEVER hand a path outside the cache directory to
+        // the deletion primitive, and only ever a cache image name.
+        if (!isSafeCacheName(name)) { failed += 1; continue; }
+        const absolute = resolve(dir, name);
+        if (!absolute.startsWith(resolve(dir) + sep)) { failed += 1; continue; }
+        try {
+          if (await options.trash(absolute) !== true) { failed += 1; continue; }
+          removed += 1;
+          removedNames.push(name);
+        } catch { failed += 1; /* one bad file must not abort the purge */ }
+      }
+      if (removedNames.length > 0) {
+        await commit((current) => {
+          for (const name of removedNames) delete current.entries[name];
+        });
+        for (const [taskId, path] of [...byTask]) {
+          const name = path.slice(path.lastIndexOf(sep) + 1);
+          if (removedNames.includes(name)) byTask.delete(taskId);
+        }
+      }
+      if (failed > 0) {
+        void logger.warn('thumbnail-cache', 'some private covers could not be recycled; marked for the next prune pass', {
+          failed, removed,
+        });
+      }
+      return { marked: names.length, removed, failed };
+    } catch (error) {
+      // A privacy tidy-up must never bubble into the close / quit path (same
+      // isolation as prune()); marked entries stay recoverable on the next pass.
+      void logger.warn('thumbnail-cache', 'private cover purge failed; download queue untouched', {
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return { marked: 0, removed: 0, failed: 0 };
+    }
+  }
+
   return {
     pathOf(taskId: string): string | null {
       const path = byTask.get(taskId) ?? null;
@@ -551,14 +679,21 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       const cached = byTask.get(taskId);
       if (cached !== undefined) return Promise.resolve(cached);
       if (typeof url !== 'string' || url.trim() === '') return Promise.resolve(null);
+      // D-250: scheme normalisation happens BEFORE any keying. 国内站点（B 站
+      // hdslb.com 等）probe 给的封面是纯 `http://`，而抓取面 https-only（D-137）。
+      // 若先按原样取哈希、等到 fetchAndStore 里才升级，跨重启的本地复用会永远
+      // miss（两次哈希键不一致）。这里统一升级成 https 后再入缓存键；非 http(s)
+      // 一律 null（无封面占位），升级失败的站点自然回落原行为。
+      const fetchUrl = upgradeThumbnailUrl(url);
+      if (fetchUrl === null) return Promise.resolve(null);
       const pending = inFlight.get(taskId);
       if (pending !== undefined) return pending;
       const attempt = (async () => {
         await indexReady;
-        const hash = createHash('sha1').update(url.trim()).digest('hex');
+        const hash = createHash('sha1').update(fetchUrl).digest('hex');
         const local = await findLocal(hash);
         if (local !== null) return attach(local.name, taskId, local.bytes).then(() => join(dir, local.name));
-        return fetchAndStore(taskId, url.trim());
+        return fetchAndStore(taskId, fetchUrl);
       })().finally(() => { inFlight.delete(taskId); });
       inFlight.set(taskId, attempt);
       return attempt;
@@ -571,11 +706,14 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       // it with the live task list, which is exactly what turns a removed task's
       // cover into a `lost-reference` candidate. Erasing the id here would make
       // the file look "never attributed" and postpone its cleanup by 30 days.
-      // The file itself is never deleted here — only a prune pass decides, and
-      // only after checking that no OTHER live task shares the same cover.
+      // The file itself is never deleted HERE — the private-mode close decides
+      // via `purgeCovers()` (D-252, exclusivity-proven ids only) and every other
+      // removal waits for a prune pass, which still checks that no OTHER live
+      // task shares the same cover.
     },
 
     status,
+    purgeCovers,
     prune,
     setAutoClean: (enabled: boolean) => persistPolicy({ enabled }),
     setMaxBytes: (bytes: number) => persistPolicy({ maxBytes: bytes }),

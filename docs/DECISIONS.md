@@ -2659,3 +2659,54 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① `init()` 单飞：并发调用共享同一个 promise，`loaded` 只在读取真正完成后置位，失败清 memo 可重试；② 存在性由读取回答（`ENOENT` / `ENOTDIR` 才算首次运行，共用 D-241 判定），结构不符与解析失败同路；③ 损坏时**先**做字节级备份（`readBytes` → `writeBytesAtomic`，失败回落 `writeTextAtomic`，再失败不阻断——模板是偏好数据，不像 `tasks.json` 那样 fail-closed），备份名带 ISO 时间戳并做 `-2` / `-3` 去重；④ 写队列改为 `run.catch(() => undefined)` 续链，真实错误仍回给调用方（House pattern：HistoryStore / TaskStore）。 |
 | 验证 | `command-template.test.ts` 36 项（+202 行）：并发 init 只读一次、失败可重试、损坏先备份再回落、备份不覆盖原文件、同毫秒多次损坏各自留档、写失败不毒化后续写入。 |
 | 未覆盖 | 备份只在「首次损坏读」时做一次，之后不再重复；非 UTF-8 的原始字节依赖 `readBytes` 端口，若端口不支持则退化为文本备份（会丢非法字节）。 |
+
+## D-250 · 2026-11-19 · 封面 URL scheme 升级：http 封面不再被判「无封面」（B 站实测）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | B 站等国内站点的队列卡片永远只有字母徽标。实测随包 yt-dlp 对 bilibili 返回纯 `http://i0.hdslb.com/bfs/archive/….jpg`；缩略图抓取的 https-only 门（`isPublicHttpsUrl`，D-137）把整类 http 封面 URL 在入口拒掉。CDN 侧 https 实测直连 200、无需 Referer——不是站点限制，是代码把可用的 https 资源拒之门外。 |
+| 根因 | SSRF 策略与真实世界的 http 封面 URL 之间没有归一层：scheme 不匹配被当成「无封面」。 |
+| 决策 | ① 新增单职责纯函数 `apps/desktop/src/main/thumbnail-url.ts::upgradeThumbnailUrl`（`http://` → `https://`；`https://` 原样返回、不重编码；其余 scheme / 空串 / 非字符串一律 null）；② 归一点在 `ensure()` 计算**缓存键之前**（保证跨重启本地复用的哈希键一致，不因归一多打一次网络），`fetchAndStore` 只收已归一 URL；③ 升级后的 URL 仍要过同一道 `isPublicHttpsUrl` 入口校验与逐跳策略——本决策不放宽任何私网 / 重定向防线，站点真不支持 https 时自然回落「无封面」占位（不试 http 回退，https-only 是安全策略不是可用性开关）。 |
+| 验证 | `thumbnail-cache.test.ts` 新增 2 例组：bilibili 式 http URL 抓取/缓存键/冷启动零额外 HTTP；https 原样 + 非 http(s)/空串零抓取。typecheck 5/5。 |
+| 未覆盖 | 封面 URL 的主机合法性仍由 D-137 门回答；打包版真机未实测（铁律 9，需业主点名打包）。 |
+
+## D-251 · 2026-11-19 · 详情页动作反馈：常驻 `{}` 黑框改为按需显现的主题化状态条
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 任务详情页按钮下方常驻一个大暗色框，内容是 `{}`（index.html 写死的调试占位），下载成功/失败时都空着；只有点过按钮才写「已执行：…／「…」未执行：…」。业主反馈影响观感、且看不出用途。 |
+| 根因 | `<pre id="ytvdlt-output">{}</pre>` 是 file:// 截图基线时代的 emit 调试面；live 模式沿用它做动作反馈，无反馈时就裸露 `{}` 占位框。 |
+| 决策 | ① live 模式启动即隐藏该框（`setAttribute('hidden','true')`）；② 动作反馈到达时同一元素以主题化状态条显现：成功 `--ok` 左边条 + color-mix 软底、失败 `--danger`，正文语义逐字不变；样式经 `setAttribute('style')` 注入并显式 `display:block`（见坑 44：UA 对 `[hidden]` 属性存在即隐藏，作者 display 规则才能压过）；③ fixture 分支零改动——静态基线 DOM 与外观逐字节不变。 |
+| 验证 | `ui-task-detail-page.test.ts`：世界 A 钉「fixture 输出框无 hidden/style 属性」；世界 C D-141 用例钉 boot 隐藏、新增 D-251 用例（反馈显现 + ok/danger 样式 + 文本不变）。定向 64/64 绿。 |
+| 未覆盖 | 打包版真机目检未做（铁律 9）；反馈文案仍是中文硬编码（属既有「文案未接英文映射」已知项）。 |
+
+## D-252 · 2026-11-19 · 无痕关窗定向回收独占封面缓存（隐私承诺兑现到缓存层）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 无痕任务关窗后队列记录清了，但封面 jpg 与 `thumbs/index.json` 条目无限期残留：`forget()` 只删内存引用，文件回收交给 prune，而 prune 被 `autoCleanThumbnailCache`（空间卫生开关）+ ensure 触发节奏双重门控，开关关着就永不发生。 |
+| 根因 | D-232/D-103 的组合把「关窗不碰文件系统」与「封面回收靠 prune」接在一起，隐私清理实际依赖了一个与隐私无关的空间开关。 |
+| 决策 | ① core 纯规则 `private-cleanup.ts::coverNamesOwnedOnlyBy`（独占判定：taskIds 非空且全部属于本次移除集合；与任何其它 id 共享或未归属一律保留，与 prune 引用计数同语义）；② `ThumbnailCache.purgeCovers(removedIds)`：先落 `purgePending` 布尔标记（不含任何隐私数据）再走与 prune 完全相同的回收站守卫链（isSafeCacheName + 目录前缀 + trash 端口）当场回收；③ 纯策略新增 `'purge-pending'` 原因：标记条目**无视 enabled 开关**、先于空间规则调度，仍受 live 引用保护与 pruneBatch 上限；④ 启动 prune 去掉开关提前返回（开关关时内部只回收标记条目）；⑤ `clearPrivateHistory` 在 `report.removed` 非空时接线。关窗到托盘当场生效（应用仍在跑，属常规 housekeeping）；真退出在既有 3 s 预算内全程吞错；回收失败 / 中断由已落盘标记在下次启动确定性恢复。共享封面、`keptRunning`（仍在跑的私有任务）与用户媒体文件全程不碰。 |
+| 验证 | `task-queue.test.ts` +4、`thumbnail-cache-policy.test.ts` +4、`thumbnail-cache.test.ts` +9（当场回收／共享保留／旧会话 id 保守保留／标记兜底／活引用清标记／失败计数／trash 抛错不炸），定向 87 例绿；check-layering 0 违规；frozen-gate PASS。 |
+| 未覆盖 | 应用崩溃 / 被杀（无 close hook）时无法区分私有引用，退回既有 lost-reference 路径（D-240 的写边界只保队列行，不保缓存）；回收站被系统禁用时只能标记等待，绝不永久删除（刻意取舍）；打包版真机未实测（铁律 9）。 |
+
+## D-253 · 2026-11-19 · 安装基线链收窄：sidecar 物理不可达（D-219 契约钉死）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `install()` 基线链残留 `?? readSidecar(executable)` 第三腿。当前两条 ready 路径都在同一同步块写入非空 `verifiedSha256`，该腿不可达；但未来新增 ready 路径一旦忘设值，本地自写的 `.sha256` 文件——应用自己算的哈希——会静默复活为信任根，与 D-219「自算哈希不是信任根」直接矛盾（D-219「未覆盖」登记的脚枪）。 |
+| 根因 | D-104 时代的 sidecar 兜底在 D-219 收紧时只处理了复用门与下载门，安装门残留一腿。 |
+| 决策 | ① 基线链收窄为纯函数 `installBaseline(verifiedSha256, asset)`（签名不收路径、不收 sidecar，结构上排除）：`verifiedSha256 ?? asset?.sha256 ?? null`——前者是「已在这份字节上验证过的哈希」（D-104），后者是发布清单 digest（D-219 认可的唯一信任根）；`null` = 无可信基准 → 既有安装门拒绝 + `isolateFile` 隔离 + `phase='error'`；② `readSidecar` 保留（唯一调用 = digest 判定之后的诊断回写，不参与任何 allow/deny），头注释钉「不作为信任基准（D-219）」。 |
+| 验证 | `app-update-service.test.ts` +4：基线解析优先级（verified > digest > null，绝不取 sidecar）、swap + 伪造 sidecar 与字节一致仍拒装并隔离、正向对照（verified 匹配照常安装）、`install()` 接线源码钉点（防绕过 helper 重新内联）。22/22 + 相邻 6 文件 68 例回归 + typecheck 5/5。 |
+| 未覆盖 | `verifiedSha256=null && ready` 在当前公共 API 下可证明不可达（两条 ready 路径的赋值在同一同步块）——完整拒绝链路靠结构保证 + 单测钉住，无端到端用例；「未来忘写 verifiedSha256」本身是状态机 bug，真发生时 install() 会正确 fail-closed。 |
+
+## D-254 · 2026-11-19 · 私有目录展开失败 fail-closed：字面量 %VAR% 绝不进请求
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `%LOCALAPPDATA%` 缺失（或注入展开器不认识令牌）时，`readDefaults` 把字面量 `%LOCALAPPDATA%/YTVDLT/private` 原样写进请求——`-P` 会建出字面量目录（D-79 / 坑 3 / 坑 43），随后 D-184/203 产物封链门把每个产物判「根外」，任务全失败且用户在入队时毫无感知。 |
+| 根因 | `expandEnvVars` 对解析不了的令牌刻意原样保留（拼错要可见，D-79 设计），但该策略的产物从未被校验；「配置变成请求」的唯一闸口没有「展开失败」分支。 |
+| 决策 | ① fail-closed 放在闸口本身：展开后的私有目录仍含 `%…%` 令牌 → 在请求构建之前抛稳定码 `PRIVATE_DIR_UNRESOLVABLE` + 中文 message 的标记错误，令牌化路径绝不进 argv / 产物根 / TaskRecord；② 判定为纯函数 `path-resolver.ts::hasUnresolvedEnvToken`（与 `expandEnvVars` 完全同源的 `%([^%]+)%` 规则；仅用于目录，勿用于输出模板——`%(title)s` 会误命中）；③ 播放列表 / TXT 入口整批结构化失败（每条 reason 带 `码：中文`，与既有 probe 失败同形，不抛穿 IPC）；单 URL 在 `DOWNLOAD_START` handler 归一化回复 `{accepted:false, enqueued:false, taskIds:[], code, reason}`（仿 `PATH_ROOT_NOT_SPECIFIC` 先例）。 |
+| 验证 | `m4-host.test.ts` +5（三入口 fail-closed + expandPath 注入 + 非无痕对照）、`path-resolver.test.ts` +3（纯函数契约、孤立 `%` 不误判）；先红后绿（临时禁用守卫 → 恰好 fail-closed 4 例红，还原复绿）；定向 157 例绿；check-layering 0 违规；D-229 既有钉点保持全绿。 |
+| 未覆盖 | 打包版真机未实测（铁律 9）；TXT / 播放列表批次级 code 仍为 `ENQUEUE_FAILED`（精确码需动 shared closed union，逐条 reason 已可见）；非无痕模式的用户目录令牌行为保持 D-117 原样，未扩大范围。 |
+
