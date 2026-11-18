@@ -4,6 +4,16 @@
  * Every write re-validates the argv array through `validateTemplateArgs()`; a
  * stored template can therefore never contain a denied option, even if the file
  * was edited by hand (load() drops invalid entries and records the reason).
+ *
+ * D-256 (external audit P3-01; same persist-first, commit-after house pattern
+ * as HistoryStore's D-222): create/update/remove build the would-be list,
+ * persist it, and commit memory only after the atomic write succeeded. A
+ * failed save therefore leaves memory untouched — there is no rollback code,
+ * because there is nothing to roll back — and the next successful save cannot
+ * resurrect the failed operation onto disk. The whole
+ * read → build-next → persist → commit sequence runs INSIDE the existing
+ * write queue, so concurrent CRUD never loses an update (each operation builds
+ * its candidate on top of the last COMMITTED state).
  */
 import type { CorePorts } from '@ytvdlt/shared';
 import { isMissingFileError } from '../fs-errors.js';
@@ -187,42 +197,81 @@ export class CommandTemplateStore {
     return found === undefined ? undefined : { ...found, args: [...found.args] };
   }
 
+  /**
+   * D-256: persist-first, commit-after (D-222 pattern). The name/args
+   * validation is pure (no memory access), so it runs before the queue task:
+   * a rejected input never occupies the write queue and has zero side
+   * effects. Everything that reads or writes `this.templates` — id
+   * allocation, candidate construction, the commit itself — runs INSIDE the
+   * queue task, on top of the last committed state. When `persist()` rejects,
+   * `this.templates` is still exactly what `list()` / `get()` reported before
+   * the call, and the disk still holds the previous state (atomic write).
+   */
   async create(input: CommandTemplateInput): Promise<CommandTemplate> {
     await this.init();
     const name = this.validateName(input.name);
     const args = this.validateArgs(input.args);
-    const now = this.ports.clock.nowIso();
-    const id = this.nextId();
-    const template: CommandTemplate = {
-      id, name, args: [...args], createdAt: now, updatedAt: now,
-    };
-    this.templates.push(template);
-    await this.persist();
-    return { ...template, args: [...template.args] };
+    return this.enqueue(async () => {
+      const now = this.ports.clock.nowIso();
+      const id = this.nextId();
+      const template: CommandTemplate = {
+        id, name, args: [...args], createdAt: now, updatedAt: now,
+      };
+      const next = [...this.templates, template];
+      await this.persist(next); // persist the would-be state first (D-222/D-256)
+      this.templates = next;    // commit memory only after the write succeeded
+      return { ...template, args: [...template.args] };
+    });
   }
 
+  /**
+   * Same D-256 contract as {@link create}: the unknown-id check, the candidate
+   * construction and the commit all run inside the queue task; the persisted
+   * payload is the would-be list with the patch applied. A write failure
+   * leaves the old template in memory AND on disk, and the error surfaces to
+   * the caller unchanged. Validation stays outside the queue (pure), so the
+   * `CUSTOM_COMMAND_REJECTED` behavior and the unknown-id error precedence
+   * (a rejected patch reports the validation error before the id is looked
+   * at) are byte-identical to the pre-D-256 code.
+   */
   async update(id: string, patch: Partial<CommandTemplateInput>): Promise<CommandTemplate> {
     await this.init();
-    const index = this.templates.findIndex((template) => template.id === id);
-    if (index === -1) throw new Error(`unknown command template: ${id}`);
-    const current = this.templates[index] as CommandTemplate;
-    const name = patch.name === undefined ? current.name : this.validateName(patch.name);
-    const args = patch.args === undefined ? current.args : this.validateArgs(patch.args);
-    const next: CommandTemplate = {
-      ...current, name, args: [...args], updatedAt: this.ports.clock.nowIso(),
-    };
-    this.templates[index] = next;
-    await this.persist();
-    return { ...next, args: [...next.args] };
+    const patchedName = patch.name === undefined ? undefined : this.validateName(patch.name);
+    const patchedArgs = patch.args === undefined ? undefined : this.validateArgs(patch.args);
+    return this.enqueue(async () => {
+      const index = this.templates.findIndex((template) => template.id === id);
+      if (index === -1) throw new Error(`unknown command template: ${id}`);
+      const current = this.templates[index] as CommandTemplate;
+      const name = patchedName === undefined ? current.name : patchedName;
+      const args = patchedArgs === undefined ? current.args : patchedArgs;
+      const next: CommandTemplate = {
+        ...current, name, args: [...args], updatedAt: this.ports.clock.nowIso(),
+      };
+      const candidates = [...this.templates];
+      candidates[index] = next;
+      await this.persist(candidates); // persist the would-be state first (D-222/D-256)
+      this.templates = candidates;    // commit memory only after the write succeeded
+      return { ...next, args: [...next.args] };
+    });
   }
 
+  /**
+   * Same D-256 contract as {@link create}/{@link update}: the whole
+   * existence-check → filter → persist → commit sequence runs inside the
+   * queue task. An unknown id returns `false` with zero side effects and zero
+   * disk writes (the filter result is compared against the current length
+   * BEFORE anything is persisted); a write failure leaves the entry in memory
+   * AND on disk, so a later retry operates on the unchanged baseline.
+   */
   async remove(id: string): Promise<boolean> {
     await this.init();
-    const before = this.templates.length;
-    this.templates = this.templates.filter((template) => template.id !== id);
-    if (this.templates.length === before) return false;
-    await this.persist();
-    return true;
+    return this.enqueue(async () => {
+      const next = this.templates.filter((template) => template.id !== id);
+      if (next.length === this.templates.length) return false;
+      await this.persist(next); // persist the would-be state first (D-222/D-256)
+      this.templates = next;    // commit memory only after the write succeeded
+      return true;
+    });
   }
 
   private validateName(raw: unknown): string {
@@ -271,19 +320,38 @@ export class CommandTemplateStore {
     return id;
   }
 
-  private persist(): Promise<void> {
+  /**
+   * Serialize the given (would-be) state (D-222 pattern, D-256). Callers pass
+   * the NEXT template list, never `this.templates` directly: the state on
+   * disk is decided BEFORE memory moves, so a rejected `writeTextAtomic`
+   * (atomic primitive — no half-written file) means the disk still holds
+   * exactly the previous state while memory was never touched. This is a
+   * minimal append-only extension of the old zero-argument `persist()`: same
+   * payload shape (`schemaVersion` + `templates`), only the source of the
+   * list changed from "current memory" to "explicit candidate".
+   */
+  private async persist(templates: CommandTemplate[]): Promise<void> {
     const body = `${JSON.stringify({
       schemaVersion: 1,
-      templates: this.templates,
+      templates,
     } satisfies TemplateFile, null, 2)}\n`;
-    const run = this.writeQueue.then(async () => {
-      await this.ports.fs.writeTextAtomic(this.filePath, body);
-    });
-    // The chain itself must never stay rejected (house pattern: HistoryStore
-    // enqueue / TaskStore save). The OLD code chained every later write onto
-    // the raw promise, so ONE failed write poisoned the queue and every
-    // subsequent persist rejected with the stale error until restart.
-    this.writeQueue = run.catch(() => undefined);
-    return run;
+    await this.ports.fs.writeTextAtomic(this.filePath, body);
+  }
+
+  /**
+   * The existing write queue (D-249: one failed write must not poison the
+   * chain) now also serializes the whole D-256 mutation sequence
+   * read → build-next → persist → commit. The queue is strictly serial, so a
+   * queue task is the only reader/writer of `this.templates` while it runs —
+   * concurrent CRUD cannot build two candidates from the same baseline (no
+   * lost updates). The chain itself keeps `Promise<void>` and is always
+   * settled (`then(() => undefined, () => undefined)`), while the
+   * caller-facing promise is `next`, which still rejects with the task's own
+   * error (house pattern: HistoryStore enqueue / TaskStore save).
+   */
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.writeQueue.then(task, task);
+    this.writeQueue = next.then(() => undefined, () => undefined);
+    return next;
   }
 }

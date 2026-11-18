@@ -240,8 +240,11 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
   // bounded exit-evidence wait, D-142/D-156/坑 21/坑 27); the wait for the
   // slots to drain is bounded by SHUTDOWN_CANCEL_BUDGET_MS and a budget
   // expiry only degrades to a WARNING — a hung taskkill must not wedge the
-  // quit. Cancelled tasks settle as `Canceled` and are retried BY HAND after a
-  // restart (D-209: startup never auto-resumes). The second `before-quit` (the
+  // quit. D-255: the same budget now also covers every cancel PROMISE (a
+  // queued task settles via the D-242 snapshot write) and the report's
+  // per-task outcomes are logged below — a silent write failure can no longer
+  // read as a clean cancel. Cancelled tasks settle as `Canceled` and are
+  // retried BY HAND after a restart (D-209: startup never auto-resumes). The second `before-quit` (the
   // real one, after `app.quit()` below) passes straight through: the
   // `cleanupStarted` latch keeps its exact pass-through semantics, and the
   // close→tray policy (D-60/D-197) is untouched — hiding to the tray never
@@ -255,11 +258,25 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       const queue = hostRef?.m4.task.queue ?? null;
       if (queue !== null) {
         const report = await cancelRunningTasksForShutdown(queue);
+        // D-255: per-task cancel evidence. `persist-failed` (D-242: the record
+        // was put back and is still on disk — it revives after a restart),
+        // `kill-unconfirmed` (D-142) and `unsettled` (pending at budget
+        // expiry) must no longer read as a clean cancel in this log.
+        const failed = report.tasks.filter((task) => task.outcome !== 'confirmed');
+        const failedNote = failed
+          .map((task) => `${task.taskId}=${task.outcome}${task.reason === undefined ? '' : ` (${task.reason})`}`)
+          .join(', ');
         if (!report.drained) {
           forwardLog('warn', 'shutdown', 'quit proceeded while downloads were still stopping', {
             requested: report.requested,
             stillActive: report.stillActive.join(', '),
             budgetMs: SHUTDOWN_CANCEL_BUDGET_MS,
+            ...(failedNote === '' ? {} : { cancelFailures: failedNote }),
+          });
+        } else if (failedNote !== '') {
+          forwardLog('warn', 'shutdown', 'quit proceeded with unconfirmed cancel results', {
+            requested: report.requested,
+            cancelFailures: failedNote,
           });
         } else if (report.requested > 0) {
           forwardLog('info', 'shutdown', 'in-flight downloads cancelled before quit', {

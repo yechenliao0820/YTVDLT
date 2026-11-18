@@ -2710,3 +2710,23 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 验证 | `m4-host.test.ts` +5（三入口 fail-closed + expandPath 注入 + 非无痕对照）、`path-resolver.test.ts` +3（纯函数契约、孤立 `%` 不误判）；先红后绿（临时禁用守卫 → 恰好 fail-closed 4 例红，还原复绿）；定向 157 例绿；check-layering 0 违规；D-229 既有钉点保持全绿。 |
 | 未覆盖 | 打包版真机未实测（铁律 9）；TXT / 播放列表批次级 code 仍为 `ENQUEUE_FAILED`（精确码需动 shared closed union，逐条 reason 已可见）；非无痕模式的用户目录令牌行为保持 D-117 原样，未扩大范围。 |
 
+## D-255 · 2026-11-19 · 退出等待全部取消证据：排队任务的快照写不再发出即忘（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-247 的退出取消对排队任务是发出即忘：`void queue.cancel(id).catch(() => false)` 不 await，退出证据只轮询 `activeTaskIds` 清空——排队任务不占槽位，其 `cancel()`（D-242 排队分支 = 从 tasks.json 删除的快照写）的完成没人等，退出可能在持久化落盘前放行（记录仍在磁盘，重启复活）；`.catch(() => false)` 还把 D-242「写失败 → 记录放回 + 抛错」吞成成功日志；报告 `{requested, stillActive, drained}` 无逐任务结果。 |
+| 根因 | D-247 只把「运行中子进程的槽位释放」当唯一证据；`activeTaskIds` 对 `isPending` 任务结构性失明。 |
+| 决策 | 同一个 5 s 总预算内等待**两类证据同时成立**：① 全部 cancel promise settle（`Promise.allSettled` 逐个登记结果）；② `activeTaskIds` 清空（既有轮询循环保留）。两证据各可提前放行，同一绝对 deadline 切断两者；到期绝不阻塞退出、绝不重试、绝不 throw（D-247 吞错边界原样）。报告新增 `tasks`（逐 id 四态）：`confirmed`（resolve true：运行中=进程树确认死亡，排队=记录已删且快照写完成）／`kill-unconfirmed`（D-142 resolve false，`stillActive` 仍点名）／`persist-failed`（D-242 reject，reason 带拒绝原文，磁盘记录将随重启复活——如实上报）／`unsettled`（到期未 settle）；`drained` 语义不变（槽位维度）。electron-entry 日志同步：未清空 warn 补 `cancelFailures`；drained 但有未确认结果升为独立 warn「quit proceeded with unconfirmed cancel results」，干净路径 info 不变。 |
+| 验证 | `shutdown-cancel.test.ts` 11 项全绿：新增 3 例（手动 deferred 挂起排队 cancel → 预算内等到 settle 才返回；永不 settle → 恰在 5 s 到期放行并如实报 `unsettled`；排队 reject → 进失败清单、不阻塞、其余任务照常）；既有 8 例场景不变（4 处报告形状机械同步）。typecheck 5/5。 |
+| 未覆盖 | 真实排队快照写的等待时长未在真机验证（单测为假时钟 + 假队列）；「cancel promise settle 但 run 闭包未释放槽位」的间隙仍由槽位证据兜底（D-209 语义未改）；到期后才 settle 的任务按返回时刻快照如实标注，不追更。 |
+
+## D-256 · 2026-11-19 · 命令模板 CRUD 改 persist-first commit-after：写失败零内存变更（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `create/update/remove` 先改内存再落盘：`persist()` 失败时调用方拿到异常但内存已改——`list()/get()` 返回新状态、磁盘是旧状态（内存/磁盘分歧），下一次成功保存还会把失败的操作一并写盘。 |
+| 根因 | 与 D-222 修 HistoryStore 前的形态同构——内存提交与持久化两步、内存先行，失败路径没有回滚；且写队列只串行了「写」本身，没串行「构造候选」，操作基于调用时刻的内存快照。 |
+| 决策 | D-222 宅法移植：① 整段「读 → 构造候选 → persist → commit」移入既有写队列任务内（新增 `enqueue<T>` 泛型助手，链恒结算不毒化——D-249 钉点等价保持）；② `persist(templates)` 序列化**将要变成的状态**（append-only 最小扩展），成功才 `this.templates = next`，失败时内存零变更、磁盘零变更（`writeTextAtomic` 原子写不留半截），**无回滚代码**——失败即未发生，下一次成功保存只序列化已提交状态，失败操作不会被「顺手复活」；③ 校验为纯函数留在队列外（拒绝的输入不占队列、零副作用，错误优先级逐字不变）；④ `remove` 缺失 id 在 persist 之前判定，返回 false 零写盘。 |
+| 验证 | `command-template.test.ts` 43 项全绿（新增 7 例：三个方法写失败内存零变更 + 错误如实抛出、失败后紧跟成功保存磁盘与内存逐字一致且失败操作不复活、并发 create×2 / create+remove 不丢更新、remove 缺失 id 零写盘）。红→绿验证：临时还原旧实现 → 恰 4 个写失败用例红；退化变体探针（候选构造移出队列）→ 并发用例与 D-249 钉点双红，证明并发钉点有牙。typecheck 5/5；依赖面 m5-channels/m5-host/ui-shell-family 128/128。 |
+| 未覆盖 | 打包版真机未实测（铁律 9）；跨文件事务仍不存在（与 D-222 同级限制）；进程在 persist 成功与内存提交之间被杀时磁盘新、内存旧，重启以磁盘为准（单事实来源仍是磁盘）。 |
+
