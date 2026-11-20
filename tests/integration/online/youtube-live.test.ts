@@ -17,7 +17,7 @@
  * confined to a per-case scratch directory under `reports/l2-tmp/`; the user's
  * video library is never touched.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import { mkdir, readdir, stat, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -28,7 +28,13 @@ import {
   NODE_EXE, RUNTIME, ROOT, type L2Context,
 } from '../helpers/l2-harness.js';
 
-process.env['YTVDLT_L2_KEEP_TMP'] = '1';
+// D-264: declared stub instead of a module-load write to the shared
+// `process.env` that nothing ever restored. `l2-harness` reads the flag lazily
+// (inside `cleanup()`), so the stub covers the whole run; `unstubAllEnvs`
+// gives the worker back a pristine environment. (The evidence under
+// `reports/l2-tmp/` is kept for the audit trail either way.)
+vi.stubEnv('YTVDLT_L2_KEEP_TMP', '1');
+afterAll(() => { vi.unstubAllEnvs(); });
 
 const PLAYLIST_URL = 'https://www.youtube.com/watch?v=aArYr1vUgjs&list=PLpODSd__yLPULp9c7RaFXF4W8yxRnMZgd';
 const SUBTITLE_URL = 'https://www.youtube.com/watch?v=DTu4yvmc0Fc';

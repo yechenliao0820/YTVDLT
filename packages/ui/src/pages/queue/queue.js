@@ -832,13 +832,16 @@
    * print. An English page used to receive a hard-coded Chinese `reason` and
    * show it verbatim; resolve the refusal in the active locale instead, and
    * keep the raw reason only as a fallback for other failure kinds.
+   *
+   * D-260: the code -> key mapping lives in the pure display model
+   * (`MODEL.enqueueRefusalKey`, §3.0) — queue.js resolves the key through `t()`
+   * and never matches raw codes inline. Unknown codes keep the generic
+   * template with the raw `reason` as its honest fallback.
    */
   function enqueueFailureText(result) {
     var code = (result && result.code) ? String(result.code) : '';
-    if (code === 'SITE_UNSUPPORTED') return t('queue.precheck.blocked.site');
-    if (code === 'ITEM_UNSUPPORTED') return t('queue.precheck.blocked.item');
-    // T5: a cancellation is "the user said stop" — nothing was queued.
-    if (code === 'PRECHECK_CANCELLED') return t('queue.precheck.cancelled');
+    var refusalKey = MODEL.enqueueRefusalKey(code);
+    if (refusalKey !== null) return t(refusalKey);
     return t('queue.notify.enqueueFailed', {
       reason: (result && (result.reason || result.message)) || t('queue.notify.ipc')
     });

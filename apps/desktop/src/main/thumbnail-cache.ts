@@ -31,6 +31,23 @@
  * if the trash call fails or the process exits first, the next prune pass —
  * boot included — recycles marked entries with the switch OFF.
  *
+ * D-258 closes the race and accounting windows the audit found in that flow:
+ *   - the deletion decision is re-verified at DELETE time (index entry, the
+ *     in-memory `byTask` mapping and a FRESH `liveTaskIds()`); a cover that
+ *     gained a reference outside the purge between the marker and the trash
+ *     call is kept and its stale marker cleared;
+ *   - `forget()` invalidates in-flight results: an `ensure()` that lands after
+ *     its task was removed can no longer resurrect a reference or wipe the
+ *     marker; bytes that attempt freshly wrote with no owner record are
+ *     marked `purgePending` instead of sitting as an unmarked orphan;
+ *   - the marker write is observable (`commitIndex()`), and a FAILED marker
+ *     write skips the deletion entirely (never touch bytes the next pass
+ *     cannot prove it may recycle) and reports every name as `failed`;
+ *   - one pass recycles at most `pruneBatch` covers — the overflow stays
+ *     marked for the next prune pass (boot included), aligned with
+ *     `planThumbnailPrune`'s truncate semantics;
+ *   - the report no longer pretends success when the recycle bin is absent.
+ *
  * Failures are never fatal: every method resolves to a value, the card keeps
  * its letter badge, and a task with a broken URL costs exactly one request.
  */
@@ -101,14 +118,39 @@ export interface ThumbnailPruneReport {
   readonly lastPrunedAt: string | null;
 }
 
-/** What `purgeCovers()` reports to the caller (the close / quit path logs it). */
+/**
+ * What `purgeCovers()` reports to the caller (the close / quit path). The
+ * accounting is complete (D-258): every name the exclusivity rule identified
+ * is either recycled, honestly reported as still owed, kept because a
+ * reference appeared after the proof, or deferred to the next prune pass —
+ * `marked === removed + failed + keptReferenced + deferred` always holds.
+ */
 export interface ThumbnailCoverPurgeReport {
   /** Cover names the exclusivity rule identified for the given task ids. */
   readonly marked: number;
   /** Names actually handed to the recycle bin in this pass. */
   readonly removed: number;
-  /** Names left in the index (marked `purgePending`) after a failed recycle. */
+  /**
+   * Names that still owe a recycle after this pass because THIS pass could not
+   * do it: the recycle-bin port was absent, a trash call failed / refused, or
+   * (D-258) the `purgePending` marker could not be written so the deletion was
+   * skipped. They stay in the index for the next prune pass — bytes are never
+   * touched without their marker.
+   */
   readonly failed: number;
+  /**
+   * D-258: names skipped at DELETE time because a reference outside the purge
+   * appeared after the exclusivity proof (another task or a live task
+   * re-ensured the cover). Their stale marker is cleared and the regular
+   * retention rules own them again.
+   */
+  readonly keptReferenced: number;
+  /**
+   * D-258: names beyond this pass's `pruneBatch` cap. They stay marked and the
+   * next prune pass (boot included, switch-independent) continues the recycle —
+   * the same truncate semantics as `planThumbnailPrune`.
+   */
+  readonly deferred: number;
 }
 
 export interface ThumbnailCache {
@@ -123,6 +165,12 @@ export interface ThumbnailCache {
    * task ids — switch-independent, trash-port only, never throws. Covers
    * shared with any other task, untracked files, and anything the rule cannot
    * prove exclusive are left to the regular prune rules.
+   *
+   * D-258: the delete decision is re-verified per file at DELETE time (index,
+   * `byTask`, fresh `liveTaskIds()`); one pass recycles at most `pruneBatch`
+   * files with the overflow staying marked; a failed `purgePending` marker
+   * write skips the deletion; and the report accounts for every identified
+   * name (see `ThumbnailCoverPurgeReport`).
    */
   purgeCovers(taskIds: readonly string[]): Promise<ThumbnailCoverPurgeReport>;
   /** Current occupancy; never throws. */
@@ -252,6 +300,15 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
   const byTask = new Map<string, string>();
   /** taskId -> in-flight attempt, so a 1.2 s poll cannot fan out requests. */
   const inFlight = new Map<string, Promise<string | null>>();
+  /**
+   * D-258: task ids whose reference was dropped (`forget()`) while an
+   * `ensure()` may still be racing the network. A landing attempt for one of
+   * these must not resurrect the reference or wipe a purge-pending marker.
+   * In-memory only, bounded by the number of removals in one session; task ids
+   * are `crypto.randomUUID()` per enqueue and a removed record is never
+   * re-enqueued under the same id, so no invalidation is needed.
+   */
+  const forgottenTasks = new Set<string>();
 
   let index: IndexFile = emptyIndex();
   let writeChain: Promise<void> = Promise.resolve();
@@ -278,17 +335,34 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
     await rename(temp, indexPath);
   }
 
-  /** Serialise every index mutation so concurrent ensure/prune cannot clobber it. */
-  function commit(mutate: (current: IndexFile) => void): Promise<void> {
-    writeChain = writeChain.then(async () => {
+  /**
+   * Serialise every index mutation so concurrent ensure/prune cannot clobber
+   * it. Resolves `true` only when the mutation was applied AND flushed to
+   * disk; a write failure is logged and swallowed exactly as before (the
+   * D-252 error boundary is unchanged). D-258: the boolean return lets
+   * `purgeCovers()` OBSERVE a failed marker write — the marker is the
+   * recoverability guarantee, so deleting bytes without it would trade "the
+   * next prune recovers this" for "a crash leaves switch-gated residue" —
+   * without changing the fire-and-forget semantics of the other callers.
+   */
+  function commitIndex(mutate: (current: IndexFile) => void): Promise<boolean> {
+    const step = writeChain.then(async () => {
       mutate(index);
       await writeIndex();
+      return true;
     }).catch((error: unknown) => {
       void logger.warn('thumbnail-cache', 'index write failed; in-memory state still works', {
         detail: error instanceof Error ? error.message : String(error),
       });
+      return false;
     });
-    return writeChain;
+    writeChain = step.then(() => undefined);
+    return step;
+  }
+
+  /** Fire-and-forget variant with the exact pre-D-258 `commit()` semantics. */
+  function commit(mutate: (current: IndexFile) => void): Promise<void> {
+    return commitIndex(mutate).then(() => undefined);
   }
 
   /** Disk is the truth for size; the index is the truth for references. */
@@ -346,7 +420,44 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
     await reconcile();
   }).catch(() => { index = emptyIndex(); });
 
-  function attach(name: string, taskId: string, bytes: number): Promise<void> {
+  /**
+   * D-258: every reference the cache currently knows for `name` — the index
+   * taskIds plus whoever holds an in-memory `byTask` mapping (its index commit
+   * may still be in flight, so the index alone can lag the truth).
+   */
+  function currentOwnersOf(name: string): string[] {
+    const owners: string[] = [];
+    const entry = index.entries[name];
+    if (entry !== undefined) owners.push(...entry.taskIds);
+    for (const [taskId, path] of byTask) {
+      if (path.slice(path.lastIndexOf(sep) + 1) === name && !owners.includes(taskId)) {
+        owners.push(taskId);
+      }
+    }
+    return owners;
+  }
+
+  function attach(name: string, taskId: string, bytes: number, freshWrite = false): Promise<void> {
+    // D-258 (in-flight landing): `forget()` cannot cancel an attempt that is
+    // already racing the network. When it lands for a task that was removed in
+    // the meantime (private close, plain removal), it must NOT resurrect a
+    // reference — no `byTask` mapping, no index taskId, and above all no
+    // marker wipe — or the cover would sit unmarked (and with the auto-clean
+    // switch off: permanently). The one exception is bytes THIS attempt just
+    // wrote for a name the index has never heard of: without an owner record
+    // the file would be an unmarked orphan, so it is marked `purgePending` and
+    // the next prune pass recycles it switch-independently. Bytes that already
+    // existed (findLocal hit, or an entry another task created) belong to
+    // their existing owners / the age-budget rules exactly as before. A task
+    // that is NOT forgotten attaches normally and clears the marker — the
+    // queue showing the cover outranks the purge, exactly like the D-252 rule.
+    if (forgottenTasks.has(taskId)) {
+      if (freshWrite !== true) return Promise.resolve();
+      return commit((current) => {
+        if (current.entries[name] !== undefined) return;
+        current.entries[name] = { bytes, lastUsedAt: now(), taskIds: [taskId], purgePending: true };
+      });
+    }
     byTask.set(taskId, join(dir, name));
     return commit((current) => {
       const entry = current.entries[name] ?? { bytes, lastUsedAt: now(), taskIds: [] };
@@ -417,7 +528,7 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       // Confirm the bytes really are on disk before advertising the path.
       const stored = await readFile(target).catch(() => null);
       if (stored === null) return null;
-      await attach(name, taskId, bytes.byteLength);
+      await attach(name, taskId, bytes.byteLength, true); // D-258: this attempt wrote the bytes
       maybeAutoPrune();
       return target;
     } catch (error) {
@@ -597,42 +708,109 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
    * Deletion reuses the exact prune guards (`isSafeCacheName` + directory
    * prefix + injected recycle-bin port) — no new primitive, and a failure is
    * logged and swallowed: closing the window must never block or throw.
+   *
+   * D-258 hardens the window between the proof and the bytes:
+   *   - the marker write is OBSERVABLE (`commitIndex`); when it fails the
+   *     whole deletion phase is skipped — bytes are never touched without
+   *     their on-disk marker, and the report says so (`failed`);
+   *   - each file is re-checked at DELETE time: the exclusivity proof was
+   *     taken at mark time, but an in-flight ensure may have landed in
+   *     between. A cover that is now referenced outside the purge (or by a
+   *     live task) is kept, its stale marker cleared, and reported as
+   *     `keptReferenced`;
+   *   - one pass recycles at most `pruneBatch` files (close/quit latency
+   *     budget); the overflow stays marked and is reported as `deferred` —
+   *     the next prune pass continues, exactly like planThumbnailPrune's
+   *     truncate semantics;
+   *   - an absent recycle-bin port is honest accounting (`failed`), not a
+   *     silent `failed: 0`.
    */
   async function purgeCovers(taskIds: readonly string[]): Promise<ThumbnailCoverPurgeReport> {
     try {
       await indexReady;
       await writeChain;
       await reconcile();
-      const names = coverNamesOwnedOnlyBy(index.entries, new Set(taskIds));
-      if (names.length === 0) return { marked: 0, removed: 0, failed: 0 };
-      await commit((current) => {
+      const purgeSet = new Set(taskIds);
+      const names = coverNamesOwnedOnlyBy(index.entries, purgeSet);
+      if (names.length === 0) {
+        return { marked: 0, removed: 0, failed: 0, keptReferenced: 0, deferred: 0 };
+      }
+      // D-258: the debt is registered for EVERY identified name (not just the
+      // batch below) — the marker is what makes the recycle recoverable by the
+      // next prune pass, switch-independent.
+      const markerWritten = await commitIndex((current) => {
         for (const name of names) {
           const entry = current.entries[name];
           if (entry !== undefined) current.entries[name] = { ...entry, purgePending: true };
         }
       });
+      if (markerWritten !== true) {
+        // The recoverability invariant ("marked on disk before any byte is
+        // touched") cannot be guaranteed; deleting anyway would leave a crash
+        // mid-pass with switch-gated (switch off: permanent) residue. 宁可留待
+        // 下次: skip the deletion, report every name as still owed.
+        void logger.warn('thumbnail-cache', 'private cover purge skipped; the purge-pending marker could not be written', {
+          count: names.length,
+        });
+        return { marked: names.length, removed: 0, failed: names.length, keptReferenced: 0, deferred: 0 };
+      }
       if (options.trash === undefined) {
         // Nothing can be recycled safely; the marker keeps the debt visible
         // and recoverable. No fallback deletion primitive exists by design.
+        // D-258: every name still owes its recycle — say so instead of the
+        // old `failed: 0` that pretended success.
         void logger.warn('thumbnail-cache', 'private cover purge deferred; recycle bin unavailable', {
           count: names.length,
         });
-        return { marked: names.length, removed: 0, failed: 0 };
+        return { marked: names.length, removed: 0, failed: names.length, keptReferenced: 0, deferred: 0 };
       }
+      // D-258: one pass recycles at most `pruneBatch` files — the close/quit
+      // path runs inside a hard latency budget and must not become an
+      // unbounded delete burst. The overflow stays marked (above) and the
+      // next prune pass continues.
+      const batch = names.slice(0, Math.max(1, policy().pruneBatch));
       let removed = 0;
       let failed = 0;
+      let keptReferenced = 0;
       const removedNames: string[] = [];
-      for (const name of names) {
+      const keptNames: string[] = [];
+      for (const name of batch) {
         // Defence in depth: NEVER hand a path outside the cache directory to
         // the deletion primitive, and only ever a cache image name.
         if (!isSafeCacheName(name)) { failed += 1; continue; }
         const absolute = resolve(dir, name);
         if (!absolute.startsWith(resolve(dir) + sep)) { failed += 1; continue; }
+        // D-258 (delete-time reference recheck): decide on the state NOW, not
+        // at mark time. The index entry, the in-memory byTask mapping (its
+        // commit may still be in flight) and a FRESH live-task list — anything
+        // referenced outside the purge, or by a live task, goes back to the
+        // regular retention rules. 宁可少删，绝不可错删.
+        const liveNow = new Set(options.liveTaskIds === undefined ? [] : options.liveTaskIds());
+        const owners = currentOwnersOf(name);
+        if (owners.length === 0
+          || owners.some((id) => !purgeSet.has(id) || liveNow.has(id))) {
+          keptReferenced += 1;
+          keptNames.push(name);
+          continue;
+        }
         try {
           if (await options.trash(absolute) !== true) { failed += 1; continue; }
           removed += 1;
           removedNames.push(name);
         } catch { failed += 1; /* one bad file must not abort the purge */ }
+      }
+      if (keptNames.length > 0) {
+        // A kept cover must not drag a stale privacy marker around: its
+        // reference state changed after the proof, so the regular rules own it
+        // again (same bookkeeping as a live re-attach).
+        await commit((current) => {
+          for (const name of keptNames) {
+            const entry = current.entries[name];
+            if (entry === undefined || entry.purgePending !== true) continue;
+            const { purgePending: _staleMarker, ...rest } = entry;
+            current.entries[name] = rest;
+          }
+        });
       }
       if (removedNames.length > 0) {
         await commit((current) => {
@@ -648,14 +826,20 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
           failed, removed,
         });
       }
-      return { marked: names.length, removed, failed };
+      return {
+        marked: names.length,
+        removed,
+        failed,
+        keptReferenced,
+        deferred: names.length - batch.length,
+      };
     } catch (error) {
       // A privacy tidy-up must never bubble into the close / quit path (same
       // isolation as prune()); marked entries stay recoverable on the next pass.
       void logger.warn('thumbnail-cache', 'private cover purge failed; download queue untouched', {
         detail: error instanceof Error ? error.message : String(error),
       });
-      return { marked: 0, removed: 0, failed: 0 };
+      return { marked: 0, removed: 0, failed: 0, keptReferenced: 0, deferred: 0 };
     }
   }
 
@@ -700,16 +884,20 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
     },
 
     forget(taskId: string): void {
+      // D-258: remember the id so an in-flight `ensure()` that lands later
+      // cannot resurrect the reference (see `attach()`). The contract below is
+      // unchanged — the index KEEPS the historical owner id:
+      // `planThumbnailPrune()` compares it with the live task list, which is
+      // exactly what turns a removed task's cover into a `lost-reference`
+      // candidate. Erasing the id here would make the file look "never
+      // attributed" and postpone its cleanup by 30 days. The file itself is
+      // never deleted HERE — the private-mode close decides via `purgeCovers()`
+      // (D-252, exclusivity-proven ids only) and every other removal waits for
+      // a prune pass, which still checks that no OTHER live task shares the
+      // same cover.
+      forgottenTasks.add(taskId);
       byTask.delete(taskId);
       inFlight.delete(taskId);
-      // The index KEEPS the historical owner id: `planThumbnailPrune()` compares
-      // it with the live task list, which is exactly what turns a removed task's
-      // cover into a `lost-reference` candidate. Erasing the id here would make
-      // the file look "never attributed" and postpone its cleanup by 30 days.
-      // The file itself is never deleted HERE — the private-mode close decides
-      // via `purgeCovers()` (D-252, exclusivity-proven ids only) and every other
-      // removal waits for a prune pass, which still checks that no OTHER live
-      // task shares the same cover.
     },
 
     status,

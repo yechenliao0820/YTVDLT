@@ -1014,6 +1014,55 @@ describe('D-187 · 单链接入队：payload 组装与预检生命周期', () =>
     expect(callsTo(DOWNLOAD_START).length).toBe(before);
   });
 
+  it('PRIVATE_DIR_UNRESOLVABLE 拒绝按语言本地化，中文 reason 不再直出（D-254/D-260）', async () => {
+    // 纯显示模型的码 → 键映射（§3.0）：既有 3 码不回归，未知码 / 非字符串 → null。
+    const model = win().YTVDLT.queueModel as {
+      enqueueRefusalKey(code: unknown): string | null;
+    };
+    expect(model.enqueueRefusalKey('SITE_UNSUPPORTED')).toBe('queue.precheck.blocked.site');
+    expect(model.enqueueRefusalKey('ITEM_UNSUPPORTED')).toBe('queue.precheck.blocked.item');
+    expect(model.enqueueRefusalKey('PRECHECK_CANCELLED')).toBe('queue.precheck.cancelled');
+    expect(model.enqueueRefusalKey('PRIVATE_DIR_UNRESOLVABLE')).toBe('queue.precheck.privateDir');
+    expect(model.enqueueRefusalKey('WHATEVER')).toBeNull();
+    expect(model.enqueueRefusalKey(42)).toBeNull();
+
+    // D-254 的单链接归一化拒绝：code 是稳定码，reason 是主进程中文句子。
+    const refused = {
+      accepted: false, enqueued: false, taskIds: [],
+      code: 'PRIVATE_DIR_UNRESOLVABLE',
+      reason: '私有目录无法解析：缺少 %LOCALAPPDATA%（主进程中文原文）',
+    };
+    currentVerdict = { state: 'SUPPORTED', blocks: false };
+    queue.startRealDownload('https://example.com/private-dir');
+    await drain();
+    await settleChannel(DOWNLOAD_START, refused);
+    // zh-CN：稳定码解析为对应文案，中文 reason 不再直出。
+    expect(node('queue-status').textContent).toBe(T('queue.precheck.privateDir'));
+    expect(node('queue-status').textContent).not.toContain('主进程中文原文');
+
+    // en：t() 每次调用现读 __YTVDLT_SETTINGS__，切换注入即可验证英文界面。
+    const previousSettings = win().__YTVDLT_SETTINGS__;
+    win().__YTVDLT_SETTINGS__ = { locale: 'en' };
+    try {
+      queue.startRealDownload('https://example.com/private-dir-en');
+      await drain();
+      await settleChannel(DOWNLOAD_START, { ...refused, taskIds: [] });
+      expect(node('queue-status').textContent).toBe(T('queue.precheck.privateDir'));
+      expect(node('queue-status').textContent).not.toContain('主进程中文原文');
+    } finally {
+      win().__YTVDLT_SETTINGS__ = previousSettings;
+    }
+
+    // 未知码兜底不变：回复路径同样落通用模板 + 原文 reason。
+    queue.startRealDownload('https://example.com/unknown-code');
+    await drain();
+    await settleChannel(DOWNLOAD_START, {
+      accepted: false, enqueued: false, taskIds: [], code: 'SOMETHING_NEW', reason: 'ipc-原文',
+    });
+    expect(node('queue-status').textContent)
+      .toBe(T('queue.notify.enqueueFailed', { reason: 'ipc-原文' }));
+  });
+
   it('PRECHECK_CANCELLED 判定终止一切：无确认框、无 DOWNLOAD_START（T5/D-160）', async () => {
     const before = callsTo(DOWNLOAD_START).length;
     currentVerdict = { code: 'PRECHECK_CANCELLED' };

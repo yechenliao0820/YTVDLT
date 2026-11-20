@@ -2730,3 +2730,83 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 验证 | `command-template.test.ts` 43 项全绿（新增 7 例：三个方法写失败内存零变更 + 错误如实抛出、失败后紧跟成功保存磁盘与内存逐字一致且失败操作不复活、并发 create×2 / create+remove 不丢更新、remove 缺失 id 零写盘）。红→绿验证：临时还原旧实现 → 恰 4 个写失败用例红；退化变体探针（候选构造移出队列）→ 并发用例与 D-249 钉点双红，证明并发钉点有牙。typecheck 5/5；依赖面 m5-channels/m5-host/ui-shell-family 128/128。 |
 | 未覆盖 | 打包版真机未实测（铁律 9）；跨文件事务仍不存在（与 D-222 同级限制）；进程在 persist 成功与内存提交之间被杀时磁盘新、内存旧，重启以磁盘为准（单事实来源仍是磁盘）。 |
 
+## D-257 · 2026-11-20 · 清理窗口内的第二次退出请求不再直通（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 菜单「退出」→ `quitting=true` + 清理窗口开启 → 用户按 Alt+F4/点 X（close 因 quitting 不被托盘策略拦截，D-60/D-197 语义）→ 窗口销毁 → `window-all-closed → app.quit()` → 第二次 before-quit 命中旧 `cleanupStarted` 闩**无条件直通** → 进程立即退出：5 s 取消预算、D-255 排队快照写等待、3 s 无痕清理（含 purgeCovers）与子进程回收全部被拦腰截断。 |
+| 根因 | 第二次 quit 的放行设计只考虑了「清理自身的 `app.quit()`」；用户触发的第二次 quit 走同一无条件直通。 |
+| 决策 | 新模块 `apps/desktop/src/main/shutdown-quit-gate.ts::installShutdownQuitGate` 接管 before-quit 时序：首次 quit preventDefault 一次并启动清理 promise；窗口内一切再次 quit preventDefault 并挂起，多次请求合并为一次结算恢复（幂等）；`cleanupSettled` 在清理末尾 `app.quit()` 前置位——清理自身的退出与被恢复的挂起请求都直通，无 quit 死循环；结算后的再次 quit 照常放行。门闩零新计时器（只把退出推迟到既有有界清理的结算，5 s/3 s 预算一字未动）；清理体改 try/finally + `.then(settle, settle)`，清理体拒绝也照常退出且无未处理拒绝。bootstrap 的 close→托盘与 `quitting` 语义、shutdown-cancel.ts 未动。 |
+| 验证 | 新测试文件 6 例（窗口内拦截 / 重复请求合并幂等 / 结算自动 quit / 窗口外直通不重启 / 无任务快速路径 / 清理体拒绝仍退出）+ 接线钉点（electron-entry 源码不再含旧闩）；红→绿（旧语义恰 2 例红）；假件复刻真实派发次序（`app.quit()` 同步发 before-quit、被拦即中止——坑 37/41）；已按 D-188 登记 `acceptance.mjs` A-D257。typecheck 5/5；同域回归 shutdown-cancel/bootstrap/app-menu/session-permission-gate 54/54。 |
+| 未覆盖 | 打包版真机复现原场景待业主点名打包（铁律 9）；门闩与 close→托盘的交互只有静态推理（electron-entry 无法在无 Electron 二进制环境整体执行）；挂起恢复无独立超时兜底——清理 promise 结构性必结算（try/finally + 3 s race），与旧行为同级，未引入新无界等待。 |
+
+## D-258 · 2026-11-20 · 无痕封面回收的删除时刻复核与如实账目（外部在线审计 P2+P3×2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | ① `purgeCovers` 名单一次取定后直接删除：标记后至 trash 前落地的引用变化（另一活任务并发认领同一封面）会被误删；② `attach()` 无条件清 `purgePending`、`forget()` 只删映射不取消在飞 ensure——慢网下关窗，抓取在回收之后落地即清标记重建条目，产生无标记永久残留（开关关闭时长期残留）；③ 标记写失败被 `commit()` 吞掉（内存标记、盘上没有），删除照常进行；④ 一次删光名单、无 `pruneBatch` 上限；⑤ trash 缺席时 `failed: 0` 账目失真。 |
+| 根因 | D-252 的「先标记后删字节」把独占证明、标记落盘、删除三个时刻混为同一份快照；attach 的「活引用清标记」规则对 forgotten 任务同样生效；commit 的 void 返回让唯一需要写入成败的调用方失明。 |
+| 决策 | ① **删除决定基于删除时刻**：逐文件 trash 前复核 index taskIds ∪ `byTask`（覆盖在飞 commit）∪ 新鲜 `liveTaskIds()`——名单外引用 / 活引用 / 独占证明失效一律放行并清过期标记，计 `keptReferenced`；② `forget()` 登记 `forgottenTasks` 集（taskId 每次入队新发、单次生效），attach 遇 forgotten id 不复活引用、不清标记；仅「本次新写盘且 index 无记录」落 `purgePending` 条目交下次 prune（含启动、无视开关）回收；③ append-only：`commitIndex(): Promise<boolean>`，`commit()` 语义逐字保留；标记写失败 → 跳过整个删除阶段、`failed` 如实记账；④ 单次回收量 ≤ `pruneBatch`（标记仍对全部名单落盘，超出计 `deferred` 交下次 prune）；⑤ 报告扩为 `{marked, removed, failed, keptReferenced, deferred}` 且恒等式成立；trash 缺席 `failed = names.length`。原则：宁可少删，绝不错删；绝不 throw、绝不阻塞关窗（D-252 吞错边界原样）。 |
+| 验证 | 红→绿（实现前 13 红/17 绿 → 实现后 30/30）+ 复核变异专项（禁用复核仅 2 例红）；thumbnail-cache 30 + policy 15 + offline 集成 4 + task-queue 无痕 7 全绿；typecheck 5/5。 |
+| 未覆盖 | trash 调用进行中的纳秒级窗口无进程内互斥可闭合（已收窄到单文件原子操作内部，残余与 prune() 同量级，刻意接受）；`deferred` 依赖下次 prune 存在（关窗后立即卸载且从不重启时标记债务等在 index.json，与 D-252 原语义一致）；回收站被系统禁用仍只能标记等待（D-252 取舍不变）。 |
+
+## D-259 · 2026-11-20 · 队列快照写失败的三处语义如实化（外部在线审计 P3×3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | ① `remove()` 删除排队任务遇写失败只把记录放回 `records`、不放回 `pending`——僵尸记录（永不 pump、卡片不可跑不可取消不可再删）；② `cancel()` 的 D-200 分支忽略 `persistSnapshot()` 结果，写失败仍返回 confirmed `true`，shutdown-cancel 报告误记而非 `persist-failed`；③ 单条 `enqueue()` 先 `pump()` 后持久化，槽位空闲时写失败但下载已 spawn，「未能加入队列」为假话。 |
+| 根因 | D-242 的「写失败放回内存原位」在 remove 处漏掉了 FIFO（pending 是纯内存结构，不在磁盘对齐语义里）；D-200 分支注释声称 mirror pending 分支但漏掉其核心的写检查；enqueue 的写入点在启动之后，检查结果改变不了已发生的事实。 |
+| 决策 | ① remove 失败路径 `pending.splice(pendingIndex, 0, taskId)` 原位还原（与 cancel 排队分支同款）；② D-200 分支写失败即 throw（reason 带 errno 原文）；transition 不可回滚（Canceled 无回边），窗口 = 内存 Canceled / 磁盘旧值——**内存是后续所有写的单事实来源**（persistSnapshot 恒序列化内存且失败已反预留指纹，下一次任意触发即覆盖磁盘）；进程在此之前死掉则 `restore()` 按旧值走既有启动规则（D-209 / M4-3 口径），无任何路径自行复活下载；shutdown-cancel 报告因此如实记 `persist-failed`；③ 单条 enqueue 改 **write-then-start**：写失败回滚精确入队前态（记录 / FIFO / cancelRequested）再抛「任务未能加入队列：…」，任务绝不启动；写成功才 pump。批量（D-231 逐条 park、批次末一次写）与无 store（L0 降级，M4-2 钉）两路径豁免保持原序；D-163 写次数契约不变。 |
+| 验证 | 修复前 4 例必红实测（cancel 假 confirmed / 写在途已 Completed / 旧文案记录残留 / FIFO 未还原）；修复后 task-snapshot-persist 18 + task-queue-cancel-failure 13 全绿；16 文件 / 244 用例定向回归（含 M4-2/M4-4 验收、D-163/D-231/D-236/D-240/D-242 钉点零改动通过）；typecheck 5/5。 |
+| 未覆盖 | ② 的「内存 Canceled → 下一次成功写对齐」未单独造窗口测试（分支注释钉住口径）；真机满盘 / 只读盘未复现（沿用 D-242 的 ENOSPC 假注入口径）；`restart()` 的 pump→persistOrThrow 次序不在本次审计范围，未改（如需同款治理另立条目）。 |
+
+## D-260 · 2026-11-20 · 英文界面拒绝文案：稳定码映射下沉纯显示模型（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-254 的单链接拒绝携带稳定码 + 中文句子 reason；`queue.js::enqueueFailureText` 只映射 3 个 D-137 稳定码，`PRIVATE_DIR_UNRESOLVABLE` 落通用模板并把中文 reason 直出——英文界面出现中文（手册 §10 既有已知项）。 |
+| 根因 | D-254 按先例回了稳定码，但渲染层的码 → 键映射表没有随之扩充；且映射以裸码 if 形式内联在 queue.js 而非 §3.0 规定的纯显示模型。 |
+| 决策 | ① `queue-model.js` 新增零依赖纯函数 `enqueueRefusalKey(code)`（既有 3 码 + 新码 → 键，未知 → null），queue.js 只经 `t()` 解析、不再裸码判断；② `messages.js` 双语各加 `queue.precheck.privateDir`；③ 未知码兜底（通用模板 + 原文 reason）逐字保持；④ 主进程侧零改动（D-137 稳定码下发原则不变）。 |
+| 验证 | typecheck 5/5；ui-queue-page 72/72（新增 zh/en + 兜底 + 映射钉点）；i18n 11/11（双语键集合一致）；邻接 6 文件 108/108；check-layering 0 违规；e2e 全量 31/31 + 反例 5/5、0 像素差（新键不在任何静态 DOM，基线零改动）。 |
+| 未覆盖 | TXT/播放列表批次入口的批次级 `ENQUEUE_FAILED` 仍无精确码（D-254 已登记，逐条 reason 可见，需动 shared closed union）；打包版真机未实测（铁律 9）；未来主进程新增稳定码需同步扩 `ENQUEUE_REFUSAL_KEYS`（表内注释指路）。 |
+
+## D-261 · 2026-11-20 · 回归用例摆脱宿主 LOCALAPPDATA 依赖（外部在线审计 P3，测试卫生）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | m4-host.test.ts 的 D-229/D-254 回归用例真伪依赖宿主恰好存在 `LOCALAPPDATA`：D-254 用手写 `delete process.env[...]` 改写进程级共享状态；D-229 第一例经默认展开器（入队时读宿主 env）隐式依赖同一变量——在无该变量的 Linux/容器上 intake fail-closed 抛 `PRIVATE_DIR_UNRESOLVABLE`，用例因错误原因假失败。CI 恰好只有 windows-latest 所以从未暴露（坑 33 的「本机全绿 ≠ CI 全绿」同类）。 |
+| 根因 | 把「系统缺变量」的模拟建立在对宿主全局状态的命令式改写上，而非声明式打桩；vitest 原生提供 `vi.stubEnv` / `vi.unstubAllEnvs`。 |
+| 决策 | 只改测试不改生产（不给 m4-host 加 env 注入参数，不扩大契约）：D-254 用例改 `vi.stubEnv('LOCALAPPDATA', '')`（空串在 `expandEnvVars` 语义等同「解析不了」，拒绝路径已核对）+ describe 级 `afterEach(vi.unstubAllEnvs())`；D-229 describe 级 `beforeEach` 钉确定值。断言零改动、用例数不变。 |
+| 验证 | typecheck 5/5；m4-host.test.ts 23/23，且在 `unset LOCALAPPDATA` 的模拟 Linux 宿主下同样 23/23（自足性证明）。 |
+| 未覆盖 | 其它文件的同类宿主 env 改写（`tests/integration/offline/subtitle-final-acceptance.test.ts` 模块加载期写 `YTVDLT_L2_KEEP_TMP` 等）只登记未修改（集成套件优先级低）；CI 未加 Linux 检证任务（超出本项范围）。 |
+
+## D-262 · 2026-11-20 · 命令模板 update() 错误优先级还原：unknown-id 先于校验（外部在线审计 P3；修正 D-256 不实声明）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-256 把 update() 的 patch 校验挪到写队列之外，静默翻转了错误优先级——pre-D-256 是先 findIndex 查 unknown-id 再内联校验（name 先于 args），D-256 后「未知 id + 非法 name」改抛 `CUSTOM_COMMAND_REJECTED` 而非 `unknown command template`；而 D-256 的注释仍写「…are byte-identical to the pre-D-256 code」，与实现自相矛盾。分类后果：该组合在 D-256 窗口内被误报为「命令含禁用选项」，实为模板不存在。 |
+| 根因 | D-256 改造时把「校验为纯函数」优化（留在队列外）误当成可保全的行为，且未实际验证 unknown-id + 非法输入的组合路径就写下了逐字一致的声明——注释陈述未经测试钉点背书。 |
+| 决策 | 还原旧优先级：`validateName/validateArgs` 挪进写队列任务内、置于 unknown-id 检查之后（name 先于 args，与 pre-D-256 内联顺序逐字一致）。取舍明记：校验为纯函数无 I/O，占串行队列微秒级，D-256「拒绝的输入不占队列」降级为已放弃的优化而非契约；persist-first commit-after 契约（写失败零内存变更、候选构造整段在队列内、D-249 三钉点）原样保留，create/remove 不动。D-256 条目按 append-only 不回改，由本条目修正其优先级声明。 |
+| 验证 | command-template.test.ts 47 项全绿（43 基线 + 4 新钉点：未知 id+非法 name/args → unknown-id 且零副作用；已知 id+非法 name → CUSTOM_COMMAND_REJECTED 且零副作用；name 先于 args；队列内拒绝不毒化）。红→绿：临时还原 D-256 翻转形态 → 恰 2 个优先级钉点红。typecheck 5/5。下游核查：TEMPLATE_SAVE 透传错误不分支，全仓无代码/测试钉住翻转行为，还原后两类错误稳定码/文案与 pre-D-256 一致。 |
+| 未覆盖 | 打包版真机未实测（铁律 9）；被拒绝输入占队列的微秒级时延无量化基准（无可观测影响面）；D-256 注释同段的「校验留在队列外」表述以本条目为准，未回改原文。 |
+
+## D-263 · 2026-11-20 · restart() 改 write-then-start：重试任务不再「已启动却被报失败」（D-259 同款缺口的收尾）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-259 修 `enqueue()` 时确认 `restart()` 存在同构缺口：`pending.push → pump() → persistOrThrow`——槽位空闲时重试任务先启动（可 spawn），快照写失败后调用方拿到「重试任务已启动，但队列快照未能写入磁盘」的失败报告；且 restart 比 enqueue 多一层：它在 pump 前就做了 transition（Canceled/Idle→目标态）与 D-107/D-115 字段清空，写失败时内存已变、磁盘仍旧——内存/磁盘分歧。 |
+| 根因 | 与 D-259 的 enqueue 同构：写入点在启动之后，检查结果改变不了已发生的事实；restart 的就地变更让回滚比 enqueue 更不可省。 |
+| 决策 | 与 D-259 完全同款的 **write-then-start**：进入时先捕获重启前快照（浅拷贝 + artifacts/subtitleFiles 数组拷贝；`subtitleFiles` 缺席时保持键缺席——键形状保真，否则 `toEqual` 钉点立刻抓住）与 FIFO 槽位（若在队）；写门放在 `pending.push`/`pump()` **之前**（`batchDepth === 0 && taskStore !== undefined`）；写失败 → `records.set(taskId, before)` + 按原位还原 FIFO + throw「任务未能重试：队列快照未能写入磁盘」——任务绝不启动，错误字面为真；写成功才 pump。豁免镜像 enqueue（D-231 批量 / 无 store L0 降级保持原序）；D-163 写次数契约不变（每次 restart 仍恰一次结构性写）。transition 在失败路径已发出的事件有界且轮询式列表自纠（下一次 TASK_LIST 读到还原态）。 |
+| 验证 | 红→绿：临时禁用写门 → D-263 用例红（restart 直接 resolve）；还原 → task-snapshot-persist / task-queue-cancel-failure / task-queue 三文件 76/76 绿；全量 173 文件 / 3002 例 + 6 skipped 全绿；typecheck 5/5。 |
+| 未覆盖 | 打包版真机未实测（铁律 9）；「restart 后写失败但 transition 事件已被 UI 短暂看到」的窗口只在失败路径存在、靠轮询自纠，无专门窗口测试（与 D-259② 同级的口径注释钉住）。 |
+
+## D-264 · 2026-11-20 · 集成测试的宿主 env 改写改声明式打桩（D-261 同类项清零）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-261 收尾时登记的同类项：`tests/integration/offline/subtitle-final-acceptance.test.ts` 与 `tests/integration/online/youtube-live.test.ts` 都在**模块加载期**写 `process.env['YTVDLT_L2_KEEP_TMP'] = '1'` 且从不恢复——worker 内跨测试文件的全局 env 改写（前者在默认离线套件里运行）。`l2-harness.ts::cleanup` 是**惰性读取**（清理时才查该旗标，用于跳过草稿目录删除、保留审计证据），所以改声明式打桩不改变任何行为。 |
+| 根因 | 用命令式全局改写模拟「环境旗标」，而不是 vitest 的声明式 stub；模块加载期写入永远不会恢复。 |
+| 决策 | 两文件改为 `vi.stubEnv('YTVDLT_L2_KEEP_TMP', '1')`（模块作用域，覆盖整轮运行）+ 顶层 `afterAll(vi.unstubAllEnvs())` 还原；生产代码与 `l2-harness` 零改动。`real-process-port.ts` 的 `SystemRoot`（带 `C:\Windows` 兜底）与 `{...process.env}` 子进程透传属正常用法，不改。 |
+| 验证 | 离线集成 `subtitle-final-acceptance.test.ts` 12/12 绿（stub 下行为不变）；全量 173 文件 / 3002 例全绿；typecheck 5/5。 |
+| 未覆盖 | online 套件（`youtube-live.test.ts`）仅按 `vitest.online.config.ts` 点名运行，本轮未跑真实国际网验证（与 D-132 口径一致）；其余读 env 的集成辅助（`YTVDLT_REAL_DOWNLOAD` 开关等）有兜底，属功能开关而非成败依赖，保持原样。 |
+

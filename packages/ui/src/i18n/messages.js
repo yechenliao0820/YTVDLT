@@ -152,8 +152,11 @@
       'queue.precheck.indeterminate': '未确认',
       'queue.precheck.skippedNote': '有 {skipped} 条链接没有经过预检，下载时才会知道结果。',
       // D-137: single-link pre-check outcomes, resolved from stable IPC codes.
+      // D-260: D-254's fail-closed private-dir refusal, resolved in-page too —
+      // the main process' Chinese `reason` must never reach an English UI.
       'queue.precheck.blocked.site': '下载引擎不支持该站点，已阻止加入队列；可在「支持的网站」中核对。',
       'queue.precheck.blocked.item': '下载引擎明确拒绝了该链接，已阻止加入队列。',
+      'queue.precheck.privateDir': '私有下载目录无法解析（缺少 %LOCALAPPDATA% 环境变量），本次下载未加入队列。',
       'queue.precheck.noMediaNotice': '预检未发现可下载媒体，仍已加入队列，结果以下载为准。',
       'queue.precheck.indeterminateNotice': '预检未能确认该链接，仍已加入队列，结果以下载为准。',
       'queue.precheck.timeoutNotice': '预检超时，仍已加入队列，结果以下载为准。',
@@ -751,8 +754,11 @@
       'queue.precheck.indeterminate': 'Unconfirmed',
       'queue.precheck.skippedNote': '{skipped} link(s) were never pre-checked — only the download will decide.',
       // D-137: single-link pre-check outcomes, resolved from stable IPC codes.
+      // D-260: D-254's fail-closed private-dir refusal, resolved in-page too —
+      // the main process' Chinese `reason` must never reach an English UI.
       'queue.precheck.blocked.site': 'The download engine does not support this site; nothing was added. Check the supported-sites list.',
       'queue.precheck.blocked.item': 'The download engine explicitly rejected this link; nothing was added.',
+      'queue.precheck.privateDir': 'The private download directory could not be resolved (the %LOCALAPPDATA% environment variable is missing); nothing was queued.',
       'queue.precheck.noMediaNotice': 'The pre-check found no media, but the link was still queued — the download decides.',
       'queue.precheck.indeterminateNotice': 'The pre-check could not confirm this link, but it was still queued — the download decides.',
       'queue.precheck.timeoutNotice': 'The pre-check timed out, but the link was still queued — the download decides.',

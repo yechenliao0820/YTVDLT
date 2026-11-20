@@ -1,11 +1,17 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import { readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, join, relative } from 'node:path';
 import type { DownloadRequest, SpawnResult } from '@ytvdlt/shared';
 import { startMockServer, type MockRoute } from '../helpers/mock-server.js';
 import { createL2Context, buildRequest, makeRecord, waitFor, FIXTURE, RUNTIME, YTDLP, type L2Context } from '../helpers/l2-harness.js';
 
-process.env['YTVDLT_L2_KEEP_TMP'] = '1';
+// D-264: this suite verifies on-disk artifacts AFTER `cleanup()` runs, so the
+// harness's scratch delete must be skipped — but as a DECLARED stub instead of
+// a module-load write to the shared `process.env` that nothing ever restored.
+// `l2-harness` reads the flag lazily (inside `cleanup()`), so the stub covers
+// the whole run; `unstubAllEnvs` gives the worker back a pristine environment.
+vi.stubEnv('YTVDLT_L2_KEEP_TMP', '1');
+afterAll(() => { vi.unstubAllEnvs(); });
 
 const vtt = (label: string): string => `WEBVTT\n\n00:00:00.000 --> 00:00:01.500\n${label}\n`;
 const page = (tracks: string): string => `<!doctype html><html><head><title>final subtitle acceptance</title></head><body><video controls><source src="/fixture.mp4" type="video/mp4">${tracks}</video></body></html>`;

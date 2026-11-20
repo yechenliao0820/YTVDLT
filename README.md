@@ -335,6 +335,16 @@ cancelled on quit with a bounded wait for exit evidence (and `Alt+F4` handed bac
 the OS window-close path), single-flight bounded file-status probing, and a
 command-template store that backs up a damaged file before replacing it.
 
+A second audit round on top of that (D-250…D-264) adds: an `http://` → `https://`
+cover upgrade so Bilibili covers are no longer rejected by the https-only gate, a
+themed status bar in place of the persistent empty `{}` box on the detail page,
+private-mode cover-cache reclaim with a delete-time reference re-check and an
+exact accounting, a narrowed install baseline, a fail-closed private-directory
+expansion, quit-path evidence for queued tasks plus a gate that keeps a second
+quit from cutting the cleanup short, persist-first template CRUD with its error
+priority restored, write-then-start for retries, English refusal copy through a
+pure display model, and test suites that no longer rewrite the host environment.
+
 ## Engineering and verification
 
 Every change lands through the same gates; the table below is the standing

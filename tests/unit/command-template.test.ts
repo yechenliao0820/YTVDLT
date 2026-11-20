@@ -503,6 +503,86 @@ describe('D-256 · persist-first commit-after：写失败内存零变更、错�
   });
 });
 
+// ---------------------------------------------------------------------------
+// D-262 · update() 错误优先级还原（外部审计 P3；修正 D-256 的不实声明）。
+//
+// pre-D-256 的 update() 先 findIndex 查 unknown-id，再内联校验 patch 字段
+// （name 先于 args）。D-256 把校验挪到写队列之外，静默翻转了优先级：
+// 「未知 id + 非法 name」改抛 CUSTOM_COMMAND_REJECTED 而不是 unknown-id，
+// 而 D-256 的注释仍写「byte-identical to the pre-D-256 code」——本轮外部
+// 审计证伪该声明。修复把校验作为纯函数挪回队列任务内、放在 unknown-id 检查
+// 之后（校验无 I/O，占队列微秒级；D-256「拒绝的输入不占队列」是优化不是
+// 契约），persist-first 契约原样保留。以下用例钉死还原后的语义。
+// ---------------------------------------------------------------------------
+describe('D-262 · update() 错误优先级：unknown-id 先于校验（还原 pre-D-256 语义）', () => {
+  const templatePath = (mem: ReturnType<typeof createInMemoryPorts>): string =>
+    `${mem.state.env.configDir}/command-templates.json`;
+
+  const diskState = (mem: ReturnType<typeof createInMemoryPorts>, path: string): unknown =>
+    JSON.parse(mem.state.files.get(path) as string);
+
+  it('未知 id + 非法 name（且非法 args）：抛 unknown-id，而不是 CUSTOM_COMMAND_REJECTED', async () => {
+    const mem = createInMemoryPorts();
+    const path = templatePath(mem);
+    const store = new CommandTemplateStore({ ports: mem.ports });
+    const first = await store.create({ name: 'A', args: ['--embed-subs'] });
+    const diskBefore = diskState(mem, path);
+    const listBefore = store.list();
+
+    // Both the name AND the args are invalid: the unknown-id error must win
+    // (the precedence the pre-D-256 code had and D-256 silently flipped).
+    await expect(store.update('tpl-missing', { name: '   ', args: [] }))
+      .rejects.toThrow('unknown command template: tpl-missing');
+
+    // A rejected input still has zero side effects (D-256 guarantee intact).
+    expect(store.list()).toEqual(listBefore);
+    expect(diskState(mem, path)).toEqual(diskBefore);
+  });
+
+  it('已知 id + 非法 name：抛校验错误（code CUSTOM_COMMAND_REJECTED）', async () => {
+    const mem = createInMemoryPorts();
+    const path = templatePath(mem);
+    const store = new CommandTemplateStore({ ports: mem.ports });
+    const first = await store.create({ name: 'A', args: ['--embed-subs'] });
+
+    await expect(store.update(first.id, { name: '   ' }))
+      .rejects.toMatchObject({ code: 'CUSTOM_COMMAND_REJECTED' });
+    // A rejected patch leaves memory AND disk untouched.
+    expect(store.get(first.id)?.name).toBe('A');
+    expect((diskState(mem, path) as { templates: Array<{ name: string }> }).templates[0]?.name).toBe('A');
+  });
+
+  it('已知 id + name 与 args 双非法：name 错误先抛（与旧码内联顺序一致）', async () => {
+    const mem = createInMemoryPorts();
+    const store = new CommandTemplateStore({ ports: mem.ports });
+    const first = await store.create({ name: 'A', args: ['--embed-subs'] });
+
+    // The pre-D-256 inline sequence validated name before args; the reason
+    // rides on the AppError `detail` (message is the shared Chinese text).
+    await expect(store.update(first.id, { name: '   ', args: [] }))
+      .rejects.toMatchObject({
+        code: 'CUSTOM_COMMAND_REJECTED',
+        detail: expect.stringMatching(/template name/),
+      });
+  });
+
+  it('队列内的 unknown-id / 校验拒绝不毒化写队列（D-249 钉点延伸到新路径）', async () => {
+    const mem = createInMemoryPorts();
+    const path = templatePath(mem);
+    const store = new CommandTemplateStore({ ports: mem.ports });
+    const first = await store.create({ name: 'A', args: ['--embed-subs'] });
+
+    await expect(store.update('tpl-missing', { name: '   ' })).rejects.toThrow('unknown command template');
+    await expect(store.update(first.id, { name: '   ' })).rejects.toMatchObject({ code: 'CUSTOM_COMMAND_REJECTED' });
+
+    // The chain stays settled: the next update still runs and commits.
+    const updated = await store.update(first.id, { name: 'B' });
+    expect(updated.name).toBe('B');
+    expect(store.get(first.id)?.name).toBe('B');
+    expect((diskState(mem, path) as { templates: Array<{ name: string }> }).templates[0]?.name).toBe('B');
+  });
+});
+
 describe('M4-5 · buildCustomDownload argv', () => {
   it('keeps the compliance prefix/suffix, exactly one -- and the URL last', () => {
     const argv = buildCustomDownload(['-f', 'best', '--embed-subs'], 'https://example.org/v', CTX);

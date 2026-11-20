@@ -14,6 +14,12 @@
  * read → build-next → persist → commit sequence runs INSIDE the existing
  * write queue, so concurrent CRUD never loses an update (each operation builds
  * its candidate on top of the last COMMITTED state).
+ *
+ * D-262 (external audit P3; corrects one D-256 claim): `update()` validates
+ * the patch INSIDE the queue task, after the unknown-id check — restoring the
+ * pre-D-256 error precedence (unknown id before validation), which D-256 had
+ * silently flipped while claiming byte-identical behavior. See the
+ * {@link CommandTemplateStore.update} note for the trade-off.
  */
 import type { CorePorts } from '@ytvdlt/shared';
 import { isMissingFileError } from '../fs-errors.js';
@@ -225,25 +231,40 @@ export class CommandTemplateStore {
   }
 
   /**
-   * Same D-256 contract as {@link create}: the unknown-id check, the candidate
-   * construction and the commit all run inside the queue task; the persisted
-   * payload is the would-be list with the patch applied. A write failure
-   * leaves the old template in memory AND on disk, and the error surfaces to
-   * the caller unchanged. Validation stays outside the queue (pure), so the
-   * `CUSTOM_COMMAND_REJECTED` behavior and the unknown-id error precedence
-   * (a rejected patch reports the validation error before the id is looked
-   * at) are byte-identical to the pre-D-256 code.
+   * Same D-256 contract as {@link create}: the candidate construction, the
+   * would-be persist and the commit all run inside the queue task; the
+   * persisted payload is the would-be list with the patch applied. A write
+   * failure leaves the old template in memory AND on disk, and the error
+   * surfaces to the caller unchanged (`CUSTOM_COMMAND_REJECTED` for a
+   * rejected patch on a KNOWN id, the plain `unknown command template`
+   * error otherwise).
+   *
+   * D-262 (external audit P3; corrects the D-256 note): the error
+   * precedence is unknown-id FIRST, then name, then args — byte-identical
+   * to the pre-D-256 code (`findIndex` → unknown-id throw → validateName →
+   * validateArgs). D-256 hoisted the validation in front of the queue task,
+   * which silently flipped that precedence: an update naming an unknown id
+   * AND an invalid name reported `CUSTOM_COMMAND_REJECTED` instead of the
+   * unknown-id error, while the D-256 comment still claimed the behavior
+   * was byte-identical — the audit falsified that claim. To restore the
+   * original precedence the validation now runs INSIDE the queue task,
+   * after the id lookup. The cost is deliberate: the validators are pure
+   * functions with no I/O (microseconds on the serial queue), and D-256's
+   * "a rejected input never occupies the write queue" was an optimization,
+   * not a contract — the persist-first guarantees (write failure ⇒ zero
+   * memory change, candidate built on the last committed state) are
+   * unaffected, and a rejected input still has zero side effects.
    */
   async update(id: string, patch: Partial<CommandTemplateInput>): Promise<CommandTemplate> {
     await this.init();
-    const patchedName = patch.name === undefined ? undefined : this.validateName(patch.name);
-    const patchedArgs = patch.args === undefined ? undefined : this.validateArgs(patch.args);
     return this.enqueue(async () => {
       const index = this.templates.findIndex((template) => template.id === id);
       if (index === -1) throw new Error(`unknown command template: ${id}`);
       const current = this.templates[index] as CommandTemplate;
-      const name = patchedName === undefined ? current.name : patchedName;
-      const args = patchedArgs === undefined ? current.args : patchedArgs;
+      // Pre-D-256 precedence (D-262): id first, then the patch fields —
+      // name before args, exactly as the old inline sequence did.
+      const name = patch.name === undefined ? current.name : this.validateName(patch.name);
+      const args = patch.args === undefined ? current.args : this.validateArgs(patch.args);
       const next: CommandTemplate = {
         ...current, name, args: [...args], updatedAt: this.ports.clock.nowIso(),
       };

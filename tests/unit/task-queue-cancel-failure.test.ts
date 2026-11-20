@@ -19,7 +19,7 @@
  *    and the slot is released to the FIFO.
  */
 import { describe, it, expect } from 'vitest';
-import { TaskQueue, HistoryStore } from '@ytvdlt/core';
+import { TaskQueue, TaskStore, HistoryStore } from '@ytvdlt/core';
 import type {
   DownloadEngine, EngineEvent, DownloadRequest, MediaInfo, TaskRecord,
 } from '@ytvdlt/shared';
@@ -381,6 +381,63 @@ describe('D-200 · cancel() lands in the handle-less probe → engine window', (
     await tick();
     expect(queue.get('t1')?.state).toBe('Canceled');
     expect(queue.get('t1')?.error ?? null).toBeNull();
+  });
+
+  // D-259 (audit P3) · the D-200 branch's "mirror the pending-branch behaviour"
+  // comment was half true: the pending branch (D-242) CHECKS the snapshot write
+  // and throws with the errno reason; the D-200 branch ignored the result and
+  // returned `true` — so a caller (shutdown-cancel's per-task report) recorded
+  // "confirmed" for a cancel whose tasks.json write never landed. The
+  // transition itself cannot be rolled back (no legal edge back from
+  // `Canceled`), so the honest contract is: report the failure, keep memory =
+  // Canceled, let disk keep the pre-cancel value, and let the documented
+  // alignment rules take over (next successful persist writes memory; a
+  // restart before that re-applies D-209 / M4-3 on the old value).
+  it('cancel() in the window reports a failed snapshot write instead of a fake confirmation', async () => {
+    const mem = createInMemoryPorts();
+    const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    let fail = false;
+    mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (fail && path.endsWith('tasks.json')) throw new Error('ENOSPC: no space left on device');
+      await inner(path, text);
+    };
+    const queue = new TaskQueue({
+      ports: mem.ports, engine: fakeEngine(newEngineState()), verifier: okVerifier,
+      history: new HistoryStore({ ports: mem.ports }),
+      taskStore: new TaskStore({ ports: mem.ports }),
+      jsRuntimePath: 'C:/runtime/node.exe',
+    });
+    // A restored `ReadyWithInfo` record: no slot, no handle, no run in flight —
+    // the deterministic shape of the D-200 window (same as the test above).
+    await queue.restore({
+      schemaVersion: 1,
+      savedAt: '2026-11-12T00:00:00.000Z',
+      tasks: [{ ...record('t1'), state: 'ReadyWithInfo', mediaInfo: mediaInfo() }],
+    });
+
+    // The restore write SUCCEEDED, so disk really holds `ReadyWithInfo`...
+    const before = mem.state.files.get(`${mem.ports.env.configDir()}/tasks.json`);
+    expect(before).toBeDefined();
+    expect((JSON.parse(before as string) as { tasks: Array<{ state: string }> }).tasks[0]?.state)
+      .toBe('ReadyWithInfo');
+
+    // ...then the disk breaks and the cancel can no longer persist.
+    fail = true;
+    await expect(queue.cancel('t1')).rejects.toThrow(/快照未能写入磁盘/);
+
+    // Memory is truthfully Canceled (the transition was emitted and there is
+    // no legal edge back); the reason travels to the caller, which is what
+    // lets shutdown-cancel classify the task as persist-failed, not confirmed.
+    expect(queue.get('t1')?.state).toBe('Canceled');
+    expect(queue.get('t1')?.error ?? null).toBeNull();
+
+    // Disk still holds the pre-cancel value — the single-source-of-truth rule
+    // (memory wins on the NEXT successful write; D-209/M4-3 decide the boot
+    // case) is documented at the branch, not re-litigated here.
+    const after = mem.state.files.get(`${mem.ports.env.configDir()}/tasks.json`);
+    expect(after).toBe(before);
+    expect((JSON.parse(after as string) as { tasks: Array<{ state: string }> }).tasks[0]?.state)
+      .toBe('ReadyWithInfo');
   });
 });
 
