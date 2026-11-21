@@ -240,6 +240,45 @@ describe('B2 PathResolver · resolveOutputPath (Q-M3-09 fixed order / D-43)', ()
     expect(resolution.dir).toBe('C:/private');
     expect(resolution.preview.startsWith('C:/private/')).toBe(true);
   });
+
+  // external online audit P3: the preview must run the SAME template chain as
+  // the planner (download-plan.ts sanitizes the raw template with
+  // `sanitizeToken()` BEFORE rendering), so what the preview shows is what
+  // lands on disk. The shipped default template's space therefore previews as
+  // `_` — ugly but honest; the actual filename behaviour is frozen (manual §4).
+  it('external online audit P3: the default template previews Title_[id], matching the real file', () => {
+    const raw = BUILTIN_OUTPUT_TEMPLATES['default'] ?? '';
+    const resolution = resolveOutputPath(paths({ outputTemplate: raw }), vars());
+    // The template's own space (between %(title).200B and [%(id)s) becomes ONE
+    // `_`; the title's internal space stays (the planner sanitizes the TEMPLATE,
+    // never yt-dlp's rendered metadata).
+    expect(resolution.preview).toBe('C:/V/My Video_[abc123].mp4');
+    // Chain parity for the filename part: exactly what the planner's
+    // sanitizeToken -> yt-dlp rendering produces for the same vars.
+    expect(resolution.preview).toBe(`C:/V/${renderTemplate(sanitizeToken(raw), vars())}`);
+    // Template sanitization is argv safety, not filename sanitization: the
+    // FILE_NAME_SANITIZED warning still tracks sanitizeFileName() only.
+    expect(resolution.sanitizationApplied).toBe(false);
+    expect(resolution.warnings).toEqual([]);
+  });
+
+  it('external online audit P3: a whitespace RUN in the template previews as one _, like sanitizeToken', () => {
+    const resolution = resolveOutputPath(
+      paths({ outputTemplate: '%(title)s   [%(id)s].%(ext)s' }),
+      vars(),
+    );
+    // Three consecutive spaces -> exactly one `_` (TOKEN_UNSAFE_RE run rule),
+    // so the preview can never disagree with the argv template again.
+    expect(resolution.preview).toBe('C:/V/My Video_[abc123].mp4');
+  });
+
+  it('external online audit P3: template sanitization never reaches the rendered metadata values', () => {
+    // The planner sanitizes the template string only; the title yt-dlp inserts
+    // keeps its spaces (no --restrict-filenames, D-110). The preview must not
+    // over-sanitize either.
+    const resolution = resolveOutputPath(paths(), vars({ title: 'My Two Words' }));
+    expect(resolution.preview).toBe('C:/V/My Two Words.mp4');
+  });
 });
 
 describe('B2 · three-dir / private-dir config persistence (A-4.4-01 / 02)', () => {

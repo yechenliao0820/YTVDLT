@@ -6,6 +6,9 @@
  * and is exhaustively tested by tests/unit/path-resolver.test.ts (B2).
  *
  * Fixed purification order (Q-M3-09 / D-43), never reordered:
+ *   ⓪ sanitizeToken(template)   // argv safety on the raw template FIRST, the
+ *                               // same call at the same point as the planner
+ *                               // (download-plan.ts) — external online audit P3
  *   ① renderTemplate()          // %(title)s/%(id)s/%(ext)s/%(playlist)s/%(extractor_key)s
  *   ② sanitizeFileName()        // illegal chars / reserved names / trailing dot or space
  *   ③ buildOutputDir()          // 4 combinations <dir>[/<extractor>][/<playlist>]
@@ -226,9 +229,30 @@ export function truncateWindowsPath(path: string, max?: number): string {
 /**
  * Q-M3-09 fixed order: render -> sanitize filename -> build dir -> truncate /
  * extended prefix. Returns a preview plus the flags the plan needs.
+ *
+ * external online audit P3: the preview and the real argv used to run on two
+ * different template chains. `resolveDownloadPlan()` sanitizes the TEMPLATE
+ * first (`sanitizeToken(rawTemplate)` in download-plan.ts — argv safety, which
+ * collapses every whitespace run to `_`) and then hands it to yt-dlp, so the
+ * shipped default template renders files as `Title_[id].mp4`. The preview
+ * rendered the RAW template, so it announced `Title [id].mp4` for a file that
+ * lands as `Title_[id].mp4`. The template now passes through the SAME
+ * `sanitizeToken()` call at the SAME point (before rendering) so the preview
+ * is honest. `sanitizeFileName()` and the truncation steps below are unchanged.
+ *
+ * Not represented here (by design): the planner's `chapter:` template prefix is
+ * a yt-dlp per-chapter template SELECTOR, not filename content — it never
+ * appears in an output file name, and the splitChapters decision lives in the
+ * `advanced` domain which `PathsDomain` does not carry. The argv-side template
+ * truncation (`truncateWindowsPath` on the template string in download-plan.ts)
+ * guards the `-o` argv element, while the truncation below guards the RESOLVED
+ * full path; both use the same `analyzeWindowsPath` boundary rules.
  */
 export function resolveOutputPath(paths: PathsDomain, vars: TemplateVars): OutputPathResolution {
-  const rendered = renderTemplate(paths.outputTemplate, vars);
+  // Same function, same point in the chain as download-plan.ts (`sanitizeToken`
+  // on the raw template, before any rendering) — keep them literally identical.
+  const safeTemplate = sanitizeToken(paths.outputTemplate);
+  const rendered = renderTemplate(safeTemplate, vars);
   const sanitized = sanitizeFileName(rendered);
   const sanitizationApplied = sanitized !== rendered;
   const dir = buildOutputDir(paths, vars.extractor_key, vars.playlist);

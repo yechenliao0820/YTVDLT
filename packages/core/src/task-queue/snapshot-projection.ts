@@ -90,7 +90,24 @@ export function buildPersistProjection(
 ): TaskRecord[] {
   return records.map((record) => {
     const request = record.request;
+    // external online audit P2 · malformed request must not break
+    // restore/persist (D-268): the old guard read
+    // `request.network.proxy` after only a `request !== null` check, so ONE
+    // malformed row — a non-null `request` that is not a plain object, or one
+    // whose `network` domain is missing (old schema / hand-edited / damaged
+    // import) — threw a TypeError HERE. The projection is on the path of every
+    // structural write, so that single row made `restore()` fail the whole
+    // boot and every later enqueue/restart/remove report 「快照写入失败」
+    // (D-242 / D-259 / D-263 rethrow write failures honestly — the poison is
+    // the projection, not the reporting). The strip now applies only when the
+    // request is a real object AND its `network` domain is a real object AND
+    // `proxy` is a non-empty string; every other shape passes through
+    // untouched. Zero-throw contract: a malformed row can never break the
+    // projection, and it can never leak a proxy either — no `network` object
+    // means there is nothing to strip.
     const needsProxyStrip = request !== null
+      && typeof request === 'object'
+      && typeof request.network === 'object' && request.network !== null
       && typeof request.network.proxy === 'string' && request.network.proxy !== '';
     return {
       ...(needsProxyStrip

@@ -59,15 +59,35 @@ export interface PrivateCoverEntry {
  * shared with any task outside the purge — live, settled, or an unknown id
  * from an older session — survives, and untracked files (`taskIds: []`) stay
  * with the age/budget rules that own them.
+ *
+ * external online audit P2 · the optional `liveIds` narrows that rule to what
+ * privacy actually needs. A task id recorded in the index but ABSENT from
+ * `liveIds` (the queue's `list()`) is stale bookkeeping: the record was
+ * already removed and nothing ever cleans historical ids out of the index, so
+ * no card can ever use the cover again — such an id must not block the
+ * recycle forever. With `liveIds` a name therefore qualifies when the purge
+ * owns part of it (the cover really belongs to a just-removed task) and every
+ * remaining reference is either purged or no longer live; a LIVE reference
+ * outside the purge still keeps the cover (its card needs it). Omitting
+ * `liveIds` keeps the exact D-252 exclusivity semantics above (the existing
+ * pins and the old call shape are unchanged).
  */
 export function coverNamesOwnedOnlyBy<E extends PrivateCoverEntry>(
   entries: Readonly<Record<string, E>>,
   ownerIds: ReadonlySet<string>,
+  liveIds?: ReadonlySet<string>,
 ): string[] {
   const names: string[] = [];
   for (const [name, entry] of Object.entries(entries)) {
     if (entry.taskIds.length === 0) continue;
-    if (!entry.taskIds.every((id) => ownerIds.has(id))) continue;
+    if (liveIds === undefined) {
+      if (!entry.taskIds.every((id) => ownerIds.has(id))) continue;
+    } else {
+      // The purge must own part of the cover, and every other reference must
+      // be purged too or no longer live (stale bookkeeping does not block).
+      if (!entry.taskIds.some((id) => ownerIds.has(id))) continue;
+      if (!entry.taskIds.every((id) => ownerIds.has(id) || !liveIds.has(id))) continue;
+    }
     names.push(name);
   }
   return names;

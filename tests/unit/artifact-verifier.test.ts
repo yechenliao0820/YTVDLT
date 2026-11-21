@@ -452,3 +452,61 @@ describe('C3–C8 probe timeout regressions (a killed probe is indeterminate: SK
     expect(report.ok).toBe(true);
   });
 });
+
+describe('C5 · external online audit P3 segmented/chapters downloads', () => {
+  /**
+   * splitChapters / downloadSections / sponsorblockRemove all produce artifacts
+   * whose duration is NOT the probed full-video duration. The probe below
+   * reports 30 s against an expected 10 s — for a normal download that exact
+   * probe FAILs C5 (pinned above); with `segmented: true` the criterion must
+   * step aside BEFORE judging, and a good download must stay ok. The streams
+   * match FFPROBE_OK so only C5 differs from the all-green baseline.
+   */
+  const SEGMENTED_PROBE = JSON.stringify({
+    format: { duration: '30' },
+    streams: [
+      { codec_type: 'video', codec_name: 'h264', width: 320, height: 240, avg_frame_rate: '25/1' },
+      { codec_type: 'audio', codec_name: 'aac' },
+    ],
+  });
+
+  it('segmented=true SKIPS C5 (reason names segmented) and ok stays true despite the duration mismatch', async () => {
+    const { verifier, ports } = seed({ ffprobe: SEGMENTED_PROBE });
+    const sha = await ports.hash.sha256File(PRIMARY);
+    const report = await verifier.verify({
+      ...baseInput,
+      expectedManifest: { ...MANIFEST, sha256: sha },
+      segmented: true,
+    });
+    const c5 = byId(report, 'C5');
+    expect(c5?.status).toBe('SKIPPED');
+    expect(c5?.skipReason).toContain('segmented');
+    expect(byId(report, 'C12')?.status).toBe('PASS');
+    expect(report.ok).toBe(true);
+    expect(report.failureCode).toBeNull();
+  });
+
+  it('does not burn a ffprobe call for C5 when segmented (skip happens before the probe)', async () => {
+    // C3/C6/C7 probe the primary regardless (they are not segmented-sensitive),
+    // so a segmented run makes 3 ffprobe calls while a normal run makes 4 —
+    // C5's own probe is the one that disappears.
+    const segmented = seed({ ffprobe: SEGMENTED_PROBE });
+    const sha = await segmented.ports.hash.sha256File(PRIMARY);
+    await segmented.verifier.verify({
+      ...baseInput,
+      expectedManifest: { ...MANIFEST, sha256: sha },
+      segmented: true,
+    });
+    expect(segmented.state.spawnCalls.filter((call) => call.file.includes('ffprobe.exe'))).toHaveLength(3);
+
+    const plain = seed({ ffprobe: SEGMENTED_PROBE });
+    await plain.verifier.verify(baseInput);
+    expect(plain.state.spawnCalls.filter((call) => call.file.includes('ffprobe.exe'))).toHaveLength(4);
+  });
+
+  it('segmented=false keeps the plain C5 judgement (FAIL on mismatch — red line)', async () => {
+    const { verifier } = seed({ ffprobe: SEGMENTED_PROBE });
+    expect(byId(await verifier.verify({ ...baseInput, segmented: false }), 'C5')?.status).toBe('FAIL');
+    expect(byId(await verifier.verify(baseInput), 'C5')?.status).toBe('FAIL');
+  });
+});
