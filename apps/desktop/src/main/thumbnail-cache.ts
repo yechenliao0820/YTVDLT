@@ -48,6 +48,32 @@
  *     `planThumbnailPrune`'s truncate semantics;
  *   - the report no longer pretends success when the recycle bin is absent.
  *
+ * D-267 closes the CRASH window that design left open: the
+ * `purgePending` marker was written only by the close-time `purgeCovers()`.
+ * An abnormal exit (crash / taskkill / power loss — a private task's record is
+ * never persisted, D-240, so the close cleanup never runs at all) left the
+ * cover file and its index entry on disk UNMARKED; the boot prune could then
+ * reach them only through the lost-reference channel, which the auto-clean
+ * switch gates (`enabled`) — with the switch off, the residue was permanent.
+ * `ensure()` therefore accepts a `privateCover` option (wired from the task's
+ * `record.privateMode`): a private task's cover is marked `purgePending` the
+ * moment its bytes are written or attached, so the next prune pass — boot
+ * included, switch off — recycles it. A private cover that is still running
+ * stays safe: the purge-pending channel sits BEHIND the policy's live guard,
+ * and a private task is never restored after a restart (D-240), which is
+ * exactly when the recycling should happen.
+ *
+ * The pre-mark is STICKY, and stickiness needs an origin: the index entry
+ * carries `purgeSticky` alongside `purgePending` when the mark was written by
+ * a private ensure instead of a close-time purge proof. A plain `ensure()`
+ * must not lift a sticky mark — privacy outranks the cache lifecycle; while
+ * any live task references the cover the live guard protects it, and once
+ * unreferenced it recycles regardless of the switch. A sticky mark is lifted
+ * only when a prune pass really removes the entry. A CLOSE-time mark keeps
+ * its D-252/D-258 semantics unchanged (a live re-attach clears it — the
+ * queue showing the cover outranks the purge), and nothing in the close-path
+ * accounting moves.
+ *
  * Failures are never fatal: every method resolves to a value, the card keeps
  * its letter badge, and a task with a broken URL costs exactly one request.
  */
@@ -153,11 +179,34 @@ export interface ThumbnailCoverPurgeReport {
   readonly deferred: number;
 }
 
+/**
+ * Options for `ensure()` (D-267).
+ */
+export interface ThumbnailEnsureOptions {
+  /**
+   * True when the cover is being ensured FOR a private-mode task (the caller
+   * passes `record.privateMode`). The index entry is then marked
+   * `purgePending` (plus the sticky origin flag) at write/attach time, so a
+   * crash before the close-time purge leaves recoverable residue instead of a
+   * switch-gated orphan. Purely a privacy hint: a plain ensure never sets it,
+   * and no cover is deleted while any live task references it.
+   */
+  readonly privateCover?: boolean;
+}
+
 export interface ThumbnailCache {
   /** Cached absolute path for a task, or null when nothing usable exists. */
   pathOf(taskId: string): string | null;
-  /** Best-effort fetch + cache; resolves to the path when it worked. */
-  ensure(taskId: string, url: string | null | undefined): Promise<string | null>;
+  /**
+   * Best-effort fetch + cache; resolves to the path when it worked.
+   *
+   * D-267: pass `{ privateCover: true }` for a private-mode
+   * task — the index entry is then pre-marked `purgePending` so a crash (no
+   * close-time purge, D-240) leaves the cover recoverable by the next prune
+   * pass, switch-independent. The mark is sticky against plain ensures until
+   * a prune really removes the entry.
+   */
+  ensure(taskId: string, url: string | null | undefined, options?: ThumbnailEnsureOptions): Promise<string | null>;
   /** Drop the task reference (the file survives until the next prune). */
   forget(taskId: string): void;
   /**
@@ -201,6 +250,17 @@ interface IndexEntry {
    * pass recycle the file even with the auto-clean switch off.
    */
   purgePending?: true;
+  /**
+   * D-267: the `purgePending` mark above came from the
+   * private-ensure PRE-mark (`ensure(..., { privateCover: true })`), not from
+   * a close-time purge proof. Sticky: a plain ensure must not clear the mark
+   * (privacy outranks the cache lifecycle — the live guard protects the file
+   * while referenced, and once unreferenced it recycles regardless of the
+   * switch). Lifted only when a prune pass really removes the entry. Pure
+   * boolean, no private data. A CLOSE-time mark (D-252) never sets this and
+   * keeps its "live re-attach clears it" semantics unchanged.
+   */
+  purgeSticky?: true;
 }
 
 interface IndexFile {
@@ -269,6 +329,7 @@ function parseIndex(raw: string): IndexFile {
         taskIds,
         ...(item['untracked'] === true ? { untracked: true } : {}),
         ...(item['purgePending'] === true ? { purgePending: true } : {}),
+        ...(item['purgeSticky'] === true ? { purgeSticky: true } : {}),
       };
     }
   }
@@ -409,8 +470,12 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       delete entry.untracked;
       // A live mapping also outranks a privacy-purge marker (D-252): the task
       // re-ensured the cover after the close marked it, so it is referenced
-      // again and the regular retention rules own it from here on.
-      delete entry.purgePending;
+      // again and the regular retention rules own it from here on. external
+      // online audit P3: a STICKY pre-mark survives — the plain reference is
+      // protected by the policy's live guard anyway, and the mark must stay
+      // recoverable (a boot prune runs while the private task is still live,
+      // but a crash mid-session may not leave any close-time purge behind).
+      if (entry.purgeSticky !== true) delete entry.purgePending;
     }
   }
 
@@ -437,7 +502,9 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
     return owners;
   }
 
-  function attach(name: string, taskId: string, bytes: number, freshWrite = false): Promise<void> {
+  function attach(
+    name: string, taskId: string, bytes: number, freshWrite = false, privateCover = false,
+  ): Promise<void> {
     // D-258 (in-flight landing): `forget()` cannot cancel an attempt that is
     // already racing the network. When it lands for a task that was removed in
     // the meantime (private close, plain removal), it must NOT resurrect a
@@ -455,7 +522,12 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       if (freshWrite !== true) return Promise.resolve();
       return commit((current) => {
         if (current.entries[name] !== undefined) return;
-        current.entries[name] = { bytes, lastUsedAt: now(), taskIds: [taskId], purgePending: true };
+        current.entries[name] = {
+          bytes, lastUsedAt: now(), taskIds: [taskId], purgePending: true,
+          // D-267: fresh bytes fetched FOR a private task
+          // carry the sticky pre-mark, not just the close-path orphan mark.
+          ...(privateCover === true ? { purgeSticky: true } : {}),
+        };
       });
     }
     byTask.set(taskId, join(dir, name));
@@ -465,10 +537,24 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       entry.lastUsedAt = now();
       if (!entry.taskIds.includes(taskId)) entry.taskIds.push(taskId);
       delete entry.untracked;
-      // Same as reconcile(): a fresh reference clears the D-252 marker — the
-      // policy's live-task guard would protect the file anyway, and clearing
-      // here keeps the index free of stale "pending privacy purge" flags.
-      delete entry.purgePending;
+      // D-267 (private pre-mark): a cover ensured FOR a
+      // private-mode task is marked `purgePending` at attach time, so a crash
+      // before any close-time purge (private records are never persisted,
+      // D-240) leaves recoverable residue, not a switch-gated orphan. The
+      // mark is STICKY: a plain ensure must not lift it — the policy's live
+      // guard protects the file while any task references it, and once
+      // unreferenced it recycles regardless of the auto-clean switch. Only a
+      // real prune removal (whole entry deleted) lifts it.
+      if (privateCover === true) {
+        entry.purgePending = true;
+        entry.purgeSticky = true;
+      } else if (entry.purgeSticky !== true) {
+        // Same as reconcile(): a fresh reference clears the D-252 marker —
+        // the policy's live-task guard would protect the file anyway, and
+        // clearing here keeps the index free of stale "pending privacy purge"
+        // flags. Sticky pre-marks are exempt (see above).
+        delete entry.purgePending;
+      }
       current.entries[name] = entry;
     });
   }
@@ -497,7 +583,7 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
   }
 
   /** `fetchUrl` 已经 `upgradeThumbnailUrl()` 归一（D-250），恒为 https 形式。 */
-  async function fetchAndStore(taskId: string, fetchUrl: string): Promise<string | null> {
+  async function fetchAndStore(taskId: string, fetchUrl: string, privateCover = false): Promise<string | null> {
     if (http === undefined) return null;
     // D-137: the same predicate is handed to the HTTP adapter as a PER-HOP
     // policy, so a 302 to loopback/private or an http downgrade cannot slip past
@@ -528,7 +614,7 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       // Confirm the bytes really are on disk before advertising the path.
       const stored = await readFile(target).catch(() => null);
       if (stored === null) return null;
-      await attach(name, taskId, bytes.byteLength, true); // D-258: this attempt wrote the bytes
+      await attach(name, taskId, bytes.byteLength, true, privateCover); // D-258: this attempt wrote the bytes
       maybeAutoPrune();
       return target;
     } catch (error) {
@@ -802,11 +888,15 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       if (keptNames.length > 0) {
         // A kept cover must not drag a stale privacy marker around: its
         // reference state changed after the proof, so the regular rules own it
-        // again (same bookkeeping as a live re-attach).
+        // again (same bookkeeping as a live re-attach). D-267: a STICKY
+        // pre-mark is not a stale close-time proof — it records
+        // that the bytes were fetched for a private task, so it survives the
+        // recheck and only a real prune removal lifts it. The report's
+        // accounting above is untouched either way.
         await commit((current) => {
           for (const name of keptNames) {
             const entry = current.entries[name];
-            if (entry === undefined || entry.purgePending !== true) continue;
+            if (entry === undefined || entry.purgePending !== true || entry.purgeSticky === true) continue;
             const { purgePending: _staleMarker, ...rest } = entry;
             current.entries[name] = rest;
           }
@@ -859,10 +949,14 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       return path;
     },
 
-    ensure(taskId: string, url: string | null | undefined): Promise<string | null> {
+    ensure(taskId: string, url: string | null | undefined, options?: ThumbnailEnsureOptions): Promise<string | null> {
       const cached = byTask.get(taskId);
       if (cached !== undefined) return Promise.resolve(cached);
       if (typeof url !== 'string' || url.trim() === '') return Promise.resolve(null);
+      // D-267: the privacy hint is captured HERE, at call
+      // time, and travels with the in-flight attempt (the D-258 landing rules
+      // in attach() then know whether the bytes belong to a private task).
+      const privateCover = options?.privateCover === true;
       // D-250: scheme normalisation happens BEFORE any keying. 国内站点（B 站
       // hdslb.com 等）probe 给的封面是纯 `http://`，而抓取面 https-only（D-137）。
       // 若先按原样取哈希、等到 fetchAndStore 里才升级，跨重启的本地复用会永远
@@ -876,8 +970,11 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
         await indexReady;
         const hash = createHash('sha1').update(fetchUrl).digest('hex');
         const local = await findLocal(hash);
-        if (local !== null) return attach(local.name, taskId, local.bytes).then(() => join(dir, local.name));
-        return fetchAndStore(taskId, fetchUrl);
+        if (local !== null) {
+          return attach(local.name, taskId, local.bytes, false, privateCover)
+            .then(() => join(dir, local.name));
+        }
+        return fetchAndStore(taskId, fetchUrl, privateCover);
       })().finally(() => { inFlight.delete(taskId); });
       inFlight.set(taskId, attempt);
       return attempt;

@@ -2810,3 +2810,33 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 验证 | 离线集成 `subtitle-final-acceptance.test.ts` 12/12 绿（stub 下行为不变）；全量 173 文件 / 3002 例全绿；typecheck 5/5。 |
 | 未覆盖 | online 套件（`youtube-live.test.ts`）仅按 `vitest.online.config.ts` 点名运行，本轮未跑真实国际网验证（与 D-132 口径一致）；其余读 env 的集成辅助（`YTVDLT_REAL_DOWNLOAD` 开关等）有兜底，属功能开关而非成败依赖，保持原样。 |
 
+## D-265 · 2026-11-21 · 配置写路径改 persist-first commit-after：写失败零内存半提交（外部在线审计 P1，发版阻断项）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | config-store 的 `set()` / `setDomain()` / `import()` 先改内存 `this.state` 再 `persist()`：写盘失败时异常上抛，但内存已带新值。主进程内存与磁盘/UI 分歧——渲染层按 D-239 回退开关后，后续入队 `readDefaults()` 仍按内存值建任务（用户看到无痕开关已回退，文件却按内存值进私有目录且不进历史，或反向）；下一次任意成功的 `set()`/`setDomain()` 调 `persist()` 整个 state，把此前失败的值一并写进磁盘。 |
+| 根因 | 写入点在提交之前就改了单事实来源（与 D-259 enqueue / D-263 restart 同构：「先改内存后写盘，检查结果改变不了已发生的事实」）；config-store 是最后一个仍是 mutate-then-persist 的写路径（task-store D-242、command-template D-256 已治理）。 |
+| 决策 | 三个写路径统一 **persist-first commit-after**（D-222 house pattern）：写队列任务内 `clone(this.state)` 构造候选 → 在候选上打 `updatedAt`/`schemaVersion` → `writeTextAtomic(候选)` → **成功后才** `this.state = candidate`；写失败内存保持与磁盘一致、原错上抛（不吞错、不回落默认值）。`persist()` 签名改为接收候选；`load()` 路径两处调用传 `this.state`（load 时内存本就持有目标值，落盘字节与行为不变，D-246 读语义逐字未动）；`enqueue()` 串行化与失败不毒化（D-249）不动；`IConfigStore` 对外签名不变。 |
+| 验证 | config-store.test.ts 26 → 30：新增 set 写失败内存回旧值 + 下次成功写不含失败值（泄漏证明）/ setDomain 同款 / import 校验失败与写盘失败零内存变更 / 失败后普通读不抛错且后续写入完好；红→绿实测（还原旧实现 → 恰 4 个新用例红，其中一例断言 `expected 'D:/my/videos' to be '%USERVIDEOS%/YTVDLT'` 即内存半提交现场）；全量 unit 167 文件 / 2953 例 + 6 skipped、contract 53 例全绿；core+desktop typecheck OK。调用方核查：全仓无 `config.set(`，写流量全走 `setDomain`/`import`，所有调用点本就按「抛错 → `{ok:false}` / WARN / 设计内静默」处理，无一处依赖旧半提交行为。 |
+| 未覆盖 | 打包版真机未实测（铁律 9）；真实 ENOSPC/只读盘未注入（沿用单测假端口口径）；`export()` 读快照与写队列的交错一致性由既有串行化保证，未另造窗口测试。 |
+
+## D-266 · 2026-11-21 · 更新链路拒绝带凭据的 SOCKS 代理：fail-fast 替代静默失败（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `parseUpdateProxy()`（D-214/D-228 的更新代理解析）接受 SOCKS 家族 userinfo 并解进 `credentials`，但 Chromium 的 SOCKS 客户端不支持 RFC 1929 用户名/密码认证（net/docs/proxy.md#socks-v5），且 SOCKS 连接永不触发 HTTP 407 `login` 事件（`credentials` 唯一消费点，仅限固定 HTTP(S) 代理）——带凭据的 SOCKS 更新请求实际以**无凭据**连接，被代理拒绝后表现为不可诊断的网络失败。yt-dlp 下载链路独立拿原串（支持 SOCKS 凭据），不受影响。 |
+| 根因 | 解析层照单全收了传输层根本无法兑现的凭据组合；错误既不在配置时出现、也不能从网络错误里辨识（D-214 的代理优先级体系没有「不支持」这一态）。 |
+| 决策 | `parseUpdateProxy()` 对 SOCKS 家族（映射到 socks4/socks5 的全部 5 个 scheme：socks/socks5/socks5h/socks4/socks4a）+ 非空 userinfo → 抛 `UpdateProxyConfigError`，消息明确说明 Chromium 限制、影响面（应用与组件更新不可用、下载不受影响）与补救（改用无凭据 SOCKS 或 HTTP(S) 代理），**绝不回显凭据值**。无凭据 SOCKS 行为不变（Chromium 支持无认证 SOCKS5）；HTTP(S) 带凭据行为不变（login 事件）。不选「剥凭据继续试」（静默降级成注定失败的请求，丢失语义）与「Session 层处理」（SOCKS 无 407 信号可辨）。经 lazy read 的四条链路（应用检查 / 安装包下载 / 组件检查 / 组件下载）错误消息均用户可见（`app-update-service` 的 `fail()` / `component-updater` 的 `error` 字段）；`network.proxy` 渲染层无写入路径（D-168 CONFIG_SET 白名单刻意排除 network 域），拒绝发生在下一次更新请求时（lazy read 设计使然）。 |
+| 验证 | electron-update-network.test.ts 20 → 24：全 scheme × userinfo 变体（含 username-only / password-only / percent-encoded）8 例拒绝 + 消息可读性 + 无凭据 SOCKS 与 HTTP(S)/HTTPS 带凭据防回归；1 个既有用例的 scheme 由 socks5 迁移到 http（SOCKS+userinfo 现按设计抛错，同一断言集合，强度未松）；desktop typecheck OK。 |
+| 未覆盖 | Chromium 文档为结论来源，未做真实 SOCKS5 认证代理真机连接（沿用 D-228「离线单测只覆盖本层判定」口径）；`network.proxy` 只能手编 config.json，无 UI 校验面可挂——若未来开放代理设置 UI，保存时必须接入同一解析器。 |
+
+## D-267 · 2026-11-21 · 无痕封面写时预标记：崩溃残留可被 boot prune 无视开关回收（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-252 的 `purgePending` 标记只在正常关窗清理路径（`purgeCovers`）写入；应用崩溃 / taskkill / 断电时（无痕任务记录本就不落盘，D-240，关窗清理根本不跑）无痕封面无标记，重启后 boot auto-prune 只能走 lost-reference 通道——该通道被 `autoCleanThumbnailCache` 开关（`enabled` gate）挡住，autoClean 关闭的用户的无痕封面与 index.json 条目（含 taskIds）永久残留本机。 |
+| 根因 | 隐私回收的触发条件绑定在「关窗清理真的跑到」上，而 D-240 已经承认崩溃路径不跑任何清理钩子（快照侧因此改成了写边界过滤）；封面缺一个等价的写边界动作。 |
+| 决策 | **写时预标记**：`ensure()` 增加可选 `privateCover` 选项（唯一调用点 `electron-entry.ts::ensureCover` 传 `record.privateMode === true`；无痕任务重启不恢复，restore 路径天然不会误传）；private ensure 置 `purgePending` + 新增持久化旗标 **`purgeSticky`**（区分「写时预标记」与「关窗时刻标记」两个来源——D-252 既有用例钉死关窗标记可被 live re-attach 清除，其语义**逐字不动**）；粘性 = 普通 attach 不清除 sticky 条目、`purgeCovers` 的 keptReferenced 复核与 `reconcile()` 清标记均 sticky 豁免，唯一解除途径是 prune 真正删除条目。回收路径零新增：boot prune 对 purge-pending 条目本就无视开关回收（core 策略 purge-pending 通道在 `enabled` gate 之外）+ live guard 在 referenced 检查之前——在跑任务与被引用封面绝不被误删。core 策略文件零改动（`purgeSticky` 是桌面适配器私有旗标，不进 `ThumbnailCacheEntry`）。 |
+| 验证 | thumbnail-cache.test.ts 30 → 35：预标记 / 粘性含跨重启 / 崩溃后 enabled=false 回收 / live guard / 共享封面端到端；既有 30 用例零改动全绿（D-252/D-258 账目钉点原样）；全量 unit 167 文件 / 2962 例 + 6 skipped 全绿；离线集成 thumbnail-cache-local 4/4（真实 ensure 签名）；desktop typecheck OK。 |
+| 未覆盖 | 0.3.2 及更早崩溃留下的无标记无痕封面无法事后识别（条目无私有痕迹，接受为历史残留；用户可手动「立即清理」）；旧版本应用读新 index.json（含 `purgeSticky`）的向下兼容未专项验证；打包版真机未实测（铁律 9）。 |
+

@@ -3,8 +3,12 @@
  *
  * All I/O goes through injected `CorePorts`; this file has NO `node:*` import
  * and NO `process` usage. Concurrency of `set()` is serialized by an internal
- * promise queue. Corrupt files are backed up (never deleted) before falling
- * back to defaults.
+ * promise queue. Every write path (`set` / `setDomain` / `import`) is
+ * persist-first, commit-after (D-222 house pattern, as D-242 task-store /
+ * D-256 command-template): a failed `writeTextAtomic` leaves `this.state`
+ * exactly what the getters reported and the disk exactly its previous
+ * content — the error propagates, nothing half-commits. Corrupt files are
+ * backed up (never deleted) before falling back to defaults.
  *
  * D-246: existence is answered by the READ (`ENOENT`/`ENOTDIR` = first run,
  * any other read error blocks the load and every write path) — an
@@ -111,7 +115,12 @@ export class ConfigStore implements IConfigStore {
       text = await this.ports.fs.readText(this.filePath);
     } catch (error) {
       if (isMissingFileError(error)) {
-        await this.persist(); // genuine first run: the file does not exist
+        // Load path: `this.state` already holds the intended value (the
+        // constructor defaults), so it serves as its own candidate — the
+        // candidate/commit split below only exists for the write paths,
+        // where a failed write must not leave memory ahead of the disk.
+        // The D-246 semantics of this branch are unchanged.
+        await this.persist(this.state); // genuine first run: the file does not exist
         return;
       }
       throw error; // D-246: a read failure is never "no config"
@@ -136,7 +145,7 @@ export class ConfigStore implements IConfigStore {
     // untouched, write paths blocked by the rejected load) instead of being
     // mis-classified as "corrupt" and resetting a VALID config to defaults.
     if (needsWriteBack) {
-      await this.persist();
+      await this.persist(this.state); // load path: memory already holds the migrated state
     }
   }
 
@@ -183,10 +192,24 @@ export class ConfigStore implements IConfigStore {
     return next;
   }
 
-  private async persist(): Promise<void> {
-    this.state.updatedAt = this.ports.clock.nowIso();
-    this.state.schemaVersion = CONFIG_SCHEMA_VERSION;
-    await this.ports.fs.writeTextAtomic(this.filePath, `${JSON.stringify(this.state, null, 2)}\n`);
+  /**
+   * Serialize the given (would-be) state and write it atomically (D-222
+   * pattern — the same persist-first, commit-after house pattern as D-242
+   * task-store / D-256 command-template). Callers pass a CANDIDATE built on
+   * the last committed state, never `this.state` itself (the load path above
+   * is the one exception: memory there already holds the intended value
+   * before any write). The `updatedAt` / `schemaVersion` stamps land on the
+   * candidate too — the old zero-argument `persist()` stamped `this.state`
+   * BEFORE the write, so even the timestamps half-committed on a failed
+   * write. A rejected `writeTextAtomic` (atomic primitive — no half-written
+   * file) leaves the disk exactly at its previous state; whether memory
+   * follows is decided by the caller, and the write paths commit only after
+   * this resolves.
+   */
+  private async persist(candidate: ConfigFile): Promise<void> {
+    candidate.updatedAt = this.ports.clock.nowIso();
+    candidate.schemaVersion = CONFIG_SCHEMA_VERSION;
+    await this.ports.fs.writeTextAtomic(this.filePath, `${JSON.stringify(candidate, null, 2)}\n`);
   }
 
   get<T>(domain: ConfigDomainName, key: string): T {
@@ -194,12 +217,30 @@ export class ConfigStore implements IConfigStore {
     return bucket[key] as T;
   }
 
+  /**
+   * D-265 (external online audit P1): persist-first, commit-after (D-222 house
+   * pattern, same as D-242 task-store / D-256 command-template). The change
+   * is built on a CLONE of the last committed state, written to disk first,
+   * and only a successful write commits it to `this.state`. The old order
+   * (mutate memory, then persist) half-committed on a failed write: the main
+   * process kept the new value while the UI rolled its toggle back on the
+   * rejection, so the next enqueue built the download on the memory value
+   * (`readDefaults()` reads `general.privateMode` — the user sees the private
+   * switch OFF while files land in the private directory, or the reverse),
+   * and the next successful `persist()` flushed the failed value to disk
+   * after all. Now a write failure leaves `this.state` exactly what
+   * `get()` / `getDomain()` reported before the call and the disk exactly
+   * its previous content; the error surfaces to the caller unchanged —
+   * nothing is swallowed, nothing falls back to defaults.
+   */
   async set<T>(domain: ConfigDomainName, key: string, value: T): Promise<void> {
     await this.load();
     return this.enqueue(async () => {
-      const current = this.state.domains[domain] ?? {};
-      this.state.domains[domain] = { ...current, [key]: value };
-      await this.persist();
+      const candidate = clone(this.state);
+      const current = candidate.domains[domain] ?? {};
+      candidate.domains[domain] = { ...current, [key]: value };
+      await this.persist(candidate); // persist the would-be state first (D-222)
+      this.state = candidate;        // commit memory only after the write succeeded
     });
   }
 
@@ -207,12 +248,19 @@ export class ConfigStore implements IConfigStore {
     return clone(this.state.domains[domain] ?? {});
   }
 
+  /** Same persist-first, commit-after contract as {@link set}: the whole
+   * candidate construction → persist → commit sequence runs inside the queue
+   * task on top of the last committed state, so a failed write leaves memory
+   * and disk on the previous state and the patch is never leaked into a
+   * later successful write. */
   async setDomain(domain: ConfigDomainName, patch: Record<string, unknown>): Promise<void> {
     await this.load();
     return this.enqueue(async () => {
-      const current = this.state.domains[domain] ?? {};
-      this.state.domains[domain] = { ...current, ...patch };
-      await this.persist();
+      const candidate = clone(this.state);
+      const current = candidate.domains[domain] ?? {};
+      candidate.domains[domain] = { ...current, ...patch };
+      await this.persist(candidate); // persist the would-be state first (D-222)
+      this.state = candidate;        // commit memory only after the write succeeded
     });
   }
 
@@ -222,7 +270,13 @@ export class ConfigStore implements IConfigStore {
     return JSON.stringify({ schemaVersion: CONFIG_SCHEMA_VERSION, config: clone(this.state) });
   }
 
-  /** M4 implements de-duplication; M1 validates the snapshot then persists it. */
+  /** M4 implements de-duplication; M1 validates the snapshot then persists it.
+   *
+   * Same persist-first, commit-after contract as {@link set}: the validation
+   * (JSON.parse / structure / downgrade) runs before the queue and already
+   * had zero side effects; a WRITE failure inside the queue task now also
+   * leaves `this.state` and the disk untouched — the imported snapshot is
+   * not half-committed into memory and cannot leak into a later write. */
   async import(json: string): Promise<void> {
     await this.load();
     const parsed: unknown = JSON.parse(json);
@@ -232,8 +286,9 @@ export class ConfigStore implements IConfigStore {
     if (!isValidConfigFile(candidate)) throw new Error('invalid config snapshot');
     if (isDowngrade(candidate.schemaVersion)) throw new Error('cannot import newer schema');
     return this.enqueue(async () => {
-      this.state = clone(applyMigrations(candidate, this.migrations));
-      await this.persist();
+      const next = clone(applyMigrations(candidate, this.migrations));
+      await this.persist(next); // persist the would-be state first (D-222)
+      this.state = next;        // commit memory only after the write succeeded
     });
   }
 }

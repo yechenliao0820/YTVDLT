@@ -666,7 +666,14 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     const ensureCover = (taskId: string): Promise<string | null> => {
       const record = host.m4.task.queue.get(taskId);
       const url = record?.mediaInfo?.thumbnail ?? null;
-      return url === null ? Promise.resolve(null) : thumbnails.ensure(taskId, url);
+      if (url === null) return Promise.resolve(null);
+      // external online audit P3: the cover of a private-mode task is
+      // PRE-marked purgePending at ensure time, so an abnormal exit (crash /
+      // taskkill — private records are never persisted, D-240, and the
+      // close-time purge never ran) leaves residue the boot prune can recycle
+      // regardless of the auto-clean switch. A still-running task stays safe:
+      // the purge-pending channel sits behind the policy's live guard.
+      return thumbnails.ensure(taskId, url, { privateCover: record?.privateMode === true });
     };
     host.m4.task.queue.onEvent((event) => {
       if (event.type === 'progress') { void ensureCover(event.taskId); return; }

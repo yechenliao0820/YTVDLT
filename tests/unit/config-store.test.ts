@@ -557,3 +557,188 @@ describe('D-246 · 存在性探测拆除：读失败阻断写入、恢复后重�
     expect(store.get('general', 'concurrency')).toBe(2);
   });
 });
+
+// --- 外部审计 P1 · 写路径 persist-first commit-after：写失败零内存半提交 -------
+
+describe('ConfigStore · 写路径 persist-first commit-after（外部审计 P1）：写失败零内存半提交', () => {
+  /**
+   * Config on disk whose committed values are observable and distinct from
+   * the defaults (same seed shape as the D-246 describe above).
+   */
+  const seededPorts = (): ReturnType<typeof createInMemoryPorts> => {
+    const mem = createInMemoryPorts();
+    const base = createDefaultConfig('2026-11-05T00:00:00.000Z');
+    const onDisk = {
+      ...base,
+      domains: {
+        ...base.domains,
+        general: { ...base.domains['general'], theme: 'dark' },
+        network: { ...base.domains['network'], maxRate: 500 },
+      },
+    };
+    mem.state.files.set(CONFIG_PATH, JSON.stringify(onDisk));
+    return mem;
+  };
+
+  const ioError = (): Error =>
+    // Same shape as the production adapter's raw write rejections.
+    Object.assign(new Error('EIO: config write failed'), { code: 'EIO' });
+
+  it('set() 写盘失败：抛原错、内存与磁盘都停在旧值；随后的成功 set() 不把失败值带上盘', async () => {
+    const { ports, state } = seededPorts();
+    const store = new ConfigStore({ ports });
+    await store.load();
+
+    const boom = ioError();
+    let fail = true;
+    const innerWrite = ports.fs.writeTextAtomic.bind(ports.fs);
+    ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (fail) throw boom;
+      return innerWrite(path, text);
+    };
+
+    // The ORIGINAL error object surfaces unchanged — nothing swallowed.
+    await expect(store.set('general', 'privateMode', true)).rejects.toBe(boom);
+    // Memory stays on the committed values: the failed value never
+    // half-commits (the old code already had privateMode=true here, so the
+    // next enqueue built downloads on a value the UI had rolled back).
+    expect(store.get('general', 'privateMode')).toBe(false);
+    expect(store.get('general', 'theme')).toBe('dark');
+    expect(store.getDomain('general')).toMatchObject({ theme: 'dark', privateMode: false });
+    // The disk is byte-identical in content: memory agrees with it.
+    const before = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as {
+      domains: Record<string, Record<string, unknown>>;
+    };
+    expect(before.domains.general?.['privateMode']).toBe(false);
+    expect(before.domains.general?.['theme']).toBe('dark');
+
+    // After recovery one ordinary successful set(): the disk contains ONLY
+    // this change — the failed value did not leak into the later write.
+    fail = false;
+    await store.set('general', 'concurrency', 5);
+    const after = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as {
+      domains: Record<string, Record<string, unknown>>;
+    };
+    expect(after.domains.general?.['concurrency']).toBe(5);
+    expect(after.domains.general?.['privateMode']).toBe(false);
+    expect(after.domains.general?.['theme']).toBe('dark');
+    expect(store.get('general', 'concurrency')).toBe(5);
+  });
+
+  it('setDomain() 同款：写失败零内存变更，恢复后的成功写盘不含失败 patch', async () => {
+    const { ports, state } = seededPorts();
+    const store = new ConfigStore({ ports });
+    await store.load();
+
+    let fail = true;
+    const innerWrite = ports.fs.writeTextAtomic.bind(ports.fs);
+    ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (fail) throw ioError();
+      return innerWrite(path, text);
+    };
+
+    await expect(store.setDomain('network', { maxRate: 12345, ipv4Only: true }))
+      .rejects.toThrow('EIO: config write failed');
+    // Memory stays on the committed values.
+    expect(store.get('network', 'maxRate')).toBe(500);
+    expect(store.get('network', 'ipv4Only')).toBe(false);
+    expect(store.getDomain('network')).toMatchObject({ maxRate: 500, ipv4Only: false });
+    const before = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as {
+      domains: Record<string, Record<string, unknown>>;
+    };
+    expect(before.domains.network?.['maxRate']).toBe(500);
+    expect(before.domains.network?.['ipv4Only']).toBe(false);
+
+    // Recovery: the successful write lands only its own patch — the failed
+    // patch is in neither memory nor disk.
+    fail = false;
+    await store.setDomain('network', { concurrentFragments: 4 });
+    const after = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as {
+      domains: Record<string, Record<string, unknown>>;
+    };
+    expect(after.domains.network?.['concurrentFragments']).toBe(4);
+    expect(after.domains.network?.['maxRate']).toBe(500);
+    expect(after.domains.network?.['ipv4Only']).toBe(false);
+    expect(store.get('network', 'maxRate')).toBe(500);
+  });
+
+  it('import()：校验失败零副作用；写盘失败内存停在旧值，恢复后的成功写不含导入值', async () => {
+    const { ports, state } = seededPorts();
+    const store = new ConfigStore({ ports });
+    await store.load();
+
+    // (a) Validation failure (downgrade snapshot, rejected BEFORE the queue):
+    // zero side effects — memory and disk untouched (pre-existing contract).
+    const downgrade = JSON.stringify({ config: { ...createDefaultConfig('x'), schemaVersion: 99 } });
+    await expect(store.import(downgrade)).rejects.toThrow('cannot import newer schema');
+    expect(store.get('general', 'theme')).toBe('dark');
+    expect(store.get('network', 'maxRate')).toBe(500);
+
+    // (b) Valid snapshot but the write fails: this.state is unchanged (the
+    // old code had already swapped the whole snapshot into memory here).
+    const snapshot = createDefaultConfig('2026-11-05T00:00:00.000Z');
+    snapshot.domains['general']['theme'] = 'light';
+    snapshot.domains['network']['maxRate'] = 999;
+    let fail = true;
+    const innerWrite = ports.fs.writeTextAtomic.bind(ports.fs);
+    ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (fail) throw ioError();
+      return innerWrite(path, text);
+    };
+    await expect(store.import(JSON.stringify({ config: snapshot })))
+      .rejects.toThrow('EIO: config write failed');
+    expect(store.get('general', 'theme')).toBe('dark');
+    expect(store.get('network', 'maxRate')).toBe(500);
+    const disk = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as {
+      domains: Record<string, Record<string, unknown>>;
+    };
+    expect(disk.domains.network?.['maxRate']).toBe(500);
+    expect(disk.domains.general?.['theme']).toBe('dark');
+
+    // Recovery: the successful write lands only its own change — the
+    // imported values (theme=light / maxRate=999) never reach the disk.
+    fail = false;
+    await store.set('general', 'concurrency', 5);
+    const after = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as {
+      domains: Record<string, Record<string, unknown>>;
+    };
+    expect(after.domains.general?.['concurrency']).toBe(5);
+    expect(after.domains.general?.['theme']).toBe('dark');
+    expect(after.domains.network?.['maxRate']).toBe(500);
+  });
+
+  it('写失败后的普通读不抛错：get/getDomain/export 照常返回旧值，后续成功写入不被破坏', async () => {
+    const { ports, state } = seededPorts();
+    const store = new ConfigStore({ ports });
+    await store.load();
+
+    let fail = true;
+    const innerWrite = ports.fs.writeTextAtomic.bind(ports.fs);
+    ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (fail) throw ioError();
+      return innerWrite(path, text);
+    };
+    await expect(store.set('paths', 'videoDir', 'D:/my/videos')).rejects.toThrow('EIO');
+
+    // Ordinary reads answer normally and report the OLD committed values —
+    // memory holds no trace of the failed write.
+    expect(store.get('paths', 'videoDir')).toBe('%USERVIDEOS%/YTVDLT');
+    expect(store.getDomain('network')).toMatchObject({ maxRate: 500 });
+    const exported = JSON.parse(await store.export()) as {
+      config: { domains: Record<string, Record<string, unknown>> };
+    };
+    expect(exported.config.domains['paths']?.['videoDir']).toBe('%USERVIDEOS%/YTVDLT');
+    expect(exported.config.domains['general']?.['theme']).toBe('dark');
+
+    // The write queue is not poisoned by the failure: the next successful
+    // write persists completely and builds on the unchanged baseline.
+    fail = false;
+    await store.set('network', 'maxRate', 0);
+    const persisted = JSON.parse(state.files.get(CONFIG_PATH) ?? '{}') as {
+      domains: Record<string, Record<string, unknown>>;
+    };
+    expect(persisted.domains.network?.['maxRate']).toBe(0);
+    expect(persisted.domains.paths?.['videoDir']).toBe('%USERVIDEOS%/YTVDLT');
+    expect(store.get('paths', 'videoDir')).toBe('%USERVIDEOS%/YTVDLT');
+  });
+});

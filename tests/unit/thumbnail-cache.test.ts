@@ -620,3 +620,126 @@ describe('D-258 · 无痕封面回收的竞态、账目与批次上限', () => {
     expect(existsSync(join(h.dir, `${hash(urlB)}.png`))).toBe(false);
   });
 });
+
+/**
+ * external online audit P3 · 无痕封面的写时预标记（崩溃残留可回收）。
+ *
+ * D-252 的 `purgePending` 标记只在正常关窗路径（purgeCovers）写入；异常退出
+ * （崩溃 / taskkill / 断电）时无痕任务记录本就不落盘（D-240），关窗清理根本
+ * 不跑——封面文件与 index 条目留在本机且无标记，重启后的 boot prune 只能走
+ * 受 `autoCleanThumbnailCache` 开关拦住的 lost-reference 通道，开关关闭即
+ * 永久残留。修复：`ensure(..., { privateCover: true })`（接线自
+ * `record.privateMode`）在写入/合并 index 条目时即打 `purgePending` 标记
+ * （外加 `purgeSticky` 来源旗标），让崩溃后的 boot prune 无视开关回收。
+ *
+ * 标记粘性：一旦预标记，普通 ensure 不得清除——隐私优先于缓存生命周期；
+ * 被普通任务引用时 live guard 本来就保护它，失去引用后无论开关都会被回收。
+ * 条目被 prune 真正移除时标记随之消失。D-252/D-258 的关窗语义（关窗时刻
+ * 标记、删除时刻复核、五字段账目）一字未动——关闭时刻标记遇普通 re-attach
+ * 仍按原语义清除（见上方 D-252 用例）。
+ */
+describe('external online audit P3 · 无痕封面写时预标记与粘性', () => {
+  it('marks the index entry purgePending for a private ensure; a plain ensure does not mark', async () => {
+    const h = harness();
+    const cache = h.create({ liveTaskIds: () => ['p1', 'n1'] });
+    const privateName = `${hash('https://cdn.example/pre-marked.png')}.png`;
+    const plainName = `${hash('https://cdn.example/plain.png')}.png`;
+    await cache.ensure('p1', 'https://cdn.example/pre-marked.png', { privateCover: true });
+
+    let raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
+    expect(raw.entries[privateName].purgePending).toBe(true);
+    // The sticky origin flag is what keeps a plain ensure from lifting the
+    // mark later (pure boolean, no private data — same as purgePending).
+    expect(raw.entries[privateName].purgeSticky).toBe(true);
+
+    await cache.ensure('n1', 'https://cdn.example/plain.png');
+    raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
+    expect(raw.entries[plainName].purgePending).toBeUndefined();
+    expect(raw.entries[plainName].purgeSticky).toBeUndefined();
+    // The plain task's cover is a normal cache entry: nothing privacy-owed.
+    expect((await cache.prune()).removedByReason['purge-pending']).toBe(0);
+  });
+
+  it('the mark is sticky: a plain ensure of the same URL keeps it, within a session and across a restart', async () => {
+    const h = harness();
+    const url = 'https://cdn.example/sticky.png';
+    const name = `${hash(url)}.png`;
+    const cache = h.create({ liveTaskIds: () => ['p1'] });
+    await cache.ensure('p1', url, { privateCover: true });
+    // A plain task sharing the same cover must not lift the pre-mark.
+    await cache.ensure('n1', url);
+    expect(JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8')).entries[name].purgePending).toBe(true);
+
+    // Stickiness is persisted: a restarted session's plain ensure (e.g. the
+    // boot restore re-attaching a restored plain task) must not lift it either.
+    const restarted = h.create({ liveTaskIds: () => ['n1'] });
+    expect(await restarted.ensure('n1', url)).not.toBeNull();
+    const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
+    expect(raw.entries[name].purgePending).toBe(true);
+    expect(raw.entries[name].purgeSticky).toBe(true);
+  });
+
+  it('a crashed session\'s pre-marked cover is recycled by the boot prune with the switch off (file and entry)', async () => {
+    const h = harness();
+    h.policyValues['enabled'] = false; // the recycle must not depend on the switch
+    const url = 'https://cdn.example/crash-residue.png';
+    const name = `${hash(url)}.png`;
+    const cache = h.create({ liveTaskIds: () => ['p1'] });
+    const path = await cache.ensure('p1', url, { privateCover: true });
+    expect(existsSync(path)).toBe(true);
+
+    // Crash: no close-time purge ever ran; the private task is not restored
+    // on the next boot (D-240), so its id is not in the live set.
+    const restarted = h.create({ liveTaskIds: () => [] });
+    const boot = await restarted.prune();
+    expect(boot.ok).toBe(true);
+    expect(boot.removed).toBe(1);
+    expect(boot.removedByReason['purge-pending']).toBe(1);
+    expect(existsSync(path)).toBe(false);
+    // The entry itself is gone from index.json, not just the file.
+    expect(JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8')).entries[name]).toBeUndefined();
+  });
+
+  it('live guard: a pre-marked cover of a still-running private task is never recycled', async () => {
+    const h = harness();
+    h.policyValues['enabled'] = false;
+    const cache = h.create({ liveTaskIds: () => ['p1'] });
+    const path = await cache.ensure('p1', 'https://cdn.example/still-running.png', { privateCover: true });
+
+    const report = await cache.prune();
+    expect(report.removed).toBe(0);
+    expect(report.removedByReason['purge-pending']).toBe(0);
+    expect(h.trashed).toEqual([]);
+    expect(existsSync(path)).toBe(true);
+    // The mark survives the pass for the crash window it exists for.
+    const name = `${hash('https://cdn.example/still-running.png')}.png`;
+    expect(JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8')).entries[name].purgePending).toBe(true);
+  });
+
+  it('sticky mark outlives a plain task\'s reference and recycles once nobody references it', async () => {
+    const h = harness();
+    h.policyValues['enabled'] = false;
+    const url = 'https://cdn.example/shared-after-private.png';
+    const name = `${hash(url)}.png`;
+    let live = ['p1', 'n1'];
+    const cache = h.create({ liveTaskIds: () => live });
+    await cache.ensure('p1', url, { privateCover: true });
+    await cache.ensure('n1', url); // plain sharer — sticky mark must survive
+
+    // While the plain task is live the live guard protects the file even
+    // though the entry is purge-pending.
+    cache.forget('p1');
+    live = ['n1'];
+    expect((await cache.prune()).removed).toBe(0);
+    expect(existsSync(join(h.dir, name))).toBe(true);
+
+    // Nobody references it any more: recycled switch-independently.
+    cache.forget('n1');
+    live = [];
+    const report = await cache.prune();
+    expect(report.removed).toBe(1);
+    expect(report.removedByReason['purge-pending']).toBe(1);
+    expect(existsSync(join(h.dir, name))).toBe(false);
+    expect(JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8')).entries[name]).toBeUndefined();
+  });
+});
