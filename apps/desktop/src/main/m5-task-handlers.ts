@@ -303,10 +303,23 @@ export function createTaskHandlers(ctx: M5HandlerContext): M5HandlerMap {
       const filesTrashed = outcomes.filter((entry) => entry.status === 'trashed').length;
       deps.fileStatus?.forget(taskId);
       const removal = await deps.taskDetail.perform(taskId, 'remove');
-      if (removal.ok === true) deps.thumbnails?.forget?.(taskId);
+      if (removal.ok === true) {
+        deps.thumbnails?.forget?.(taskId);
+        // external online audit P2: a single-removed private-mode record must
+        // not leave its cover waiting for a switch-gated prune pass — recycle
+        // it now through the SAME guarded purgeCovers path the window-close
+        // cleanup uses (covers shared with a live task stay; plain records
+        // keep the exact previous behaviour). The record's privateMode was
+        // captured above, before the removal took it out of the queue.
+        if (target?.privateMode === true) await deps.thumbnails?.purgeCovers?.([taskId]);
+      }
       return { ...removal, filesMissing, filesTrashed, sharedSkipped };
     }
 
+    // external online audit P2: the privateMode flag must be read BEFORE the
+    // removal takes the record out of the queue — afterwards no trace of it
+    // exists anywhere (private records are never persisted, D-240).
+    const removalTarget = action === 'remove' ? deps.queue.get(taskId) : undefined;
     const result = await deps.taskDetail.perform(taskId, action as TaskDetailAction);
     // D-103: dropping a task record drops its claim on the cover. The file is
     // NOT deleted here — the prune pass checks whether another live task shares
@@ -315,6 +328,14 @@ export function createTaskHandlers(ctx: M5HandlerContext): M5HandlerMap {
       if (result.ok === true) {
         deps.thumbnails?.forget?.(taskId);
         deps.fileStatus?.forget(taskId);
+        // external online audit P2: a single-removed private-mode record
+        // recycles its exclusively owned cover NOW (same guarded purgeCovers
+        // path as the close-time purge; stale historical ids no longer block,
+        // covers a live task still shares stay). A plain record's cover keeps
+        // the exact previous prune-owned behaviour — zero change.
+        if (removalTarget?.privateMode === true) {
+          await deps.thumbnails?.purgeCovers?.([taskId]);
+        }
       }
     } else if (isOpenAction && observed !== undefined) {
       // Let the renderer say "文件已不存在，已为你打开原保存文件夹" without

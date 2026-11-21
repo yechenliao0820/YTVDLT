@@ -39,6 +39,10 @@ export class ArtifactVerifier implements IArtifactVerifier {
       ...(input.kind === undefined ? {} : { kind: input.kind }),
       // Stage 4: advisory-only input (embedded subtitle probe). Never scored.
       ...(input.subtitleRequest === undefined ? {} : { subtitleRequest: input.subtitleRequest }),
+      // external online audit P3 (append-only): segmented/chapters downloads —
+      // read ONLY by checkC5, which SKIPs instead of judging a duration it
+      // cannot judge honestly (D-213-style).
+      ...(input.segmented === undefined ? {} : { segmented: input.segmented }),
       ports: this.deps.ports,
       ffprobePath: this.deps.ffprobePath ?? `${runtimeDir}/ffmpeg/ffprobe.exe`,
       ffmpegPath: this.deps.ffmpegPath ?? `${runtimeDir}/ffmpeg/ffmpeg.exe`,

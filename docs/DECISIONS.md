@@ -2840,3 +2840,63 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 验证 | thumbnail-cache.test.ts 30 → 35：预标记 / 粘性含跨重启 / 崩溃后 enabled=false 回收 / live guard / 共享封面端到端；既有 30 用例零改动全绿（D-252/D-258 账目钉点原样）；全量 unit 167 文件 / 2962 例 + 6 skipped 全绿；离线集成 thumbnail-cache-local 4/4（真实 ensure 签名）；desktop typecheck OK。 |
 | 未覆盖 | 0.3.2 及更早崩溃留下的无标记无痕封面无法事后识别（条目无私有痕迹，接受为历史残留；用户可手动「立即清理」）；旧版本应用读新 index.json（含 `purgeSticky`）的向下兼容未专项验证；打包版真机未实测（铁律 9）。 |
 
+## D-268 · 2026-11-21 · 畸形快照 request 防御化：投影零抛错 + restore 归一化（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `buildPersistProjection()`（D-236 的 proxy 剥离）只判断 `request !== null` 就裸读 `request.network.proxy`——一条 `request` 非 null 但缺 `network` 子对象的记录（旧 schema / 手工编辑 / 导入损坏）让投影抛 TypeError；`restore()` 末尾的 `persistSnapshot()` 使**启动在 restore 阶段失败**，该记录入队后每次结构性写（enqueue/restart/remove/cancel/进度 tick）持续报「快照写入失败」（D-242/D-259/D-263 的检查如实上抛）。`withCopySuffix` 的 `request.paths.outputTemplate` 同为裸读面。 |
+| 根因 | 投影与 restore 对「request 的形状」做了存在性假设；D-203 的「request 缺失/损坏一律拒绝、记录保留」语义没有延伸到 restore 入口。 |
+| 决策 | ① 投影 `needsProxyStrip` 增加五段前置（request 是对象 + network 是对象 + proxy 是字符串非空），任何畸形形态零读取零抛错、原样带过；② restore 新增 `restoredRequestIsUsable()` 类型守卫——request 不是普通对象或 `paths` 缺失/非对象 → 归一为 `null`（D-203 语义：记录保留、动作拒绝），归一发生在 `repairRestoredRequest` hook 之前；`network` 缺失但 `paths` 完好 → 保留原样（宿主 hook 对 undefined spread 安全，network 在此重建）；③ 边界核查：`request.paths`/`request.network` 全部读取点逐一定性，畸形可达的只有投影与 withCopySuffix（后者由 restore 归一化闭合 boot/persist 来源）；`snapshotFingerprint`（D-163）与 `persistableRecords`（D-240）不动；`shared/src/request.ts` 逐字节未动。 |
+| 验证 | task-snapshot-persist 19 → 24（缺 network 记录 restore/落盘无 proxy 泄漏 + 宿主钩子回填后仍置空；`{}` / `{paths:5}` / `"garbage"` 归一 null 且记录保留；畸形记录 restart 拒绝零下载；畸形在场时 enqueue/remove/restart 不再抛「快照写入失败」）；全量 unit+contract 0 failed；core+desktop typecheck OK。 |
+| 未覆盖 | run 内 `detectPostprocessed` / `resolveDownloadPlan` 对其余域缺失的 request 会抛（runSafely 兜住转 UNKNOWN）——生产 boot 有 TaskStore D-161 sanitize 前置，仅手构快照直调 restore 可达，未改；`stripCredentialUrls` 对非对象 mediaInfo 会抛（超出本审计，登记）；打包版真机未实测（铁律 9）。 |
+
+## D-269 · 2026-11-21 · 无痕封面回收的陈旧引用折扣 + 单删当场回收（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 索引条目的 taskIds 永不清除 historical id（整个文件没有删除路径）：封面曾被普通任务 A 下载、A 的记录此后被删除后，A 仍留在 taskIds 里——`coverNamesOwnedOnlyBy(entries, ownerIds)` 的 `every(id => ownerIds.has(id))` 与 D-258 删除时刻复查都被这个**陈旧 id** 拦住 → 无痕任务 B 关窗时既不标记也不删文件，「关窗即清理无痕封面」在「同一视频以前下载过」场景失效；关窗到托盘不重启的用户要等下次 boot prune（D-267 sticky）才回收；无痕任务被单独 remove 时不走 purgeCovers，同样残留。 |
+| 根因 | 独占判定把「活的普通任务引用」（必须保留——卡片要用）与「陈旧记账引用」（没有任何任务再用）混为一谈；且单删路径没有接封面回收。 |
+| 决策 | ① `coverNamesOwnedOnlyBy` 加可选第三参 `liveIds`：每个 taskIds 元素要么 ∈ ownerIds 要么 ∉ liveIds（陈旧记账不拦截），并要求至少一个元素 ∈ ownerIds（连接要求，purge 只处理它本次删掉的任务拥有的封面）；liveIds 缺省时逐字保持 D-252 旧语义；② purgeCovers 标记阶段传入新鲜 `liveTaskIds()`（端口缺席回退旧严格语义，宁可少删）；D-258 删除时刻复查改为 `owners.some(id => liveNow.has(id))`——任何活引用（含在跑）一律拦截，陈旧 id 不再拦截（比「live 且不在 purgeSet 才拦」的公式更保守，生产路径等价）；③ 单删接线：TASK_ACTION remove 成功且记录 `privateMode === true` → 调同一 `purgeCovers([id])`（先 forget 再 purge，与关窗次序一致；ThumbnailPort 加可选 `purgeCovers?`，trash/liveTaskIds 依赖已在 electron-entry 装配）；普通记录删除零变化。D-267 sticky 豁免、五字段账目恒等、pruneBatch、isSafeCacheName/目录前缀两道守卫逐字未动。 |
+| 验证 | thumbnail-cache 35 → 38（陈旧记账不再拦截 + 账目恒等；live 保留 + sticky 语义）；task-queue 纯函数钉点 +5（折扣/拦截/连接/缺省）；m5-channels 单删端到端 +5（独占当场回收/共享保留/普通零变化/失败不触发/withFiles 路径）；既有 D-252/D-258/D-267 钉点除 1 个「ghost id 拦截回收」外零改动——该钉点钉的正是本审计判定为 bug 的旧语义，按语义翻转改写为反向断言（断言回收发生），未放松任何强度；全量 unit+contract 0 failed；core+desktop typecheck OK。 |
+| 未覆盖 | 「曾经共享、双方都还在历史里」的封面仍被活引用拦截（正确语义，非残留）；importJson 之外的索引向后兼容未专项验证；打包版真机未实测（铁律 9）。 |
+
+## D-270 · 2026-11-21 · 输出模板预览与实际同链：sanitizeToken 进预览（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 实际落盘模板走 `download-plan.ts:240` `sanitizeToken`（`TOKEN_UNSAFE_RE` 空白/控制字符 run → `_`），预览走 `resolveOutputPath` → `renderTemplate(rawTemplate)` → `sanitizeFileName`（不替换空格）——默认模板自带空格 → 预览显示 `标题 [id]`、实际文件 `标题_[id]`；预览、历史路径、外部脚本匹配全部对不上。 |
+| 根因 | 两条链的净化函数与时机不同；§4 分诊表把「空格 → `_`」定为既定正常行为（源自一次业主可见退化调查），但预览没有跟上。 |
+| 决策 | **实际文件名行为不改**（既定口径），预览链补上与实际逐字相同的步骤：`resolveOutputPath` 先 `sanitizeToken(paths.outputTemplate)` 再 renderTemplate → sanitizeFileName → analyzeWindowsPath。`chapter:` 前缀是 yt-dlp 逐章模板选择器、不出现在文件名里且属 advanced 域（PathsDomain 不携带），预览无需表达；`truncateWindowsPath` 作用于 argv 字符串、预览的 `analyzeWindowsPath` 作用于完整落盘路径——主体不同、边界规则同一函数，注释已写明。grep 全仓证明 `resolveOutputPath` 是预览唯一事实来源（PATH_PREVIEW IPC 是字面量 stub、设置页模板区是 yt-dlp 参数白名单，均与 outputTemplate 无关）。 |
+| 验证 | path-resolver 37 → 40（默认模板预览 `_` 钉死且与 `renderTemplate(sanitizeToken(raw), vars)` 逐字相等；空格 run → 单 `_`；title 值不过度 sanitize）；download-plan 40/40 与 argv-builder-download 18/18 零改动通过（证明实际链未被本修复改变）；core typecheck OK。 |
+| 未覆盖 | 预览现在如实显示下划线（丑但真）——若业主希望反过来让实际文件保留空格，属产品决策变更，需另立决策并重新评估 D-101/D-237 与历史路径兼容；打包版真机未实测（铁律 9）。 |
+
+## D-271 · 2026-11-21 · 历史条目加载时元素级隔离，原文保留（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `history-store::load()` 只验证 `Array.isArray(entries)`，元素零校验直接进入内存——一个 null / 缺 `videoPath` / 缺 `completedAt` 的旧元素让 `add()` 的查重 `dedupeKey(candidate)`、`get()` 的 `entry.id`、`query()` 的 `applyQuery` 排序（`completedAt.localeCompare`）抛 TypeError → **每次下载在产物校验通过、文件落盘之后**的 `history.add` 抛错，记录被转成 Error（文件其实在磁盘上），历史页查询也可能崩；必须手工修/删 `history.json` 才能恢复。 |
+| 根因 | D-230 只把「整体结构损坏」当 corrupt，没有覆盖「数组合法但元素畸形」的中间形态；隔离边界缺失。 |
+| 决策 | 加载时元素级隔离：`isUsableHistoryEntry` = 非 null 对象 + `videoPath` 是 string（dedupeKey/matchEntry 的解引用面）+ `completedAt` 是 string（applyQuery newest-first 排序的解引用面；HistoryEntry 类型上它是必填 string 且唯一构造点 `buildHistoryEntry` 恒填充——不可能误伤本应用写过的合法行）；被隔离即 `corruptOriginal = raw`（复用 D-230 机制：下一次会覆盖原文件的写之前，先把整个原始文件备份成 `history.json.corrupt-<ts>.json`），内存只留干净元素；隔离边界统一在 load，add/get/query/remove/importJson 不另加 try/catch；判定刻意收窄（只防抛错，不做更深的结构校验，不误伤合法旧数据）。 |
+| 验证 | history-store 23 → 29（`[null]` 可恢复；混合畸形隔离 + 逐字节备份恰一份；全畸形走 corrupt 路径不重复备份；多余未知字段不误伤；缺 completedAt 元素隔离且查询链可用）；既有 D-227/D-230/D-241/D-246 风格钉点零改动全绿；core typecheck OK。 |
+| 未覆盖 | `importJson()` 入参逐字接受（D-238 语义），畸形导入项仍可能在导入时抛——独立注入路径，未改；`applyQuery`/`matchEntry` 本体未动（隔离在 load 边界闭合）；打包版真机未实测（铁律 9）。 |
+
+## D-272 · 2026-11-21 · 分段/分章下载 C5 如实 SKIPPED（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `advanced.splitChapters`（模板加 `chapter:` 逐章前缀）、`advanced.downloadSections`、`advanced.sponsorblockRemove` 的产物是分段/切短的媒体文件，而 `checkC5` 把 ffprobe 实际时长与 probe 的**完整视频**时长比（2% 容差）→ 下载成功也 FAIL → 记录转 Error、重试继续失败；`primaryArtifact` 对多文件还只取第一个。三个键都在 `shared/src/request.ts`（67-69 行，冻结文件，键已存在，无需改 shared）。 |
+| 根因 | C5 的期望时长语义是「整个请求的完整媒体」，分段计划让它失去前提；判据没有「判不了」的出口（D-213 只给了超时=SKIPPED 的先例）。 |
+| 决策 | `VerifierInput`（`core/src/ports.ts`，append-only 可选字段，复刻既有 Stage-4 `subtitleRequest` 双落点模式）加 `segmented?: boolean` → `CheckContext` 透传 → `checkC5` 在跑 ffprobe **之前**对 `segmented === true` 返回 `skip('C5', 'segmented/chapters download: full-video probe duration is not the artifact duration; duration cannot be judged honestly (D-213-style)')`；task-queue 的 verify 调用点传三键任一为真。`segmented` 为 false/undefined 时 checkC5 函数体逐字不变（红线：普通下载校验强度零变化）；C1-C4/C6-C8 与 verify 的 ok 语义零改动。 |
+| 验证 | artifact-verifier 42 → 45（segmented + 必 FAIL 钉点场景 → C5 SKIPPED、ok=true；ffprobe 调用次数证明 skip 在 probe 前；非分段仍 FAIL 的红线钉点）；task-queue 分段映射 4 例（三键 + 空白串负例）；全量 unit+contract 0 failed；四包 typecheck OK。 |
+| 未覆盖 | 分段产物的逐文件时长校验（需要逐章期望值来源）未实现——现阶段诚实 SKIPPED；C5 之外的判据对分段产物（如 C6 流布局）未专项评估；打包版真机未实测（铁律 9）。 |
+
+## D-273 · 2026-11-21 · 副本后缀支持子目录模板：有界递归扫描（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `withCopySuffix` 只 readdir 根目录；`outputTemplate` 含 `/`（静态 `Sub/…` 或动态 `%(extractor)s/…` 子目录）时实际文件落在子目录，扫描看不见旧文件 → 不加 ` (n)` → yt-dlp 打印 "has already been downloaded" 以 0 退出**复用旧文件**（坑 11 / D-101），用户以为新下载完成，实际没有新文件；若引擎行为变为覆盖则旧副本被覆盖。 |
+| 根因 | D-101 的碰撞检测假设模板不产生子目录；「在哪找旧文件」与「文件实际落在哪」脱节。 |
+| 决策 | 模板含 `/` 时改有界 BFS 递归扫描：`COPY_SUFFIX_SCAN_MAX_DEPTH = 3`（根 + 1/2/3 层）、`COPY_SUFFIX_SCAN_MAX_DIRS = 200`（每个 readdir 目标计一次，超限即停并经 logSink 发 `copySuffix.scanTruncated` WARNING，payload 不含路径）；对每个能 readdir 的目录收集裸文件名并入候选（对文件 readdir ENOTDIR → catch 跳过，沿用既有风格）。模板不含 `/` 走原平面 readdir（快路径逐字保留）。D-237 合成认领逐字未动（认领 dir 恒为输出根、在扫描子树内；`nextCopySuffix` 匹配名字里的 `[<id>]` token 而非路径）；`applyCopySuffix`/`nextCopySuffix`/D-101 契约零改动——只扩「在哪找旧文件」。 |
+| 验证 | task-queue 49 → 60（动态 extractor 子目录 + 静态子目录旧文件 → `_(1)`；深度 3 层内纳入 / 4 层外不纳入；无 `/` 模板不递归快路径钉点；子目录模板并发孪生仍独立命名；250 文件超限 → 根目录名照常取到 + 截断 WARNING）；copy-suffix 12/12、既有钉点零改动；全量 unit+contract 0 failed；四包 typecheck OK。 |
+| 未覆盖 | 深度/目录数上限是防失控的工程取舍（4 层以下的极端嵌套模板仍可能漏检——漏检时回落到 D-101 的旧行为：yt-dlp 复用旧文件，如实完成但不加副本，不是数据损坏）；真实 yt-dlp 对子目录模板的落地路径未在集成层实测（本机系统代理干扰 L2，见手册 §9 坑 45）；打包版真机未实测（铁律 9）。 |
+

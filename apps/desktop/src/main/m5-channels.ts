@@ -23,7 +23,7 @@ import type {
   AccentChoice, ClipboardPort, CommandTemplateStore, IConfigStore,
   MotionMode, TaskDetailAction, TaskDetailResult, ThemeMode,
 } from '@ytvdlt/core';
-import type { ThumbnailCacheStatus, ThumbnailPruneReport } from './thumbnail-cache.js';
+import type { ThumbnailCacheStatus, ThumbnailPruneReport, ThumbnailCoverPurgeReport } from './thumbnail-cache.js';
 import type { LocalFileStatusPort } from './local-file-status.js';
 import type { TxtImportServicePort } from './txt-import-service.js';
 import type { PlaylistPreviewPortLike } from './playlist-preview-service.js';
@@ -97,6 +97,14 @@ export interface ThumbnailPort {
   prune?(options?: { force?: boolean }): Promise<ThumbnailPruneReport>;
   setAutoClean?(enabled: boolean): Promise<Record<string, unknown>>;
   setMaxBytes?(bytes: number): Promise<Record<string, unknown>>;
+  /**
+   * external online audit P2: the D-252 close-time purge, exposed so a
+   * single-removed private-mode record recycles its exclusively owned cover
+   * immediately — the SAME guarded trash path and markers the window-close
+   * cleanup uses (the cache's own trash/liveTaskIds wiring in electron-entry
+   * needs no new dependency). Optional so older fakes still compile.
+   */
+  purgeCovers?(taskIds: readonly string[]): Promise<ThumbnailCoverPurgeReport>;
 }
 
 /**

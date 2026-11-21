@@ -212,8 +212,11 @@ export interface ThumbnailCache {
   /**
    * D-252: recycle the covers owned ONLY by the given (just-removed private)
    * task ids — switch-independent, trash-port only, never throws. Covers
-   * shared with any other task, untracked files, and anything the rule cannot
-   * prove exclusive are left to the regular prune rules.
+   * shared with any LIVE task outside the purge, untracked files, and anything
+   * the rule cannot prove exclusive are left to the regular prune rules;
+   * external online audit P2: a historical id left by an already-removed task
+   * (present in the index, absent from the live list) is stale bookkeeping and
+   * no longer blocks.
    *
    * D-258: the delete decision is re-verified per file at DELETE time (index,
    * `byTask`, fresh `liveTaskIds()`); one pass recycles at most `pruneBatch`
@@ -788,6 +791,15 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
    * covers those ids own EXCLUSIVELY — anything shared with a task outside the
    * purge, and any untracked file, stays with the regular retention rules.
    *
+   * external online audit P2: "outside the purge" now means LIVE outside the
+   * purge. The exclusivity proof is evaluated against a fresh live-task list
+   * (the same `liveTaskIds()` source the delete-time recheck below uses): a
+   * historical id some removed task left in the index is stale bookkeeping —
+   * no card can ever use the cover again — so it no longer blocks the recycle
+   * of a cover the purge owns part of. A cover referenced by a LIVE task
+   * outside the purge still stays. Without a live port the strict D-252
+   * exclusivity rule stands (宁可少删，绝不可错删).
+   *
    * Order matters: entries are marked `purgePending` in `index.json` BEFORE
    * any byte is touched, so a failed or interrupted recycle below is picked up
    * by the next prune pass (boot included) with the auto-clean switch OFF.
@@ -817,7 +829,14 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       await writeChain;
       await reconcile();
       const purgeSet = new Set(taskIds);
-      const names = coverNamesOwnedOnlyBy(index.entries, purgeSet);
+      // external online audit P2: the same fresh live-task source the D-258
+      // delete-time recheck below consults. A historical id a removed task
+      // left in the index is stale bookkeeping — nothing will ever clean it
+      // out, and no card can ever use the cover again — so it must not block
+      // the recycle forever. Without a live port the strict D-252 exclusivity
+      // rule stands (宁可少删，绝不可错删).
+      const liveIds = options.liveTaskIds === undefined ? undefined : new Set(options.liveTaskIds());
+      const names = coverNamesOwnedOnlyBy(index.entries, purgeSet, liveIds);
       if (names.length === 0) {
         return { marked: 0, removed: 0, failed: 0, keptReferenced: 0, deferred: 0 };
       }
@@ -868,13 +887,17 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
         if (!absolute.startsWith(resolve(dir) + sep)) { failed += 1; continue; }
         // D-258 (delete-time reference recheck): decide on the state NOW, not
         // at mark time. The index entry, the in-memory byTask mapping (its
-        // commit may still be in flight) and a FRESH live-task list — anything
-        // referenced outside the purge, or by a live task, goes back to the
-        // regular retention rules. 宁可少删，绝不可错删.
+        // commit may still be in flight) and a FRESH live-task list.
+        // external online audit P2: only a LIVE owner keeps the cover — a live
+        // card needs its bytes, while an id outside the purge that is not live
+        // is stale bookkeeping (a removed task's historical index entry) and
+        // no longer blocks. A live owner inside the purge set still blocks:
+        // its removal has not actually taken effect yet (D-258 defence in
+        // depth, 宁可少删，绝不可错删).
         const liveNow = new Set(options.liveTaskIds === undefined ? [] : options.liveTaskIds());
         const owners = currentOwnersOf(name);
         if (owners.length === 0
-          || owners.some((id) => !purgeSet.has(id) || liveNow.has(id))) {
+          || owners.some((id) => liveNow.has(id))) {
           keptReferenced += 1;
           keptNames.push(name);
           continue;

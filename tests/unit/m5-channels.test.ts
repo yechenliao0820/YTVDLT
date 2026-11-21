@@ -9,17 +9,22 @@
  *   - settings writes go through ConfigStore, never straight to a file.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { existsSync, mkdtempSync, renameSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
 import type {
   AppError, DownloadRequest, ErrorCode, ISystemStartupPort, TaskRecord, UrlSupportResult, UrlSupportState,
 } from '@ytvdlt/shared';
 import { CommandTemplateStore, ConfigStore, maskUrlSecrets } from '@ytvdlt/core';
-import type { ClipboardPort } from '@ytvdlt/core';
+import type { ClipboardPort, ILogger } from '@ytvdlt/core';
 import type { TaskDetailAction, TaskDetailResult } from '@ytvdlt/core';
 import {
   M5_CHANNELS, createM5Handlers, toTaskDetail, toTaskListItem, validateM5Payload,
   type M5ChannelDeps, type SingleDownloadInput, type SystemAppearancePort,
 } from '../../apps/desktop/src/main/m5-channels.js';
+import { createThumbnailCache } from '../../apps/desktop/src/main/thumbnail-cache.js';
 import { createInMemoryPorts, type InMemoryPorts } from './helpers/in-memory-ports.js';
 
 const SIGNED_URL = 'https://example.org/watch?v=abc&token=SUPERSECRET&sig=deadbeef';
@@ -1056,5 +1061,172 @@ describe('m5 ipc · CLIPBOARD_WRITE (D-173)', () => {
     expect(atCap).toEqual({ ok: true });
     const empty = await handlers.get(IPC_CHANNELS.CLIPBOARD_WRITE)?.({ text: '' });
     expect(empty).toEqual({ ok: true });
+  });
+});
+
+/**
+ * external online audit P2 · 单删无痕记录的封面当场回收（TASK_ACTION remove）。
+ *
+ * 关窗清理（D-252）之外的第二条回收触发：privateMode 记录被用户单独删除且
+ * `queue.remove` 成功时， handler 立即调用与关窗同款的 `purgeCovers([id])` ——
+ * 同一套独占判定（陈旧记账不拦截、活引用保留）、trash 端口与标记先行守卫，
+ * 不另造删除原语。普通记录的删除行为零变化；删除失败不触发。
+ */
+describe('external online audit P2 · 单删无痕记录的封面当场回收', () => {
+  const COVER_PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+  const noopLogger: ILogger = {
+    log: async () => undefined, info: async () => undefined, warn: async () => undefined,
+    error: async () => undefined, logArgv: () => undefined,
+    writeCrashReport: async () => '', exportLogs: async () => '',
+  };
+
+  /** Seeds a real cover-cache dir with one index entry and its bytes. */
+  function seedCover(dir: string, name: string, taskIds: readonly string[]): void {
+    writeFileSync(join(dir, name), COVER_PNG);
+    writeFileSync(join(dir, 'index.json'), JSON.stringify({
+      version: 1,
+      entries: { [name]: { bytes: COVER_PNG.byteLength, lastUsedAt: Date.now(), taskIds: [...taskIds] } },
+      lastPrunedAt: null,
+    }));
+  }
+
+  function coverDir(): string {
+    return mkdtempSync(join(tmpdir(), 'ytvdlt-single-purge-'));
+  }
+
+  /** A taskDetail that actually takes the record out of the queue's list. */
+  const removingDetail = (records: TaskRecord[]) => ({
+    async perform(taskId: string, action: TaskDetailAction): Promise<TaskDetailResult> {
+      if (action === 'remove') {
+        const index = records.findIndex((item) => item.id === taskId);
+        if (index >= 0) records.splice(index, 1);
+      }
+      return { action, ok: true, code: 'OK', message: '' };
+    },
+  });
+
+  it('removing a private-mode record recycles its exclusively owned cover at once', async () => {
+    const dir = coverDir();
+    const name = `${createHash('sha1').update('https://cdn.example/private-only.png').digest('hex')}.png`;
+    seedCover(dir, name, ['p1']);
+    const trashed: string[] = [];
+    const records = [record('p1', { state: 'Completed', privateMode: true })];
+    const { handlers } = await harness(records, {
+      taskDetail: removingDetail(records),
+      thumbnails: createThumbnailCache({
+        dir,
+        logger: noopLogger,
+        liveTaskIds: () => records.map((item) => item.id),
+        trash: async (path) => {
+          trashed.push(path);
+          renameSync(path, `${path}.trashed`); // fake recycle bin: never unlink
+          return true;
+        },
+      }),
+    });
+
+    const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({ taskId: 'p1', action: 'remove' }) as { ok: boolean };
+    expect(result.ok).toBe(true);
+    expect(trashed).toEqual([join(dir, name)]);
+    expect(existsSync(join(dir, name))).toBe(false);
+  });
+
+  it('the cover shared with a still-live task is kept (live guard)', async () => {
+    const dir = coverDir();
+    const name = `${createHash('sha1').update('https://cdn.example/single-shared.png').digest('hex')}.png`;
+    seedCover(dir, name, ['p1', 'n1']);
+    const trashed: string[] = [];
+    const records = [
+      record('p1', { state: 'Completed', privateMode: true }),
+      record('n1', { state: 'Completed' }),
+    ];
+    const { handlers } = await harness(records, {
+      taskDetail: removingDetail(records),
+      thumbnails: createThumbnailCache({
+        dir,
+        logger: noopLogger,
+        liveTaskIds: () => records.map((item) => item.id),
+        trash: async (path) => {
+          trashed.push(path);
+          renameSync(path, `${path}.trashed`);
+          return true;
+        },
+      }),
+    });
+
+    const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({ taskId: 'p1', action: 'remove' }) as { ok: boolean };
+    expect(result.ok).toBe(true);
+    expect(trashed).toEqual([]); // n1's card still needs the cover
+    expect(existsSync(join(dir, name))).toBe(true);
+  });
+
+  it('a plain record removal keeps the exact previous behaviour (forget, no purge)', async () => {
+    const forgotten: string[] = [];
+    const purged: string[][] = [];
+    const records = [record('t9', { state: 'Completed', privateMode: false })];
+    const { handlers } = await harness(records, {
+      thumbnails: {
+        pathOf: () => null,
+        forget: (taskId) => { forgotten.push(taskId); },
+        purgeCovers: async (ids) => {
+          purged.push([...ids]);
+          return { marked: 0, removed: 0, failed: 0, keptReferenced: 0, deferred: 0 };
+        },
+      },
+    });
+
+    const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({ taskId: 't9', action: 'remove' }) as { ok: boolean };
+    expect(result.ok).toBe(true);
+    expect(forgotten).toEqual(['t9']); // the pre-P2 behaviour is untouched
+    expect(purged).toEqual([]);       // and no cover purge is triggered
+  });
+
+  it('a failed removal never triggers the cover purge (even for a private record)', async () => {
+    const purged: string[][] = [];
+    const records = [record('p1', { state: 'Completed', privateMode: true })];
+    const { handlers } = await harness(records, {
+      taskDetail: {
+        async perform(taskId: string, action: TaskDetailAction): Promise<TaskDetailResult> {
+          return { action, ok: false, code: 'ERROR', message: 'snapshot write failed' };
+        },
+      },
+      thumbnails: {
+        pathOf: () => null,
+        purgeCovers: async (ids) => {
+          purged.push([...ids]);
+          return { marked: 0, removed: 0, failed: 0, keptReferenced: 0, deferred: 0 };
+        },
+      },
+    });
+
+    const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({ taskId: 'p1', action: 'remove' }) as { ok: boolean };
+    expect(result.ok).toBe(false);
+    expect(purged).toEqual([]);
+  });
+
+  it('the withFiles removal path purges a private record\'s cover too', async () => {
+    const forgotten: string[] = [];
+    const purged: string[][] = [];
+    // D-203: a withFiles removal needs a usable request for its roots; the
+    // record carries no artifacts, so the recycle port runs on an empty batch.
+    const records = [record('p1', { state: 'Completed', privateMode: true, request: REQUEST, artifacts: [] })];
+    const { handlers } = await harness(records, {
+      trashFiles: { trash: async (paths) => [...paths] },
+      thumbnails: {
+        pathOf: () => null,
+        forget: (taskId) => { forgotten.push(taskId); },
+        purgeCovers: async (ids) => {
+          purged.push([...ids]);
+          return { marked: 0, removed: 0, failed: 0, keptReferenced: 0, deferred: 0 };
+        },
+      },
+    });
+
+    const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({
+      taskId: 'p1', action: 'remove', withFiles: true,
+    }) as { ok: boolean };
+    expect(result.ok).toBe(true);
+    expect(forgotten).toEqual(['p1']);
+    expect(purged).toEqual([['p1']]);
   });
 });

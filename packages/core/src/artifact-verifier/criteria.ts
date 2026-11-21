@@ -11,7 +11,10 @@
  *    nor a proven defect, so probe-based criteria SKIP on timeout instead
  *    (indeterminate, never a false PASS / false FAIL);
  *  - C5 degrades to `expectedManifest.durationSec` when `duration === null`,
- *    and SKIPs (never FAILs) when neither is known;
+ *    and SKIPs (never FAILs) when neither is known; for segmented/chapters
+ *    requests (`segmented === true`) it SKIPs before probing, because the
+ *    full-video probe duration is not any artifact's duration (external
+ *    online audit P3);
  *  - C2 and C8 are mutually exclusive, selected by `postprocessed`.
  */
 import type {
@@ -36,6 +39,15 @@ export interface CheckContext {
    * C1–C12: a subtitle problem must not be reported as a broken video (D-127).
    */
   subtitleRequest?: SubtitleDomain | null;
+  /**
+   * external online audit P3 (append-only): the request produces segmented /
+   * per-chapter artifacts (`advanced.splitChapters` picks per-chapter templates,
+   * `downloadSections` / `sponsorblockRemove` cut the timeline), so every
+   * artifact's duration differs from the probed FULL-video duration and C5's
+   * 2 % tolerance cannot judge them honestly. Read ONLY by checkC5, which
+   * SKIPs (D-213-style: an unjudgeable criterion is SKIPPED, never FAIL).
+   */
+  segmented?: boolean;
   ports: CorePorts;
   ffprobePath: string;
   ffmpegPath: string;
@@ -235,6 +247,17 @@ export async function checkC4(ctx: CheckContext): Promise<ArtifactVerification> 
 export async function checkC5(ctx: CheckContext): Promise<ArtifactVerification> {
   const primary = primaryArtifact(ctx.artifacts);
   if (primary === null) return fail('C5', 'no primary artifact');
+  // external online audit P3: splitChapters writes one file per chapter and
+  // downloadSections / sponsorblockRemove cut the timeline, so EVERY artifact's
+  // duration differs from the probed FULL-video duration the tolerance is built
+  // on — a successful download used to end as ARTIFACT_INCOMPLETE and every
+  // retry failed the same way. Same semantics as the D-213 probe-timeout rule
+  // (an unjudgeable criterion is SKIPPED, never a false FAIL): step aside
+  // BEFORE the ffprobe runs. Only `segmented === true` triggers this — a normal
+  // download's C5 judgement is untouched.
+  if (ctx.segmented === true) {
+    return skip('C5', 'segmented/chapters download: full-video probe duration is not the artifact duration; duration cannot be judged honestly (D-213-style)');
+  }
   const probe = await runFfprobe(ctx, primary);
   if (probe.timedOut) return skip('C5', 'ffprobe probe timed out; duration unknown (not a mismatch)');
   const actualDuration = formatDuration(probe.json);

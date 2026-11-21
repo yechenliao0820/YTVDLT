@@ -510,3 +510,176 @@ describe('D-241 · 存在性探测失败不再被当成「没有历史」', () =
     expect(await store.query({})).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// external online audit P3 · element-level quarantine at load time.
+//
+// The load-time array check proved only the FILE's shape, not its ELEMENTS':
+// `entries: [null]` (hand-edited / imported / legacy) reached `this.entries`
+// verbatim and detonated at the first consumer — add()'s dedupe scan, get(),
+// query() — so every later download completed on disk but still surfaced as
+// an Error, and the history page could stop opening entirely. The fix
+// quarantines exactly the elements a consumer would throw on (non-null object
+// with a string `videoPath` — the one field `dedupeKey()` dereferences — and a
+// string `completedAt`, which applyQuery's newest-first sort dereferences on
+// every comparison), keeps the raw original bytes via the D-230
+// preserve-before-overwrite path, and leaves add/get/query/remove untouched
+// (no per-method try/catch — the boundary is load, once).
+// ---------------------------------------------------------------------------
+describe('external online audit P3 · 畸形 entries 元素加载时隔离，原文保留', () => {
+  const historyPath = (mem: ReturnType<typeof createInMemoryPorts>): string =>
+    `${mem.ports.env.configDir()}/history.json`;
+
+  const corruptBackups = (mem: ReturnType<typeof createInMemoryPorts>): string[] =>
+    [...mem.state.files.keys()].filter((key) => key.includes('history.json.corrupt-'));
+
+  const backupBytesEqual = (backup: string, original: string): boolean =>
+    Buffer.from(backup, 'utf8').equals(Buffer.from(original, 'utf8'));
+
+  it('entries: [null] loads clean: add does not throw, get/query work', async () => {
+    const mem = createInMemoryPorts();
+    const path = historyPath(mem);
+    mem.state.files.set(path, JSON.stringify({ schemaVersion: 1, entries: [null] }));
+
+    const store = new HistoryStore({ ports: mem.ports });
+    // The old code kept the null element in this.entries: add()'s dedupe scan
+    // (`dedupeKey(candidate)` → `normalizePath(null.videoPath)`) threw on the
+    // FIRST download after such a file existed, after the artifact had
+    // already landed on disk.
+    const added = await store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' }));
+    expect(added.added).toBe(true);
+
+    expect((await store.get('new-a'))?.videoPath).toBe('C:/out/a.mp4');
+    expect(await store.get('missing')).toBeNull();
+    expect((await store.query({})).map((e) => e.id)).toEqual(['new-a']);
+    // remove() reads entry.id the same way — must stay clean too.
+    expect(await store.remove('new-a')).toBe(true);
+  });
+
+  it('quarantines malformed elements, keeps the valid ones, and preserves the original bytes before the first rewrite', async () => {
+    const mem = createInMemoryPorts();
+    const path = historyPath(mem);
+    const raw = JSON.stringify({
+      schemaVersion: 1,
+      entries: [
+        entry({ id: 'old-1', videoPath: 'C:/out/old1.mp4' }),
+        { id: 'broken', taskId: 't9', url: 'https://example.org/x' }, // object without videoPath
+        'garbage',
+        42,
+      ],
+    });
+    mem.state.files.set(path, raw);
+
+    const store = new HistoryStore({ ports: mem.ports });
+    // Reading alone must not touch the file and must expose ONLY the usable row.
+    expect((await store.query({})).map((e) => e.id)).toEqual(['old-1']);
+    expect(mem.state.files.get(path)).toBe(raw);
+
+    // The first write backs the WHOLE original file up byte-for-byte (it still
+    // contains the malformed elements), then rewrites history.json with only
+    // the clean rows.
+    await store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' }));
+    const backups = corruptBackups(mem);
+    expect(backups).toHaveLength(1);
+    expect(backupBytesEqual(mem.state.files.get(backups[0] as string) ?? '', raw)).toBe(true);
+    expect(mem.state.files.get(backups[0] as string)).toBe(raw);
+
+    // Memory and disk now show only clean entries.
+    expect((await store.query({})).map((e) => e.id).sort()).toEqual(['new-a', 'old-1']);
+    const disk = JSON.parse(mem.state.files.get(path) as string) as { entries: Array<{ id: string }> };
+    expect(disk.entries.map((e) => e.id).sort()).toEqual(['new-a', 'old-1']);
+  });
+
+  it('quarantines an element with a usable videoPath but no string completedAt (applyQuery sort safety)', async () => {
+    const mem = createInMemoryPorts();
+    const path = historyPath(mem);
+    // `{ videoPath: 'x' }` passes the dedupe surface (string videoPath) but
+    // would crash query()'s newest-first sort on the very first comparison
+    // (`b.completedAt.localeCompare` of undefined) — same throw surface as the
+    // videoPath cases, one consumer later.
+    const raw = JSON.stringify({ schemaVersion: 1, entries: [{ videoPath: 'x' }] });
+    mem.state.files.set(path, raw);
+
+    const store = new HistoryStore({ ports: mem.ports });
+    expect(await store.query({})).toEqual([]);
+    // Reading alone must not touch the file.
+    expect(mem.state.files.get(path)).toBe(raw);
+
+    await store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' }));
+    const backups = corruptBackups(mem);
+    expect(backups).toHaveLength(1);
+    expect(backupBytesEqual(mem.state.files.get(backups[0] as string) ?? '', raw)).toBe(true);
+    expect((await store.query({})).map((e) => e.id)).toEqual(['new-a']);
+    const disk = JSON.parse(mem.state.files.get(path) as string) as { entries: Array<{ id: string }> };
+    expect(disk.entries.map((e) => e.id)).toEqual(['new-a']);
+  });
+
+  it('mixed [valid, missing completedAt]: the valid row stays visible and query stays usable', async () => {
+    const mem = createInMemoryPorts();
+    const path = historyPath(mem);
+    const raw = JSON.stringify({
+      schemaVersion: 1,
+      entries: [entry({ id: 'old-1', videoPath: 'C:/out/old1.mp4' }), { videoPath: 'x' }],
+    });
+    mem.state.files.set(path, raw);
+
+    const store = new HistoryStore({ ports: mem.ports });
+    // The surviving row is queryable — including a text search, which runs the
+    // same matchEntry + newest-first sort chain the quarantined element would
+    // have broken.
+    expect((await store.query({})).map((e) => e.id)).toEqual(['old-1']);
+    expect((await store.query({ text: 'ALPHA' })).map((e) => e.id)).toEqual(['old-1']);
+    expect((await store.get('old-1'))?.videoPath).toBe('C:/out/old1.mp4');
+
+    await store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' }));
+    const backups = corruptBackups(mem);
+    expect(backups).toHaveLength(1);
+    expect(backupBytesEqual(mem.state.files.get(backups[0] as string) ?? '', raw)).toBe(true);
+    expect((await store.query({})).map((e) => e.id).sort()).toEqual(['new-a', 'old-1']);
+  });
+
+  it('entries that are ALL malformed take the existing corrupt path: empty store, one preserve copy', async () => {
+    const mem = createInMemoryPorts();
+    const path = historyPath(mem);
+    const raw = JSON.stringify({ schemaVersion: 1, entries: [null, 'garbage', 42, { nope: true }] });
+    mem.state.files.set(path, raw);
+
+    const store = new HistoryStore({ ports: mem.ports });
+    expect(await store.query({})).toEqual([]);
+    // Reading alone must not rewrite anything.
+    expect(mem.state.files.get(path)).toBe(raw);
+
+    await store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' }));
+    const backups = corruptBackups(mem);
+    expect(backups).toHaveLength(1);
+    expect(backupBytesEqual(mem.state.files.get(backups[0] as string) ?? '', raw)).toBe(true);
+    expect((await store.query({})).map((e) => e.id)).toEqual(['new-a']);
+    const disk = JSON.parse(mem.state.files.get(path) as string) as { entries: Array<{ id: string }> };
+    expect(disk.entries.map((e) => e.id)).toEqual(['new-a']);
+
+    // The copy is made exactly once (corruptOriginal is nulled after the first
+    // preserve) — a later write must not produce a second backup.
+    await store.add(entry({ id: 'new-b', videoPath: 'C:/out/b.mp4' }));
+    expect(corruptBackups(mem)).toHaveLength(1);
+  });
+
+  it('narrow judgment: a harmless oddity (unknown extra field) is NOT quarantined and leaves no backup', async () => {
+    const mem = createInMemoryPorts();
+    const path = historyPath(mem);
+    // A row with an unknown extra field cannot make any consumer throw:
+    // dropping it would be over-validation, which the quarantine must not do.
+    const odd = { ...entry({ id: 'odd-1', videoPath: 'C:/out/odd.mp4' }), futureField: { nested: true } };
+    mem.state.files.set(path, JSON.stringify({ schemaVersion: 1, entries: [odd] }));
+
+    const store = new HistoryStore({ ports: mem.ports });
+    expect((await store.query({})).map((e) => e.id)).toEqual(['odd-1']);
+
+    // Nothing was quarantined → no corrupt marker, so the rewrite creates no
+    // backup at all.
+    await store.add(entry({ id: 'new-a', videoPath: 'C:/out/a.mp4' }));
+    expect(corruptBackups(mem)).toHaveLength(0);
+    const disk = JSON.parse(mem.state.files.get(path) as string) as { entries: Array<{ id: string }> };
+    expect(disk.entries.map((e) => e.id).sort()).toEqual(['new-a', 'odd-1']);
+    expect((await store.query({})).map((e) => e.id).sort()).toEqual(['new-a', 'odd-1']);
+  });
+});

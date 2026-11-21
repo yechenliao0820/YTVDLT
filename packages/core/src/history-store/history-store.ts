@@ -15,6 +15,29 @@ interface HistoryFile {
   entries: HistoryEntry[];
 }
 
+/**
+ * external online audit P3: the narrow "cannot make a consumer throw" test for
+ * an element loaded out of history.json. `dedupeKey()` dereferences exactly one
+ * field — `entry.videoPath`, on which `normalizePath()` calls `.trim()` — and
+ * the other loaded-entry consumers (`get`, `remove`, `matchEntry`) do plain
+ * property reads that throw only on null/undefined. So a non-null object whose
+ * `videoPath` is a string survives those; `null`, primitives and objects
+ * without a string `videoPath` are quarantined. `completedAt` must also be a
+ * string: `applyQuery`'s newest-first sort calls
+ * `b.completedAt.localeCompare(a.completedAt)` on EVERY comparison, so a row
+ * missing it crashes `query()` exactly like the videoPath cases crash `add()`.
+ * Both checks are the MINIMUM the store's own consumers dereference — still no
+ * deeper shape validation (ids, sizes, dates beyond existence): an old row with
+ * odd-but-harmless fields must survive a load untouched. Neither check can
+ * strand legal data: `completedAt` is a required `string` on HistoryEntry and
+ * `buildHistoryEntry` (task-queue/history-entry.ts) always fills it from the
+ * clock, so every row this app ever wrote passes.
+ */
+const isUsableHistoryEntry = (element: unknown): element is HistoryEntry =>
+  typeof element === 'object' && element !== null
+  && typeof (element as { videoPath?: unknown }).videoPath === 'string'
+  && typeof (element as { completedAt?: unknown }).completedAt === 'string';
+
 export interface HistoryStoreDeps {
   ports: CorePorts;
   /** Defaults to `<configDir>/history.json`. */
@@ -93,6 +116,21 @@ export class HistoryStore implements IHistoryStore {
    * genuine "no such file" (`isMissingFileError`) is a first run; every other
    * error propagates and blocks the overwrite, exactly like D-230's read
    * failure path.
+   *
+   * external online audit P3: element-level quarantine. Proving the file holds
+   * an ARRAY says nothing about its ELEMENTS; a hand-edited / imported /
+   * legacy element a consumer cannot survive (`null`, a bare string, an object
+   * without a string `videoPath` or `completedAt`) used to reach `this.entries`
+   * verbatim and
+   * then detonated at the first touch — `add()`'s dedupe scan, `get()`,
+   * `query()`, `remove()` — so every later download surfaced as an Error even
+   * though its artifact had already been written to disk. Such elements are
+   * dropped here, once, at the single load boundary (see
+   * {@link isUsableHistoryEntry} for the deliberately narrow test), and when
+   * anything was dropped the WHOLE original file goes through the same D-230
+   * preserve-before-overwrite path as unparseable bytes: quarantined rows are
+   * never silently destroyed, and the consuming methods need no try/catch of
+   * their own.
    */
   private async load(): Promise<void> {
     await this.ports.fs.mkdir(this.ports.env.configDir());
@@ -113,7 +151,17 @@ export class HistoryStore implements IHistoryStore {
       // `{}`, `{"entries": 5}` or a bare array all mean "we cannot recover the
       // rows", so they take the same preserve-before-overwrite path.
       if (!Array.isArray(candidate.entries)) throw new Error('history structure: entries is not an array');
-      this.entries = candidate.entries;
+      // external online audit P3: the array check proves the FILE's shape, not
+      // its ELEMENTS'. Quarantine exactly what would make a consumer throw
+      // (see isUsableHistoryEntry — deliberately no deeper validation, so
+      // legal old rows with harmless oddities survive untouched). Dropping
+      // anything routes the WHOLE original file through the same D-230
+      // preserve-before-overwrite path as broken JSON below: memory keeps only
+      // the clean rows and the raw bytes are never silently discarded. When
+      // nothing is dropped this is a plain copy — no backup marker is set.
+      const incoming = candidate.entries as readonly unknown[];
+      this.entries = incoming.filter(isUsableHistoryEntry);
+      if (this.entries.length !== incoming.length) this.corruptOriginal = raw;
     } catch {
       // Corrupt history must not crash the app; start empty, keep the bytes.
       this.entries = [];

@@ -112,6 +112,14 @@ export interface VerifierInput {
    * advisory attachment probes (embedded-stream check). It cannot fail a task.
    */
   subtitleRequest?: SubtitleDomain | null;
+  /**
+   * external online audit P3 (append-only): the request produces segmented /
+   * per-chapter artifacts (`advanced.splitChapters` / `downloadSections` /
+   * `sponsorblockRemove`). Each artifact's duration is then NOT the probed
+   * full-video duration, so C5 SKIPs (D-213-style: indeterminate is never a
+   * FAIL) instead of failing a good download. Read ONLY by checkC5.
+   */
+  segmented?: boolean;
 }
 
 export interface IArtifactVerifier {

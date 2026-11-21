@@ -650,6 +650,169 @@ describe('D-101 · 重复下载：给出独立文件名，而不是报错', () =
   });
 });
 
+// --- external online audit P3 · segmented requests must not fail C5 ---------
+
+describe('external online audit P3 · 分段 request：verify 收到 segmented，C5 如实跳过', () => {
+  /**
+   * splitChapters / downloadSections / sponsorblockRemove make every artifact's
+   * duration differ from the probed full video, so the verifier's C5 must SKIP
+   * (D-213-style) instead of failing a good download. The queue owns the
+   * request→segmented mapping (the shared Request domain already carries all
+   * three keys), so each test captures the input the verifier was handed.
+   */
+  const setupCapture = async (requestOverrides?: (req: DownloadRequest) => DownloadRequest) => {
+    const mem = createInMemoryPorts();
+    mem.state.files.set(artifactFor('t1'), 'video-bytes');
+    const engineState = newEngineState('completed');
+    const seen: Array<Record<string, unknown>> = [];
+    const verifier = {
+      async verify(input: unknown) {
+        seen.push(input as Record<string, unknown>);
+        return {
+          taskId: 'x', artifacts: [PRIMARY], postprocessed: false,
+          criteria: [{ id: 'C1' as const, status: 'PASS' as const, detail: 'ok' }],
+          ok: true, failureCode: null, durationMs: 1,
+        };
+      },
+    };
+    const queue = new TaskQueue({
+      ports: mem.ports, engine: fakeEngine(engineState), verifier,
+      history: new HistoryStore({ ports: mem.ports }), jsRuntimePath: 'C:/runtime/node.exe',
+    });
+    const base = record('t1');
+    const task = requestOverrides === undefined
+      ? base
+      : { ...base, request: base.request === null ? base.request : requestOverrides(base.request) };
+    await queue.enqueue(task);
+    await tick();
+    return { seen, queue };
+  };
+
+  const expectSegmented = (value: unknown): void => {
+    expect(value).toBe(true);
+  };
+
+  it('splitChapters=true → segmented=true', async () => {
+    const { seen } = await setupCapture((req) => ({ ...req, advanced: { ...req.advanced, splitChapters: true } }));
+    expect(seen).toHaveLength(1);
+    expectSegmented(seen[0]?.['segmented']);
+  });
+
+  it('downloadSections 非空字符串 → segmented=true', async () => {
+    const { seen } = await setupCapture((req) => ({ ...req, advanced: { ...req.advanced, downloadSections: '0:00-1:00' } }));
+    expect(seen).toHaveLength(1);
+    expectSegmented(seen[0]?.['segmented']);
+  });
+
+  it('sponsorblockRemove 非空字符串 → segmented=true', async () => {
+    const { seen } = await setupCapture((req) => ({ ...req, advanced: { ...req.advanced, sponsorblockRemove: 'sponsor' } }));
+    expect(seen).toHaveLength(1);
+    expectSegmented(seen[0]?.['segmented']);
+  });
+
+  it('三键全空 / 空白字符串 → segmented=false（普通下载校验逐字不变）', async () => {
+    const { seen } = await setupCapture();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.['segmented']).toBe(false);
+
+    const blank = await setupCapture((req) => ({
+      ...req,
+      advanced: { ...req.advanced, downloadSections: '   ', sponsorblockRemove: null, splitChapters: false },
+    }));
+    expect(blank.seen[0]?.['segmented']).toBe(false);
+  });
+});
+
+// --- external online audit P3 · 模板子目录里也找得到旧副本 -------------------
+
+describe('external online audit P3 · 模板子目录：副本扫描跟随模板子树', () => {
+  /** Subdirectory output templates (`…/%(extractor)s/…` or a static `Sub/…`). */
+  const recordWithTemplate = (taskId: string, template: string): TaskRecord => {
+    const base = record(taskId);
+    const req = base.request;
+    if (req === null) return base;
+    return { ...base, request: { ...req, paths: { ...req.paths, outputTemplate: template } } };
+  };
+  const DYNAMIC = '%(extractor)s/%(title)s [%(id)s].%(ext)s';
+  const STATIC = 'Sub/%(title)s [%(id)s].%(ext)s';
+
+  it('模板 %(extractor)s/...：<根>/<extractor>/ 下的 [id] 旧文件让本次下载拿 (1)', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    mem.state.files.set('C:/out/Youtube/Title [fixture].mp4', 'old-bytes');
+    await queue.enqueue(recordWithTemplate('t1', DYNAMIC));
+    await tick();
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(extractor)s/%(title)s [%(id)s]_(1).%(ext)s');
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+
+  it('静态子目录 Sub/...：同款找到旧文件并拿 (1)', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    mem.state.files.set('C:/out/Sub/Title [fixture].mp4', 'old-bytes');
+    await queue.enqueue(recordWithTemplate('t1', STATIC));
+    await tick();
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('Sub/%(title)s [%(id)s]_(1).%(ext)s');
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+
+  it('递归边界：深度 3 层内的旧文件（a/b/c/）纳入候选', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    mem.state.files.set('C:/out/a/b/c/Title [fixture].mp4', 'old-bytes');
+    await queue.enqueue(recordWithTemplate('t1', DYNAMIC));
+    await tick();
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(extractor)s/%(title)s [%(id)s]_(1).%(ext)s');
+  });
+
+  it('递归边界：深度 4 层外的旧文件（a/b/c/d/）不纳入', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    mem.state.files.set('C:/out/a/b/c/d/Title [fixture].mp4', 'old-bytes');
+    await queue.enqueue(recordWithTemplate('t1', DYNAMIC));
+    await tick();
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(extractor)s/%(title)s [%(id)s].%(ext)s');
+  });
+
+  it('无 / 模板保持平面扫描：子目录里的旧文件不触发后缀（快路径零变化）', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    mem.state.files.set('C:/out/Youtube/Title [fixture].mp4', 'old-bytes');
+    await queue.enqueue(recordWithTemplate('t1', '%(title)s [%(id)s].%(ext)s'));
+    await tick();
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(title)s [%(id)s].%(ext)s');
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+
+  it('D-237 · 子目录模板下并发孪生仍拿到独立名字（合成认领照常并入）', async () => {
+    const { queue, engineState } = setup('hang');
+    await queue.enqueue(recordWithTemplate('t1', DYNAMIC));
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Running');
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(extractor)s/%(title)s [%(id)s].%(ext)s');
+
+    await queue.enqueue(recordWithTemplate('t2', DYNAMIC));
+    await tick();
+    expect(queue.get('t2')?.state).toBe('Running');
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(extractor)s/%(title)s [%(id)s]_(1).%(ext)s');
+    expect(engineState.active).toBe(2);
+    await queue.cancel('t1');
+    await queue.cancel('t2');
+    await tick();
+  });
+
+  it('扫描边界：目标数超上限如实停止（根目录名照常参与），并留下 WARNING 日志', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    // 250 junk files push the walk past COPY_SUFFIX_SCAN_MAX_DIRS (200) right
+    // after the root itself; the root names were already collected, so the
+    // `[fixture]` file at the root still earns the suffix — and the truncation
+    // is reported, never silent.
+    for (let i = 0; i < 250; i += 1) {
+      mem.state.files.set(`C:/out/zz${String(i).padStart(3, '0')}.mp4`, 'junk');
+    }
+    mem.state.files.set('C:/out/Title [fixture].mp4', 'old-bytes');
+    await queue.enqueue(recordWithTemplate('t1', DYNAMIC));
+    await tick();
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(extractor)s/%(title)s [%(id)s]_(1).%(ext)s');
+    expect(mem.state.logLines.some((line) => line.includes('copySuffix.scanTruncated'))).toBe(true);
+  });
+});
+
 // --- T2 · persistSnapshot failure is visible, never fatal -------------------
 
 describe('T2 · persistSnapshot failure is visible but never fatal', () => {
@@ -1053,5 +1216,54 @@ describe('D-252 · 无痕关窗的封面独占判定', () => {
     expect(report.removed).toEqual(['p1']);
     // p2 is still running → its (hypothetical) shares must not be touched.
     expect(coverNamesOwnedOnlyBy(covers, new Set(report.removed))).toEqual(['solo.jpg']);
+  });
+});
+
+/**
+ * external online audit P2 · 陈旧记账折扣（`coverNamesOwnedOnlyBy` 的可选
+ * `liveIds` 第三参）。
+ *
+ * `liveIds` = 队列 `list()` 里存在的 id（与 D-258 删除时刻复查同一来源）。
+ * 索引条目里一个既不在本次清理范围、也不在 live 名单里的 id 是陈旧记账——
+ * 被删任务的历史残留，index 没有任何路径清理它——不得永久拦截回收；活引用
+ * 仍然拦截。清理必须拥有封面的至少一个引用（purgeCovers 只处理本次删掉的
+ * 无痕任务自己的封面）。缺省 `liveIds`（两参调用）保持 D-252 独占语义不变，
+ * 上方既有钉点用例零改动通过。
+ */
+describe('external online audit P2 · 陈旧记账折扣（coverNamesOwnedOnlyBy liveIds）', () => {
+  const covers = {
+    'solo.jpg': { taskIds: ['p1'] },
+    'stale-sharer.jpg': { taskIds: ['gone-plain', 'p1'] },
+    'live-sharer.jpg': { taskIds: ['n1', 'p1'] },
+    'untracked.jpg': { taskIds: [] },
+  };
+
+  it('a non-live id outside the purge no longer blocks a purge-owned cover', () => {
+    // gone-plain is not in the live list: stale bookkeeping, never a blocker.
+    expect(coverNamesOwnedOnlyBy(covers, new Set(['p1']), new Set(['n1'])).sort())
+      .toEqual(['solo.jpg', 'stale-sharer.jpg']);
+  });
+
+  it('a live id outside the purge still blocks (the card needs the cover)', () => {
+    expect(coverNamesOwnedOnlyBy(covers, new Set(['p1']), new Set(['gone-plain', 'n1'])))
+      .toEqual(['solo.jpg']);
+  });
+
+  it('a cover the purge owns no part of is not this purge\'s business', () => {
+    expect(coverNamesOwnedOnlyBy(covers, new Set(['p9']), new Set(['n1'])))
+      .toEqual([]);
+  });
+
+  it('an empty live list discounts every outside reference; the connection requirement still bounds the purge', () => {
+    // With nothing live, every outside id is stale — but a cover the purge
+    // owns no part of still stays with the regular prune rules.
+    expect(coverNamesOwnedOnlyBy(covers, new Set(['p1']), new Set()).sort())
+      .toEqual(['live-sharer.jpg', 'solo.jpg', 'stale-sharer.jpg']);
+    expect(coverNamesOwnedOnlyBy(covers, new Set(['p9']), new Set()))
+      .toEqual([]);
+  });
+
+  it('omitting liveIds keeps the D-252 exclusivity semantics', () => {
+    expect(coverNamesOwnedOnlyBy(covers, new Set(['p1']))).toEqual(['solo.jpg']);
   });
 });
