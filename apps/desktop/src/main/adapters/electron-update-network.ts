@@ -178,6 +178,18 @@ interface ProxySchemeMapping {
  * and SOCKS families are accepted. `socks5h` / `socks` map to Chromium's
  * `socks5`, `socks4a` to `socks4`. Proxy-side DNS resolution is the whole
  * point of the SOCKS path, so no hostname is resolved locally.
+ *
+ * CHROMIUM LIMITATION (D-266 · external online audit P2: SOCKS5 credentials
+ * unsupported by Chromium):
+ * Chromium's SOCKS client implements NO username/password authentication
+ * (RFC 1929) — net/docs/proxy.md#socks-v5 — and a SOCKS endpoint never
+ * triggers the HTTP 407 `login` event where `credentials` would be consumed
+ * (see the `login` gate below, HTTP(S) fixed proxies only). A SOCKS URL
+ * carrying userinfo would therefore connect WITHOUT the credentials and fail
+ * opaquely (proxy-side rejection, no actionable message). `parseUpdateProxy`
+ * refuses that combination fail-fast instead of stripping the userinfo and
+ * pretending it works. yt-dlp's own `--proxy` path receives the raw string and
+ * DOES support SOCKS credentials, so the download chain is unaffected.
  */
 const PROXY_SCHEMES: Readonly<Record<string, ProxySchemeMapping>> = {
   'http:': { scheme: 'http', defaultPort: 80 },
@@ -198,6 +210,13 @@ function decodeCredential(value: string): string {
 }
 
 const INVALID_PROXY = 'network.proxy 配置非法：需要带协议的代理 URL（http / https / socks4 / socks5），且不得附带路径或查询参数';
+
+/**
+ * SOCKS + userinfo is refused, never echoed back: like `INVALID_PROXY`, this
+ * message names the PROBLEM, not the configured value (no username/password,
+ * no host). Same fail-fast contract as every other unusable `network.proxy`.
+ */
+const SOCKS_CREDENTIALS_UNSUPPORTED = 'network.proxy 配置非法：SOCKS 代理不支持用户名/密码认证（Chromium 限制），应用与组件更新无法使用该代理；下载不受影响；可改用无凭据 SOCKS 代理或 HTTP(S) 代理';
 
 /**
  * Empty/unset -> `mode: 'system'` (OS proxy, PAC, WPAD and auto-detect all stay
@@ -241,6 +260,16 @@ export function parseUpdateProxy(raw: string): UpdateProxyConfig {
   const credentials: UpdateProxyCredentials | null = username === '' && password === ''
     ? null
     : { host: normalizeHost(parsed.hostname), port, username, password };
+  // external online audit P2 · SOCKS5 credentials unsupported by Chromium:
+  // every scheme mapped to socks4/socks5 above is refused when userinfo is
+  // present. Stripping the userinfo and continuing would silently change what
+  // the user asked for (authenticated -> unauthenticated) and fail opaquely at
+  // connect time — there is no 407 `login` event for SOCKS to surface it. The
+  // credential-less SOCKS path below stays valid; HTTP(S) credentials keep
+  // flowing through the `login` gate.
+  if (credentials !== null && (mapping.scheme === 'socks4' || mapping.scheme === 'socks5')) {
+    throw new UpdateProxyConfigError(SOCKS_CREDENTIALS_UNSUPPORTED);
+  }
   // Rebuilt from parts on purpose: userinfo can NEVER leak into proxyRules.
   const proxyRules = `${mapping.scheme}://${parsed.hostname}:${port}`;
   const key = credentials === null

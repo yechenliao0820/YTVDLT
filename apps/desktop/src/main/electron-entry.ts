@@ -53,6 +53,7 @@ import { bootstrap, type BootstrapHandle, type ElectronLike } from './bootstrap.
 import {
   SHUTDOWN_CANCEL_BUDGET_MS, cancelRunningTasksForShutdown,
 } from './shutdown-cancel.js';
+import { installShutdownQuitGate } from './shutdown-quit-gate.js';
 import type { AppUpdatePortLike } from './m5-channels.js';
 
 /** The public repository the updater reads (D-93). */
@@ -229,8 +230,9 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     }
   };
 
-  // Give the async snapshot write a chance to finish before the process exits.
-  // `preventDefault` is used exactly once; the second quit passes through.
+  // Give the async snapshot write a chance to finish before the process
+  // exits: the race below stays bounded by 3 s, and the first quit is
+  // prevented exactly once while the cleanup runs.
   //
   // D-247: the first (real) quit now ALSO stops in-flight downloads. Until this
   // fix the quit path ended the process while `yt-dlp` children kept running —
@@ -244,17 +246,25 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
   // queued task settles via the D-242 snapshot write) and the report's
   // per-task outcomes are logged below — a silent write failure can no longer
   // read as a clean cancel. Cancelled tasks settle as `Canceled` and are
-  // retried BY HAND after a restart (D-209: startup never auto-resumes). The second `before-quit` (the
-  // real one, after `app.quit()` below) passes straight through: the
-  // `cleanupStarted` latch keeps its exact pass-through semantics, and the
-  // close→tray policy (D-60/D-197) is untouched — hiding to the tray never
-  // reaches this handler.
-  let cleanupStarted = false;
-  app.on('before-quit', (event) => {
-    if (cleanupStarted) return;
-    cleanupStarted = true;
-    event.preventDefault();
-    void (async () => {
+  // retried BY HAND after a restart (D-209: startup never auto-resumes).
+  //
+  // D-257 (external audit P2): the old `cleanupStarted` latch let EVERY second
+  // `before-quit` pass unconditionally — correct only when that second quit is
+  // the cleanup's own `app.quit()`, but a USER quit inside the cleanup window
+  // takes the same path (menu 「退出」 sets `quitting = true` -> Alt+F4 / 点 X
+  // closes the window, which the close→tray policy deliberately does not
+  // intercept while quitting -> window destroyed -> `window-all-closed` ->
+  // `app.quit()`), killing the process mid-cleanup and cutting the 5 s cancel
+  // budget, D-255's snapshot-write wait and the 3 s private purge (purgeCovers
+  // included) short. `installShutdownQuitGate` prevents and suspends every
+  // re-entry while the cleanup promise below is in flight and resumes
+  // `app.quit()` the moment it settles; the cleanup's own final quit passes
+  // through the gate's `cleanupSettled` latch (set before it calls quit, so
+  // no quit loop). The close→tray policy (D-60/D-197) and bootstrap's
+  // `quitting` flag are untouched — hiding to the tray never reaches this
+  // handler, and the window-close purge still runs via `onWindowClose`.
+  installShutdownQuitGate(app, async () => {
+    try {
       const queue = hostRef?.m4.task.queue ?? null;
       if (queue !== null) {
         const report = await cancelRunningTasksForShutdown(queue);
@@ -290,12 +300,16 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       // Playlist preview tickets hold full PlaylistInfo (entry URLs included);
       // they are main-process memory only and must not survive a quit.
       hostRef?.playlistPreview.clear();
-    })().finally(() => {
-      void Promise.race([
+    } finally {
+      // Give the async snapshot write a chance to finish before the process
+      // exits. The 3 s race is the SAME bound as before D-257 (a hung purge
+      // must not wedge the quit); the gate resumes the exit the moment this
+      // settles, so the budget semantics are byte-for-byte unchanged.
+      await Promise.race([
         clearPrivateHistory(),
         new Promise<void>((resolve) => { setTimeout(resolve, 3000); }),
-      ]).finally(() => { app.quit(); });
-    });
+      ]);
+    }
   });
 
   const createHost = async () => {
@@ -652,7 +666,14 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     const ensureCover = (taskId: string): Promise<string | null> => {
       const record = host.m4.task.queue.get(taskId);
       const url = record?.mediaInfo?.thumbnail ?? null;
-      return url === null ? Promise.resolve(null) : thumbnails.ensure(taskId, url);
+      if (url === null) return Promise.resolve(null);
+      // external online audit P3: the cover of a private-mode task is
+      // PRE-marked purgePending at ensure time, so an abnormal exit (crash /
+      // taskkill — private records are never persisted, D-240, and the
+      // close-time purge never ran) leaves residue the boot prune can recycle
+      // regardless of the auto-clean switch. A still-running task stays safe:
+      // the purge-pending channel sits behind the policy's live guard.
+      return thumbnails.ensure(taskId, url, { privateCover: record?.privateMode === true });
     };
     host.m4.task.queue.onEvent((event) => {
       if (event.type === 'progress') { void ensureCover(event.taskId); return; }

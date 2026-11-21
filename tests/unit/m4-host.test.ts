@@ -2,7 +2,7 @@
  * M4 assembly · createM4Host wires queue + restore + batch + notifications +
  * task detail + command templates + IPC, without any Electron import.
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DownloadEngine, DownloadRequest, EngineEvent, PlaylistInfo, TaskRecord,
 } from '@ytvdlt/shared';
@@ -371,6 +371,18 @@ describe('M4 host · subtitle patch + pre-probed MediaInfo (stage 3)', () => {
  * onto the request, so every intake path (single / playlist / TXT) agrees.
  */
 describe('D-229 · 无痕开关的单一真相源', () => {
+  // D-261: 第一条用例开启无痕后依赖默认展开器（`expandEnvVars(raw, process.env)`，
+  // 入队时读宿主 env）解析 `%LOCALAPPDATA%/YTVDLT/private`。把该变量钉成确定值，
+  // 用例不再依赖宿主恰好带有 LOCALAPPDATA（Linux/CI 容器没有它——那时 intake
+  // 会 fail-closed 抛 PRIVATE_DIR_UNRESOLVABLE，用例因错误的原因变红）。
+  // vi.stubEnv 是声明式打桩、自动恢复宿主 env；第二条用例无痕关闭，stub 不参与。
+  beforeEach(() => {
+    vi.stubEnv('LOCALAPPDATA', 'C:/Users/test/AppData/Local');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('general.privateMode drives the task flag and the request on all three intake paths', async () => {
     const { host } = await setup();
     await host.task.config.set('general', 'privateMode', true);
@@ -434,16 +446,26 @@ describe('D-229 · 无痕开关的单一真相源', () => {
  * 中文原因带到渲染层，而不是静默产出坏请求。
  */
 describe('D-254 · 无痕目录展开失败当场拒绝（fail-closed）', () => {
-  /** Hide %LOCALAPPDATA% from the default expander (which reads process.env) for one async run. */
+  /**
+   * D-261: hide %LOCALAPPDATA% from the default expander (which reads
+   * process.env at intake) for one async run — via `vi.stubEnv` instead of
+   * hand-deleting the shared `process.env` entry. The stub works on runners
+   * that never had the variable (Linux/CI, where `delete` was a silent no-op
+   * and the case only passed when the host happened to be Windows), and vitest
+   * restores the prior state declaratively (afterEach below). '' is enough:
+   * `expandEnvVars` treats an empty value as unresolvable and keeps the token
+   * verbatim (D-79), which is exactly the fail-closed path pinned here.
+   */
   const withoutLocalAppData = async <T>(run: () => Promise<T>): Promise<T> => {
-    const saved = process.env['LOCALAPPDATA'];
-    delete process.env['LOCALAPPDATA'];
-    try {
-      return await run();
-    } finally {
-      if (saved !== undefined) process.env['LOCALAPPDATA'] = saved;
-    }
+    vi.stubEnv('LOCALAPPDATA', '');
+    return run();
   };
+
+  afterEach(() => {
+    // Declarative restore: any env stub left behind (even when an assertion
+    // throws mid-test) never leaks into the next case in this worker.
+    vi.unstubAllEnvs();
+  });
 
   it('单条入口：缺 LOCALAPPDATA 时拒绝入队（稳定码 + 中文 message），队列零新增', async () => {
     const { host } = await setup();

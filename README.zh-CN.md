@@ -263,6 +263,13 @@ yt-dlp spawn 都带 `--ignore-config --no-plugin-dirs`，让散落的用户/便�
 等待退出证据（`Alt+F4` 归还原生关窗路径）；文件状态批量探测单飞且有并发上界；
 命令模板存储在覆盖损坏文件前先做字节级备份。
 
+其上的第二轮审计（D-250…D-264）再加：`http://` 封面先升级为 https 再过仅 https 的门
+（B 站实测不再被判「无封面」）、详情页用主题化状态条替掉常驻的 `{}` 黑框、无痕关窗
+定向回收封面缓存并做删除时刻复核与精确账目、安装基线链收窄、私有目录展开失败
+fail-closed、退出等待排队任务的快照写证据并加一道闸门防止第二次退出截断清理、
+命令模板 CRUD persist-first 且还原错误优先级、重试改 write-then-start、英文拒绝文案走
+纯显示模型映射、以及让测试套件不再改写宿主环境变量。
+
 版本流水见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)，每条决策的现象 / 根因 /
 取舍 / 验证见 [`docs/DECISIONS.md`](docs/DECISIONS.md)。
 

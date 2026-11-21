@@ -186,6 +186,28 @@
     return 'queue.failure.' + kind;
   }
 
+  /**
+   * D-137 (F-07) + D-260: stable refusal CODE -> i18n key, `null` for anything
+   * unknown. The main process sends a stable code, never a sentence to print
+   * (D-137's principle); `enqueueFailureText` in queue.js resolves the key in
+   * the active locale and keeps the raw `reason` only for unknown codes.
+   * Mirrors the refusal codes the main process actually answers with:
+   *   SITE_UNSUPPORTED / ITEM_UNSUPPORTED / PRECHECK_CANCELLED (pre-check gate)
+   *   PRIVATE_DIR_UNRESOLVABLE (D-254 fail-closed private-dir expansion).
+   * Pure: a string in, a string or `null` out — no i18n, no DOM (§3.0).
+   */
+  var ENQUEUE_REFUSAL_KEYS = {
+    SITE_UNSUPPORTED: 'queue.precheck.blocked.site',
+    ITEM_UNSUPPORTED: 'queue.precheck.blocked.item',
+    PRECHECK_CANCELLED: 'queue.precheck.cancelled',
+    PRIVATE_DIR_UNRESOLVABLE: 'queue.precheck.privateDir'
+  };
+
+  function enqueueRefusalKey(code) {
+    if (typeof code !== 'string') return null;
+    return ENQUEUE_REFUSAL_KEYS[code] || null;
+  }
+
   /** 7 states -> the 4 tabs (Error belongs with Canceled: no successful end). */
   function tabOf(state) {
     if (state === 'Completed') return 'finished';
@@ -278,6 +300,7 @@
     isFileStatus: isFileStatus,
     fileStateKey: fileStateKey,
     failureKeyOf: failureKeyOf,
+    enqueueRefusalKey: enqueueRefusalKey,
     tabOf: tabOf,
     matchesQuery: matchesQuery,
     filterTasks: filterTasks,

@@ -304,7 +304,7 @@ describe('D-252 · 无痕关窗的封面定向回收', () => {
     cache.forget('p1'); // the close purge dropped the reference first
 
     const report = await cache.purgeCovers(['p1']);
-    expect(report).toEqual({ marked: 1, removed: 1, failed: 0 });
+    expect(report).toEqual({ marked: 1, removed: 1, failed: 0, keptReferenced: 0, deferred: 0 });
     // Fake recycle bin: renamed, never permanently deleted (§0.1).
     expect(h.trashed).toEqual([privatePath]);
     expect(h.trashed[0]?.startsWith(h.dir)).toBe(true);
@@ -322,7 +322,7 @@ describe('D-252 · 无痕关窗的封面定向回收', () => {
     await cache.ensure('p1', 'https://cdn.example/shared.png');
     cache.forget('p1');
 
-    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 0, removed: 0, failed: 0 });
+    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 0, removed: 0, failed: 0, keptReferenced: 0, deferred: 0 });
     expect(h.trashed).toEqual([]);
     expect(existsSync(sharedPath)).toBe(true);
   });
@@ -341,7 +341,7 @@ describe('D-252 · 无痕关窗的封面定向回收', () => {
     }));
     const cache = h.create({ liveTaskIds: () => [] });
 
-    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 0, removed: 0, failed: 0 });
+    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 0, removed: 0, failed: 0, keptReferenced: 0, deferred: 0 });
     expect(h.trashed).toEqual([]);
     expect(existsSync(join(h.dir, ghosted))).toBe(true);
   });
@@ -350,7 +350,7 @@ describe('D-252 · 无痕关窗的封面定向回收', () => {
     const h = harness();
     const cache = h.create({ liveTaskIds: () => [] });
     await cache.ensure('t1', 'https://cdn.example/cover.png');
-    expect(await cache.purgeCovers(['never-existed'])).toEqual({ marked: 0, removed: 0, failed: 0 });
+    expect(await cache.purgeCovers(['never-existed'])).toEqual({ marked: 0, removed: 0, failed: 0, keptReferenced: 0, deferred: 0 });
     expect(h.trashed).toEqual([]);
   });
 
@@ -361,7 +361,10 @@ describe('D-252 · 无痕关窗的封面定向回收', () => {
     const path = await cache.ensure('p1', 'https://cdn.example/deferred.png');
     cache.forget('p1');
 
-    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 1, removed: 0, failed: 0 });
+    // D-258: with no trash port nothing could be recycled, so the report owes
+    // the honest accounting (failed = every name still marked) instead of the
+    // old `failed: 0` that pretended success.
+    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 1, removed: 0, failed: 1, keptReferenced: 0, deferred: 0 });
     expect(existsSync(path)).toBe(true);
     // The boolean marker (no private data) is persisted in index.json.
     const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
@@ -403,12 +406,15 @@ describe('D-252 · 无痕关窗的封面定向回收', () => {
     cache.forget('p1');
     await cache.purgeCovers(['p1']); // deferred → marked
 
-    // The task (or a new one with the same cover) ensures again after restart.
-    expect(await cache.ensure('p1', 'https://cdn.example/comeback.png')).toBe(path);
+    // D-258: the re-attach is by a NEW live task — the FORGOTTEN id itself
+    // must not resurrect the reference (that is the D-258 in-flight fix and is
+    // covered by the D-258 describe below). A live task re-using the cover
+    // clears the marker: the queue showing it outranks the purge.
+    expect(await cache.ensure('live2', 'https://cdn.example/comeback.png')).toBe(path);
     const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
     expect(raw.entries[`${hash('https://cdn.example/comeback.png')}.png`].purgePending).toBeUndefined();
 
-    const restarted = h.create({ liveTaskIds: () => ['p1'] });
+    const restarted = h.create({ liveTaskIds: () => ['live2'] });
     expect((await restarted.prune()).removed).toBe(0);
     expect(existsSync(path)).toBe(true);
   });
@@ -419,7 +425,7 @@ describe('D-252 · 无痕关窗的封面定向回收', () => {
     const path = await cache.ensure('p1', 'https://cdn.example/stuck.png');
     cache.forget('p1');
 
-    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 1, removed: 0, failed: 1 });
+    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 1, removed: 0, failed: 1, keptReferenced: 0, deferred: 0 });
     expect(existsSync(path)).toBe(true);
     const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
     expect(raw.entries[`${hash('https://cdn.example/stuck.png')}.png`].purgePending).toBe(true);
@@ -433,7 +439,307 @@ describe('D-252 · 无痕关窗的封面定向回收', () => {
     });
     const path = await cache.ensure('p1', 'https://cdn.example/wedged.png');
     cache.forget('p1');
-    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 1, removed: 0, failed: 1 });
+    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 1, removed: 0, failed: 1, keptReferenced: 0, deferred: 0 });
     expect(existsSync(path)).toBe(true);
+  });
+});
+
+/**
+ * D-258 · 无痕封面回收的三项审计修复（外部审计 P2 + P3×2）。
+ *
+ * ① 删除决定基于「删除时刻」的引用状态：标记之后、trash 之前复核 index、
+ *    byTask 与最新 liveTaskIds——凡被名单之外 taskId 引用或被活任务引用的
+ *    封面一律放行（清掉过期标记，交回常规保留规则）；
+ * ② forget() 作废在飞结果：purgeCovers 之后才落地的 ensure 不得复活引用
+ *    （不进 byTask、不加 index taskId、不清标记），本次抓取新写盘且无归属
+ *    记录的字节打 purgePending 标记交给下次 prune（含启动、无视开关）；
+ * ③ purgePending 标记写失败可观察：失败时跳过整个文件删除阶段并按 failed
+ *    如实记账（宁可留待下次，绝不在无标记的情况下动字节）；
+ * ④ 单次回收量受既有 pruneBatch 上限约束，超出部分保持标记、下次 prune
+ *    继续回收（与 planThumbnailPrune 的 truncate 语义对齐）；
+ * ⑤ trash 缺席不再报 failed: 0。
+ *
+ * 账目不变量：marked === removed + failed + keptReferenced + deferred。
+ */
+describe('D-258 · 无痕封面回收的竞态、账目与批次上限', () => {
+  it('keeps a cover that gained a reference outside the purge between mark and delete', async () => {
+    const h = harness();
+    const urlA = 'https://cdn.example/race-a.png';
+    const urlB = 'https://cdn.example/race-b.png';
+    // The trash stub opens the audit window: deleting the FIRST cover lets a
+    // LIVE task attach to the SECOND cover before its own delete-time recheck.
+    let midPurgeAttach: (() => Promise<unknown>) | null = null;
+    const cache = h.create({
+      liveTaskIds: () => ['live1'],
+      trash: async (path: string) => {
+        if (midPurgeAttach !== null) await midPurgeAttach();
+        h.trashed.push(path);
+        renameSync(path, `${path}.trashed`);
+        return true;
+      },
+    });
+    midPurgeAttach = () => cache.ensure('live1', urlB);
+    await cache.ensure('p1', urlA);
+    await cache.ensure('p2', urlB);
+    cache.forget('p1');
+    cache.forget('p2');
+
+    const report = await cache.purgeCovers(['p1', 'p2']);
+    expect(report).toEqual({ marked: 2, removed: 1, failed: 0, keptReferenced: 1, deferred: 0 });
+    // Only the still-exclusive cover went to the recycle bin.
+    expect(h.trashed).toHaveLength(1);
+    expect(h.trashed[0]).toBe(join(h.dir, `${hash(urlA)}.png`));
+    expect(existsSync(join(h.dir, `${hash(urlA)}.png`))).toBe(false);
+    expect(existsSync(join(h.dir, `${hash(urlB)}.png`))).toBe(true);
+    // The kept cover lost its stale privacy marker and gained the live owner.
+    const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
+    expect(raw.entries[`${hash(urlB)}.png`].purgePending).toBeUndefined();
+    expect(raw.entries[`${hash(urlB)}.png`].taskIds).toEqual(['p2', 'live1']);
+    // The live reference is fully functional and survives a later prune pass.
+    expect(cache.pathOf('live1')).not.toBeNull();
+    const restarted = h.create({ liveTaskIds: () => ['live1'] });
+    expect((await restarted.prune()).removed).toBe(0);
+    expect(existsSync(join(h.dir, `${hash(urlB)}.png`))).toBe(true);
+  });
+
+  it('keeps a cover whose only owner is still live at delete time (defence in depth)', async () => {
+    const h = harness();
+    const cache = h.create({ liveTaskIds: () => ['p1'] });
+    const path = await cache.ensure('p1', 'https://cdn.example/still-live.png');
+    // A caller bug (purging an id the queue still runs) must not delete the
+    // cover: the delete-time recheck consults a FRESH live list, not the state
+    // at marking time.
+    const report = await cache.purgeCovers(['p1']);
+    expect(report).toEqual({ marked: 1, removed: 0, failed: 0, keptReferenced: 1, deferred: 0 });
+    expect(h.trashed).toEqual([]);
+    expect(existsSync(path)).toBe(true);
+    const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
+    expect(raw.entries[`${hash('https://cdn.example/still-live.png')}.png`].purgePending).toBeUndefined();
+  });
+
+  it('a forgotten task re-ensuring after the purge does not clear the marker or resurrect byTask', async () => {
+    const h = harness();
+    h.policyValues['enabled'] = false; // the recovery prune must not depend on the switch
+    const cache = h.create({ noTrash: true, liveTaskIds: () => [] });
+    const url = 'https://cdn.example/comeback.png';
+    const path = await cache.ensure('p1', url);
+    cache.forget('p1');
+    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 1, removed: 0, failed: 1, keptReferenced: 0, deferred: 0 });
+
+    // A late ensure for the FORGOTTEN id (in-flight attempt or a poller that
+    // missed the removal) finds the local file — and must not resurrect the
+    // reference: no byTask mapping, no marker wipe, no new owner.
+    expect(await cache.ensure('p1', url)).toBe(path);
+    expect(cache.pathOf('p1')).toBeNull();
+    const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
+    expect(raw.entries[`${hash(url)}.png`].purgePending).toBe(true);
+    expect(raw.entries[`${hash(url)}.png`].taskIds).toEqual(['p1']);
+
+    // Next session's boot prune recovers the marked entry with the switch OFF.
+    const restarted = h.create({ liveTaskIds: () => [] });
+    const boot = await restarted.prune();
+    expect(boot.removedByReason['purge-pending']).toBe(1);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('a forgotten task whose late fetch writes fresh bytes leaves a marked entry, not an unmarked orphan', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const h = harness({ httpBytes: () => gate.then(() => PNG) });
+    h.policyValues['enabled'] = false;
+    const cache = h.create({ noTrash: true, liveTaskIds: () => [] });
+    const url = 'https://cdn.example/late-landing.png';
+    const landing = cache.ensure('p1', url); // in-flight, held by the gate
+    cache.forget('p1'); // the close drops the reference while the fetch races
+    // Nothing is provable yet: the index entry does not exist, nothing is marked.
+    expect(await cache.purgeCovers(['p1'])).toEqual({ marked: 0, removed: 0, failed: 0, keptReferenced: 0, deferred: 0 });
+
+    release(); // the fetch lands AFTER the close
+    expect(await landing).not.toBeNull(); // bytes were written (best effort)
+    expect(cache.pathOf('p1')).toBeNull(); // but no reference was resurrected
+    const name = `${hash(url)}.png`;
+    const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
+    expect(raw.entries[name].purgePending).toBe(true); // marked, never an unmarked orphan
+    expect(raw.entries[name].taskIds).toEqual(['p1']);
+
+    // The next session's boot prune recovers it with the switch STILL off.
+    const restarted = h.create({ liveTaskIds: () => [] });
+    const boot = await restarted.prune();
+    expect(boot.removedByReason['purge-pending']).toBe(1);
+    expect(existsSync(join(h.dir, name))).toBe(false);
+  });
+
+  it('a failed marker write skips deletion and reports every name as failed', async () => {
+    const h = harness();
+    mkdirSync(h.dir, { recursive: true });
+    // A directory sitting at the index path makes EVERY index write fail
+    // (rename onto a directory) — exactly the unobservable-marker situation
+    // the audit flagged: in-memory marked, disk without the marker.
+    mkdirSync(join(h.dir, 'index.json'));
+    const warnings: string[] = [];
+    const spyLogger: ILogger = {
+      ...logger(),
+      warn: async (_scope: string, event: string) => { warnings.push(event); },
+    };
+    const cache = h.create({ liveTaskIds: () => [], logger: spyLogger });
+    const path = await cache.ensure('p1', 'https://cdn.example/unwritable.png');
+    expect(path).not.toBeNull();
+    cache.forget('p1');
+
+    const report = await cache.purgeCovers(['p1']);
+    expect(report).toEqual({ marked: 1, removed: 0, failed: 1, keptReferenced: 0, deferred: 0 });
+    expect(h.trashed).toEqual([]); // no byte was touched without its marker
+    expect(existsSync(path)).toBe(true);
+    expect(warnings.some((m) => m.includes('marker could not be written'))).toBe(true);
+  });
+
+  it('caps one pass at pruneBatch; the overflow stays marked for the next prune', async () => {
+    const h = harness();
+    h.policyValues['enabled'] = false; // privacy recycling must not depend on the switch
+    h.policyValues['pruneBatch'] = 1;
+    const cache = h.create({ liveTaskIds: () => [] });
+    const urlA = 'https://cdn.example/batch-a.png';
+    const urlB = 'https://cdn.example/batch-b.png';
+    await cache.ensure('p1', urlA);
+    await cache.ensure('p2', urlB);
+    cache.forget('p1');
+    cache.forget('p2');
+
+    const report = await cache.purgeCovers(['p1', 'p2']);
+    expect(report).toEqual({ marked: 2, removed: 1, failed: 0, keptReferenced: 0, deferred: 1 });
+    expect(h.trashed).toHaveLength(1);
+    expect(existsSync(join(h.dir, `${hash(urlA)}.png`))).toBe(false); // first identified: recycled now
+    expect(existsSync(join(h.dir, `${hash(urlB)}.png`))).toBe(true); // overflow: kept, still marked
+    const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
+    expect(raw.entries[`${hash(urlB)}.png`].purgePending).toBe(true);
+
+    // The next session's boot prune continues the debt switch-independently.
+    const restarted = h.create({ liveTaskIds: () => [] });
+    const boot = await restarted.prune();
+    expect(boot.removedByReason['purge-pending']).toBe(1);
+    expect(existsSync(join(h.dir, `${hash(urlB)}.png`))).toBe(false);
+  });
+});
+
+/**
+ * external online audit P3 · 无痕封面的写时预标记（崩溃残留可回收）。
+ *
+ * D-252 的 `purgePending` 标记只在正常关窗路径（purgeCovers）写入；异常退出
+ * （崩溃 / taskkill / 断电）时无痕任务记录本就不落盘（D-240），关窗清理根本
+ * 不跑——封面文件与 index 条目留在本机且无标记，重启后的 boot prune 只能走
+ * 受 `autoCleanThumbnailCache` 开关拦住的 lost-reference 通道，开关关闭即
+ * 永久残留。修复：`ensure(..., { privateCover: true })`（接线自
+ * `record.privateMode`）在写入/合并 index 条目时即打 `purgePending` 标记
+ * （外加 `purgeSticky` 来源旗标），让崩溃后的 boot prune 无视开关回收。
+ *
+ * 标记粘性：一旦预标记，普通 ensure 不得清除——隐私优先于缓存生命周期；
+ * 被普通任务引用时 live guard 本来就保护它，失去引用后无论开关都会被回收。
+ * 条目被 prune 真正移除时标记随之消失。D-252/D-258 的关窗语义（关窗时刻
+ * 标记、删除时刻复核、五字段账目）一字未动——关闭时刻标记遇普通 re-attach
+ * 仍按原语义清除（见上方 D-252 用例）。
+ */
+describe('external online audit P3 · 无痕封面写时预标记与粘性', () => {
+  it('marks the index entry purgePending for a private ensure; a plain ensure does not mark', async () => {
+    const h = harness();
+    const cache = h.create({ liveTaskIds: () => ['p1', 'n1'] });
+    const privateName = `${hash('https://cdn.example/pre-marked.png')}.png`;
+    const plainName = `${hash('https://cdn.example/plain.png')}.png`;
+    await cache.ensure('p1', 'https://cdn.example/pre-marked.png', { privateCover: true });
+
+    let raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
+    expect(raw.entries[privateName].purgePending).toBe(true);
+    // The sticky origin flag is what keeps a plain ensure from lifting the
+    // mark later (pure boolean, no private data — same as purgePending).
+    expect(raw.entries[privateName].purgeSticky).toBe(true);
+
+    await cache.ensure('n1', 'https://cdn.example/plain.png');
+    raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
+    expect(raw.entries[plainName].purgePending).toBeUndefined();
+    expect(raw.entries[plainName].purgeSticky).toBeUndefined();
+    // The plain task's cover is a normal cache entry: nothing privacy-owed.
+    expect((await cache.prune()).removedByReason['purge-pending']).toBe(0);
+  });
+
+  it('the mark is sticky: a plain ensure of the same URL keeps it, within a session and across a restart', async () => {
+    const h = harness();
+    const url = 'https://cdn.example/sticky.png';
+    const name = `${hash(url)}.png`;
+    const cache = h.create({ liveTaskIds: () => ['p1'] });
+    await cache.ensure('p1', url, { privateCover: true });
+    // A plain task sharing the same cover must not lift the pre-mark.
+    await cache.ensure('n1', url);
+    expect(JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8')).entries[name].purgePending).toBe(true);
+
+    // Stickiness is persisted: a restarted session's plain ensure (e.g. the
+    // boot restore re-attaching a restored plain task) must not lift it either.
+    const restarted = h.create({ liveTaskIds: () => ['n1'] });
+    expect(await restarted.ensure('n1', url)).not.toBeNull();
+    const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8'));
+    expect(raw.entries[name].purgePending).toBe(true);
+    expect(raw.entries[name].purgeSticky).toBe(true);
+  });
+
+  it('a crashed session\'s pre-marked cover is recycled by the boot prune with the switch off (file and entry)', async () => {
+    const h = harness();
+    h.policyValues['enabled'] = false; // the recycle must not depend on the switch
+    const url = 'https://cdn.example/crash-residue.png';
+    const name = `${hash(url)}.png`;
+    const cache = h.create({ liveTaskIds: () => ['p1'] });
+    const path = await cache.ensure('p1', url, { privateCover: true });
+    expect(existsSync(path)).toBe(true);
+
+    // Crash: no close-time purge ever ran; the private task is not restored
+    // on the next boot (D-240), so its id is not in the live set.
+    const restarted = h.create({ liveTaskIds: () => [] });
+    const boot = await restarted.prune();
+    expect(boot.ok).toBe(true);
+    expect(boot.removed).toBe(1);
+    expect(boot.removedByReason['purge-pending']).toBe(1);
+    expect(existsSync(path)).toBe(false);
+    // The entry itself is gone from index.json, not just the file.
+    expect(JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8')).entries[name]).toBeUndefined();
+  });
+
+  it('live guard: a pre-marked cover of a still-running private task is never recycled', async () => {
+    const h = harness();
+    h.policyValues['enabled'] = false;
+    const cache = h.create({ liveTaskIds: () => ['p1'] });
+    const path = await cache.ensure('p1', 'https://cdn.example/still-running.png', { privateCover: true });
+
+    const report = await cache.prune();
+    expect(report.removed).toBe(0);
+    expect(report.removedByReason['purge-pending']).toBe(0);
+    expect(h.trashed).toEqual([]);
+    expect(existsSync(path)).toBe(true);
+    // The mark survives the pass for the crash window it exists for.
+    const name = `${hash('https://cdn.example/still-running.png')}.png`;
+    expect(JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8')).entries[name].purgePending).toBe(true);
+  });
+
+  it('sticky mark outlives a plain task\'s reference and recycles once nobody references it', async () => {
+    const h = harness();
+    h.policyValues['enabled'] = false;
+    const url = 'https://cdn.example/shared-after-private.png';
+    const name = `${hash(url)}.png`;
+    let live = ['p1', 'n1'];
+    const cache = h.create({ liveTaskIds: () => live });
+    await cache.ensure('p1', url, { privateCover: true });
+    await cache.ensure('n1', url); // plain sharer — sticky mark must survive
+
+    // While the plain task is live the live guard protects the file even
+    // though the entry is purge-pending.
+    cache.forget('p1');
+    live = ['n1'];
+    expect((await cache.prune()).removed).toBe(0);
+    expect(existsSync(join(h.dir, name))).toBe(true);
+
+    // Nobody references it any more: recycled switch-independently.
+    cache.forget('n1');
+    live = [];
+    const report = await cache.prune();
+    expect(report.removed).toBe(1);
+    expect(report.removedByReason['purge-pending']).toBe(1);
+    expect(existsSync(join(h.dir, name))).toBe(false);
+    expect(JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8')).entries[name]).toBeUndefined();
   });
 });

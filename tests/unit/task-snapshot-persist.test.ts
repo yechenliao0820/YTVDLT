@@ -295,7 +295,12 @@ describe('Task-2 audit · 并发快照按提交顺序落盘（新快照必是最
     // not about the intake call returning.
     const t2Intake = queue.enqueue(record('t2'));
     await tick();
-    expect(queue.get('t2')?.state).toBe('Completed');
+    // D-259: t2's intake write (W2) is queued behind the held W1, so t2 must
+    // NOT have started — write-then-start means a record that has not reached
+    // disk never competes for a slot. The old order pumped t2 immediately and
+    // it completed inside this tick.
+    expect(queue.get('t2')?.state).toBe('Idle');
+    expect(queue.activeTaskIds).not.toContain('t2');
     // 写队列（新）里 W2 排在 W1 之后——两者都还没落盘。
     // 旧实现这里 rewrites 已有 1 条（W2 抢在 W1 之前完成），本断言即红。
     // D-242: rewrites[0] is t1's enqueue record, still the only landed write.
@@ -304,6 +309,8 @@ describe('Task-2 audit · 并发快照按提交顺序落盘（新快照必是最
     releaseFirst();
     await t2Intake;
     await tick();
+    // W2 flushed, the intake resumed, and only NOW did pump() start t2.
+    expect(queue.get('t2')?.state).toBe('Completed');
     // 提交序：W1（t1 进度，无 t2）→ W2（t2 入队，未完成）→ …（t2 自己的 tick）
     // → 最后一份（t2 Completed）。关键不变量：最新的全量快照必是最后落盘的
     // 字节，且在它之前落盘的快照绝不能宣称 t2 已完成。
@@ -599,40 +606,245 @@ describe('D-240 · 无痕任务不落盘，重启不会复活', () => {
  * disk) and "the private row was cleaned up" (the row was still on disk).
  */
 describe('D-242 · 快照写盘失败不再谎报成功', () => {
-  /** Ports whose tasks.json write always fails, like a full / locked disk. */
-  const failingSession = () => {
+  /**
+   * Ports whose tasks.json write fails WHILE `fail` is set, like a full /
+   * locked disk. Toggleable so a test can first put a record into a known
+   * good state and only then break the disk for the mutation under test.
+   */
+  const failingSession = (mode: Mode = 'complete') => {
     const mem = createInMemoryPorts();
     const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    let fail = true;
     mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
-      if (path.endsWith('tasks.json')) throw new Error('ENOSPC: no space left on device');
+      if (fail && path.endsWith('tasks.json')) throw new Error('ENOSPC: no space left on device');
       await inner(path, text);
     };
+    const engineState: EngineState = { mode, downloadCalls: 0 };
     const queue = new TaskQueue({
       ports: mem.ports,
-      engine: fakeEngine({ mode: 'complete', downloadCalls: 0 }),
+      engine: fakeEngine(engineState),
       verifier: okVerifier,
       history: new HistoryStore({ ports: mem.ports }),
       taskStore: new TaskStore({ ports: mem.ports }),
       jsRuntimePath: 'C:/runtime/node.exe',
       persistIntervalMs: 0,
     });
-    return { mem, queue };
+    return { mem, queue, engineState, setFail: (value: boolean): void => { fail = value; } };
   };
 
-  it('入队时快照写失败 → enqueue 抛错，而不是静默成功', async () => {
-    const { queue } = failingSession();
-    await expect(queue.enqueue(record('t1'))).rejects.toThrow(/快照未能写入磁盘/);
-    // The task is still in memory — the message says "已加入队列 … 可能丢失",
-    // which is the honest description of this state.
-    expect(queue.get('t1')).toBeDefined();
+  it('入队时快照写失败 → enqueue 抛错、任务零启动、内存零残留（D-259）', async () => {
+    const { queue, engineState } = failingSession();
+    await expect(queue.enqueue(record('t1'))).rejects.toThrow(/任务未能加入队列：队列快照未能写入磁盘/);
+    // D-259: the intake is ROLLED BACK — memory agrees with the disk the
+    // write never reached, and "未能加入队列" is literally true now: the
+    // record never entered the FIFO, pump() never ran, nothing spawned. (The
+    // pre-D-259 order pumped first, so the download ran while the caller was
+    // told the enqueue had failed — and the record was left in memory.)
+    expect(queue.get('t1')).toBeUndefined();
+    expect(queue.pendingCount).toBe(0);
+    expect(queue.activeTaskIds).toEqual([]);
+    expect(engineState.downloadCalls).toBe(0);
+    await tick();
+    // The rolled-back state is stable: no run is in flight to resurrect it.
+    expect(queue.get('t1')).toBeUndefined();
+    expect(engineState.downloadCalls).toBe(0);
   });
 
   it('删除时快照写失败 → remove 抛错且记录留在内存（与磁盘一致）', async () => {
-    const { queue } = failingSession();
-    await queue.enqueue(record('t1')).catch(() => undefined);
+    const { queue, setFail } = failingSession();
+    setFail(false);
+    await queue.enqueue(record('t1'));
     await tick(); // let the run finish so the slot is free
 
+    setFail(true);
     await expect(queue.remove('t1')).rejects.toThrow(/未能从队列快照中删除/);
     expect(queue.get('t1')).toBeDefined();
+  });
+
+  it('重试时快照写失败 → restart 抛错、任务零启动、记录回到重启前状态（D-263）', async () => {
+    const { queue, engineState, setFail } = failingSession('jitter');
+    setFail(false);
+    await queue.enqueue(record('t1'));
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Running');
+    expect(await queue.cancel('t1')).toBe(true);
+    await tick();
+    // Completed is terminal and restartable states are Error/Canceled — a
+    // killed-true cancel is the deterministic way here to land on `Canceled`.
+    expect(queue.get('t1')?.state).toBe('Canceled');
+    expect(queue.activeTaskIds).not.toContain('t1');
+    const canceled = queue.get('t1');
+
+    setFail(true);
+    await expect(queue.restart('t1')).rejects.toThrow(/任务未能重试：队列快照未能写入磁盘/);
+    // D-263: the retry is ROLLED BACK to the exact pre-restart record — same
+    // defect shape as D-259's enqueue, plus restart mutates the live record in
+    // place (transitions + D-107/D-115 resets), so the old order left memory
+    // (Canceled→Idle, fields wiped) disagreeing with the disk while a fresh
+    // process was already spawning. Now: nothing spawned, nothing parked, and
+    // 「任务未能重试」 is literally true.
+    expect(queue.get('t1')).toEqual(canceled);
+    expect(queue.isPending('t1')).toBe(false);
+    expect(queue.activeTaskIds).toEqual([]);
+    expect(engineState.downloadCalls).toBe(1); // only the pre-cancel run
+    await tick();
+    // The rolled-back state is stable: no run is in flight to resurrect it.
+    expect(queue.get('t1')).toEqual(canceled);
+    expect(engineState.downloadCalls).toBe(1);
+
+    // Disk heals → the same restart now proceeds end to end (Canceled → Idle,
+    // pump fills the slot, the run starts probing).
+    setFail(false);
+    await queue.restart('t1');
+    await tick();
+    expect(['Idle', 'FetchingInfo', 'ReadyWithInfo', 'Running']).toContain(queue.get('t1')?.state);
+    await queue.cancel('t1');
+    await tick();
+    expect(queue.get('t1')?.state).toBe('Canceled');
+  });
+});
+
+/**
+ * D-259 (audit P3) · a failed snapshot write must not rewrite the queue's own
+ * bookkeeping behind the caller's back.
+ *
+ *   ① `remove()` on a QUEUED task: the write-failure path restored the record
+ *      into the map but NOT into the FIFO — the task became a ghost (a record
+ *      no pump() can ever reach, a card that can neither run nor cancel).
+ *      The fix restores the EXACT pre-remove FIFO position, the same shape
+ *      the cancel() pending branch has had since D-242.
+ *   ② For contrast, a D-231 batch is EXEMPT from write-then-start on purpose:
+ *      members park + start per member and ONE write at batch end reports the
+ *      failure for members that legitimately already started. Pinned here so
+ *      the exemption cannot drift into "batch members never start either".
+ */
+describe('D-259 · 写失败不改变队列事实：FIFO 原位还原 / 批量豁免', () => {
+  /** Downloads run until the test finishes them, so the slot stays occupied. */
+  function manualEngine() {
+    const started: string[] = [];
+    const open = new Map<string, (event: EngineEvent) => void>();
+    const engine: DownloadEngine = {
+      async version() { return 'fake'; },
+      async probe() { return mediaInfo(); },
+      async probePlaylist() { throw new Error('not used'); },
+      download(req: DownloadRequest, onEvent: (event: EngineEvent) => void) {
+        started.push(req.taskId);
+        open.set(req.taskId, onEvent);
+        return {
+          pid: 1,
+          cancel: async () => {
+            onEvent({ type: 'canceled', taskId: req.taskId });
+            open.delete(req.taskId);
+            return true;
+          },
+        };
+      },
+      async selfUpdate() {
+        return { fromVersion: '', toVersion: '', channel: 'stable', changed: false };
+      },
+    };
+    const finish = (taskId: string): void => {
+      const emit = open.get(taskId);
+      if (emit === undefined) throw new Error(`task ${taskId} is not running`);
+      open.delete(taskId);
+      emit({
+        type: 'completed', taskId,
+        artifacts: [{ taskId, path: `C:/out/${taskId}.mp4`, kind: 'video', sizeBytes: 1 }],
+      });
+    };
+    return { engine, started, finish };
+  }
+
+  const waitFor = async (predicate: () => boolean, timeoutMs = 2000): Promise<void> => {
+    const startedAt = Date.now();
+    while (!predicate()) {
+      if (Date.now() - startedAt > timeoutMs) throw new Error('waitFor timed out');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+
+  /** concurrency 1 + a toggleable tasks.json sabotage + the manual engine. */
+  const parkedFailingSession = () => {
+    const mem = createInMemoryPorts();
+    const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    let fail = false;
+    mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (fail && path.endsWith('tasks.json')) throw new Error('ENOSPC: no space left on device');
+      await inner(path, text);
+    };
+    const manual = manualEngine();
+    const queue = new TaskQueue({
+      ports: mem.ports,
+      engine: manual.engine,
+      verifier: okVerifier,
+      history: new HistoryStore({ ports: mem.ports }),
+      taskStore: new TaskStore({ ports: mem.ports }),
+      jsRuntimePath: 'C:/runtime/node.exe',
+      persistIntervalMs: 0,
+      concurrency: 1,
+    });
+    return { mem, queue, manual, setFail: (value: boolean): void => { fail = value; } };
+  };
+
+  it('① 删除排队任务写失败 → 记录与 FIFO 原位都还原，之后仍按原顺序被 pump', async () => {
+    const { queue, manual, setFail } = parkedFailingSession();
+    setFail(false);
+    await queue.enqueue(record('t1')); // takes the only slot and hangs there
+    await waitFor(() => manual.started.includes('t1'));
+    await queue.enqueue(record('t2')); // FIFO: [t2]
+    await queue.enqueue(record('t3')); // FIFO: [t2, t3]
+    await queue.enqueue(record('t4')); // FIFO: [t2, t3, t4]
+    expect(queue.pendingCount).toBe(3);
+    expect(queue.isPending('t3')).toBe(true);
+
+    setFail(true);
+    await expect(queue.remove('t3')).rejects.toThrow(/未能从队列快照中删除/);
+    // D-259 ①: BOTH halves of the pre-remove state are back — the record in
+    // the map AND its exact FIFO slot between t2 and t4. The pre-fix code put
+    // the record back but left the FIFO without the id: a ghost that pump()
+    // can never reach again.
+    expect(queue.get('t3')).toBeDefined();
+    expect(queue.isPending('t3')).toBe(true);
+    expect(queue.pendingCount).toBe(3);
+
+    // Drain the queue and prove the ghost claim wrong: t3 runs, in its
+    // original order (t2 → t3 → t4). No restore at all would hang this
+    // waitFor; a restore at the wrong end would reorder the starts.
+    setFail(false);
+    manual.finish('t1');
+    await waitFor(() => manual.started.includes('t2'));
+    manual.finish('t2');
+    await waitFor(() => manual.started.includes('t3'));
+    expect(manual.started.slice(0, 3)).toEqual(['t1', 't2', 't3']);
+    manual.finish('t3');
+    await waitFor(() => manual.started.includes('t4'));
+    expect(manual.started).toEqual(['t1', 't2', 't3', 't4']);
+  });
+
+  it('② D-231 批量豁免保持：批次成员照常启动，批次末尾的写失败如实上报', async () => {
+    const { queue, manual, setFail } = parkedFailingSession();
+    setFail(false);
+    await queue.enqueue(record('t1')); // occupies the only slot
+    await waitFor(() => manual.started.includes('t1'));
+
+    // The disk breaks BEFORE the batch — members still park and (as slots
+    // allow) start; the batch-end write reports the failure once, for the
+    // whole batch, without faking success.
+    setFail(true);
+    await expect(queue.enqueueBatch([record('b1'), record('b2')]))
+      .rejects.toThrow(/批量任务已入队，但队列快照未能写入磁盘/);
+    // Members are parked behind the busy slot exactly as D-231 prescribes.
+    expect(queue.isPending('b1')).toBe(true);
+    expect(queue.isPending('b2')).toBe(true);
+    expect(queue.pendingCount).toBe(2);
+
+    // And they still start when the slot frees — the exemption is about the
+    // write order, never about freezing the queue.
+    setFail(false);
+    manual.finish('t1');
+    await waitFor(() => manual.started.includes('b1'));
+    manual.finish('b1');
+    await waitFor(() => manual.started.includes('b2'));
+    expect(manual.started).toEqual(['t1', 'b1', 'b2']);
   });
 });

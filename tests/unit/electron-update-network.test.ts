@@ -2,7 +2,9 @@
  * D-228 · `electron-update-network.ts` 专属离线单测（D-214 遗留缺口的补齐）。
  *
  * 只测这一层自己的职责，不假装替代真机代理验收：
- *   1. `parseUpdateProxy` —— 代理 URL 解析、scheme 映射、凭据绝不出现在 proxyRules。
+ *   1. `parseUpdateProxy` —— 代理 URL 解析、scheme 映射、凭据绝不出现在 proxyRules；
+ *      SOCKS + 凭据被拒绝（Chromium SOCKS 客户端不支持 RFC 1929 认证，
+ *      external online audit P2 · SOCKS5 credentials unsupported by Chromium）。
  *   2. 重定向守卫 —— 跳数上限、HTTPS 降级、策略拒绝、环路、非法 Location（全同步纯函数）。
  *   3. Session 生命周期 —— 一配置一 Session、缓存创建 Promise、失败不毒化后续请求。
  *   4. 请求驱动 —— hop 0 策略门、login 只在固定代理模式安装且只答匹配的代理、体积上限。
@@ -204,9 +206,15 @@ describe('D-214 · parseUpdateProxy', () => {
     }
   });
 
+  // external online audit P2 migration: this case used a SOCKS URL with
+  // userinfo, which the parser then accepted. Chromium's SOCKS client cannot
+  // authenticate (RFC 1929), so SOCKS + credentials is now REFUSED (see the
+  // dedicated describe below); the intent of THIS test — credentials never
+  // leak into proxyRules / key / partition — is preserved on the HTTP scheme,
+  // where credentials remain legitimate.
   it('keeps credentials OUT of proxyRules, the key and the partition name', () => {
-    const config = parseUpdateProxy('socks5://leouser:sup3r%40secret@127.0.0.1:7891');
-    expect(config.proxyRules).toBe('socks5://127.0.0.1:7891');
+    const config = parseUpdateProxy('http://leouser:sup3r%40secret@127.0.0.1:7891');
+    expect(config.proxyRules).toBe('http://127.0.0.1:7891');
     expect(config.proxyRules).not.toContain('leouser');
     expect(config.proxyRules).not.toContain('secret');
     expect(config.key).not.toContain('leouser');
@@ -237,6 +245,75 @@ describe('D-214 · parseUpdateProxy', () => {
     ];
     for (const raw of invalid) {
       expect(() => parseUpdateProxy(raw), raw).toThrow(UpdateProxyConfigError);
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 1b. SOCKS + 凭据 —— Chromium 不支持 SOCKS 认证，更新链路 fail-fast 拒绝        */
+/* -------------------------------------------------------------------------- */
+
+describe('external online audit P2 · SOCKS credentials are refused for the update chain', () => {
+  /**
+   * Runs `parseUpdateProxy` and returns the thrown message. Fails the test if
+   * the call resolves or throws anything but an UpdateProxyConfigError.
+   */
+  const rejectedMessage = (raw: string): string => {
+    try {
+      parseUpdateProxy(raw);
+    } catch (error) {
+      expect(error).toBeInstanceOf(UpdateProxyConfigError);
+      return error instanceof Error ? error.message : String(error);
+    }
+    throw new Error(`expected parseUpdateProxy to refuse ${JSON.stringify(raw)}`);
+  };
+
+  it('refuses every SOCKS scheme carrying userinfo, never echoing the credential', () => {
+    const cases = [
+      'socks5://user:pass@127.0.0.1:1080',
+      'socks://user:pass@127.0.0.1:1080',
+      'socks5h://user:pass@127.0.0.1:1080',
+      'socks4://user:pass@127.0.0.1:1080',
+      'socks4a://user:pass@127.0.0.1:1080',
+      'socks5://user@127.0.0.1:1080',         // username only
+      'socks5://:pass@127.0.0.1:1080',        // password only
+      'socks5://u%40s:p%40ss@127.0.0.1:1080', // percent-encoded userinfo
+    ];
+    for (const raw of cases) {
+      const message = rejectedMessage(raw);
+      expect(message, raw).toContain('SOCKS');
+      expect(message, raw).toContain('认证');
+      // The configured values never come back — not even percent-decoded.
+      expect(message, raw).not.toContain('user');
+      expect(message, raw).not.toContain('pass');
+      expect(message, raw).not.toContain('u@s');
+      expect(message, raw).not.toContain('p@ss');
+    }
+  });
+
+  it('the refusal states the cause, the blast radius and the remedy', () => {
+    const message = rejectedMessage('socks5://user:pass@127.0.0.1:1080');
+    expect(message).toContain('Chromium');
+    expect(message).toContain('应用与组件更新无法使用该代理');
+    expect(message).toContain('下载不受影响');
+    expect(message).toContain('可改用无凭据 SOCKS 代理或 HTTP(S) 代理');
+  });
+
+  it('a credential-less SOCKS proxy still parses (regression guard)', () => {
+    const config = parseUpdateProxy('socks5://127.0.0.1:7890');
+    expect(config.mode).toBe('fixed_servers');
+    expect(config.proxyRules).toBe('socks5://127.0.0.1:7890');
+    expect(config.credentials).toBeNull();
+  });
+
+  it('HTTP(S) credentials still parse — they reach the proxy via the 407 login event (regression guard)', () => {
+    for (const scheme of ['http', 'https']) {
+      const config = parseUpdateProxy(`${scheme}://user:pass@127.0.0.1:8080`);
+      expect(config.mode).toBe('fixed_servers');
+      expect(config.proxyRules).toBe(`${scheme}://127.0.0.1:8080`);
+      expect(config.credentials).toEqual({
+        host: '127.0.0.1', port: 8080, username: 'user', password: 'pass',
+      });
     }
   });
 });

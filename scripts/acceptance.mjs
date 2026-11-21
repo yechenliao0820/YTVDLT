@@ -580,6 +580,11 @@ const M3_TEST_FILE_MAP = {
   'shutdown-cancel.test.ts': ['A-D247'],
   // 0.2.1 (D-91…D-94, D-97): menu wiring, GitHub-release app update, engine check.
   'app-menu.test.ts': ['A-M5-00', 'A-D247'],
+  // D-257 · 第二次退出请求不再绕过硬清理窗口（外部审计 P2）：before-quit 闩在清理
+  // promise 在飞时对一切再次 quit preventDefault 并挂起、多次重复请求合并、清理
+  // 自身末尾 quit 前置位放行、结算后照常直通；electron-entry 接线钉点防旧无条件
+  // 直通回流。
+  'shutdown-quit-gate.test.ts': ['A-D257'],
   'app-update.test.ts': ['A-4.4-29'],
   'app-update-service.test.ts': ['A-4.4-29'],
   // 0.2.2 (D-101): repeated downloads get a numbered name instead of an error.
@@ -1474,6 +1479,15 @@ const M5_ASSERTIONS = [
   // installedVersion 为 yt-dlp.exe 版本探测补 D-245 前缀（aria2c 保持裸
   // --version，按文件名分支镜像 self-updater.ts）。
   { id: 'A-D247', layer: 'L1', subject: '退出安全（D-247）：shutdownCancelTargets 收集活跃+排队任务且不碰恢复未启动记录；cancelRunningTasksForShutdown 对每个目标调用既有 queue.cancel（逐任务隔离拒绝）、在假时钟下等待 activeTaskIds 清空作为子进程退出证据、预算 5000ms 到期放行并如实报告 stillActive、无在跑任务零 cancel 零等待、D-242 写失败拒绝不阻断退出；app-menu 纯模型与 bootstrap 安装菜单（中英两份、含 did-finish-load 重建）的「退出/Quit」均不再携带 Alt+F4 accelerator 且点击仍执行真退出（macOS 保留 Cmd+Q）；component-updater 的 status/check 版本探测 argv 按 yt-dlp.exe 分支携带 --ignore-config --no-plugin-dirs 前缀、aria2c.exe 保持裸 --version、版本结果不受前缀影响', tests: ['shutdown-cancel', 'app-menu', 'bootstrap', 'component-updater'], needs: ['vitest'], evidence: ['reports/vitest-results.json::shutdown-cancel.test.ts', 'apps/desktop/src/main/shutdown-cancel.ts::cancelRunningTasksForShutdown', 'apps/desktop/src/main/electron-entry.ts::before-quit', 'apps/desktop/src/main/app-menu.ts::buildAppMenu', 'apps/desktop/src/main/component-updater.ts::installedVersion'] },
+  // D-257 · 外部审计 P2：第二次退出请求可绕过硬清理窗口。旧 `cleanupStarted` 闩对
+  // 第二次 before-quit 无条件直通——菜单「退出」（quitting=true）清理窗口内 Alt+F4
+  // 关窗销毁 → window-all-closed → app.quit() 直通，5 s 取消预算、D-255 快照写等待
+  // 与 3 s 无痕清理被拦腰截断。修复后窗口内一切再次 quit 被 preventDefault 并挂起、
+  // 多次重复请求合并为一次结算恢复；清理自身末尾 quit 前置位 cleanupSettled 照常
+  // 放行（不死循环）；结算后再次 quit 立即放行且不重启清理；无任务快速路径不变；
+  // 清理拒绝仍结算并退出；electron-entry 接线源码钉点（旧无条件 return 不再存在）。
+  // 预算语义一字未动：门闩不加任何新计时器，只把退出推迟到既有有界清理结算。
+  { id: 'A-D257', layer: 'L1', subject: '第二次退出请求不再绕过硬清理窗口（D-257）：installShutdownQuitGate 在清理 promise 在飞时对一切再次 before-quit preventDefault 并挂起、多次重复请求合并为一次结算恢复（幂等）、清理自身末尾 quit 前置位 cleanupSettled 照常放行（无 quit 死循环）、结算后的再次 quit 立即放行且清理不重启、无任务时立即结算照常退出、清理拒绝仍结算并退出且不产生未处理拒绝；electron-entry 接线钉点：旧 if (cleanupStarted) return 直通不再存在，cancelRunningTasksForShutdown 与 3 s 无痕 race 保留在门闩内的清理体中', tests: ['shutdown-quit-gate'], needs: ['vitest'], evidence: ['reports/vitest-results.json::shutdown-quit-gate.test.ts', 'apps/desktop/src/main/shutdown-quit-gate.ts::installShutdownQuitGate', 'apps/desktop/src/main/electron-entry.ts::before-quit', 'docs/DECISIONS.md::D-257'] },
 ];
 
 /** M5 e2e cases that must exist and pass for the visual assertions. */

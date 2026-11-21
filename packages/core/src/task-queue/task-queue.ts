@@ -303,28 +303,55 @@ export class TaskQueue implements ITaskQueue {
       error: null,
     };
     // Re-enqueueing an id must not leave a stale FIFO entry behind — nor a
-    // stale cancel request that would abort the fresh run (D-200).
+    // stale cancel request that would abort the fresh run (D-200). Both old
+    // values are captured first so a failed write below can restore the EXACT
+    // pre-enqueue state (D-259).
+    const pendingIndex = this.pending.indexOf(stored.id);
     this.dropFromPending(stored.id);
     this.cancelRequested.delete(stored.id);
+    const previous = this.records.get(stored.id);
     this.records.set(stored.id, stored);
+    // D-231 (audit P2) + D-242 (audit P2) + D-259 (audit P3): EVERY standalone
+    // enqueue is written before it returns — and, since D-259, BEFORE the task
+    // can start. The previous order (pending → pump() → persist) let a free
+    // slot spawn the download first, so a failed write threw "未能加入队列"
+    // about a download that was already running: the caller could trust
+    // neither the error nor the queue. Now the write GATES the start — failure
+    // rolls the intake back (memory matches the unchanged disk again) and the
+    // error is thrown before pump(); success lets pump() fill the slots as
+    // before. The D-163 write-count contract is untouched: still exactly one
+    // structural write per standalone enqueue, only taken while the record is
+    // `Idle` instead of just-after-pump.
+    //
+    // Two deliberate exemptions keep audited contracts intact:
+    //   * D-231 batch members (`batchDepth > 0`): park + pump per member, ONE
+    //     write at batch end whose failure is reported for members that
+    //     legitimately already started. That ordering IS the audited D-231
+    //     contract, not this defect.
+    //   * no `taskStore` (core/L0 degradation, side-effect free): nothing to
+    //     await, so the fully synchronous pump the M4-2 pins describe is kept.
+    if (this.batchDepth === 0 && this.deps.taskStore !== undefined) {
+      try {
+        await this.persistOrThrow('任务未能加入队列：队列快照未能写入磁盘');
+      } catch (error) {
+        // Roll the intake back to the exact pre-enqueue state: the record the
+        // disk still holds (or none), and — for a re-enqueue — the old FIFO
+        // slot. The task never entered the FIFO while the write was in flight,
+        // so nothing could have started it.
+        if (previous === undefined) this.records.delete(stored.id);
+        else this.records.set(stored.id, previous);
+        if (previous !== undefined && pendingIndex !== -1) {
+          this.pending.splice(pendingIndex, 0, stored.id);
+        }
+        this.cancelRequested.delete(stored.id);
+        throw error;
+      }
+    }
+    // Durable (or inside a D-231 batch / no store): now it may compete for a
+    // slot. `pump()` stays synchronous; the bounded-starts invariant lives in
+    // pump()/run() and is unchanged.
     this.pending.push(stored.id);
     this.pump();
-    // D-231 (audit P2) + D-242 (audit P2): EVERY standalone enqueue is written
-    // before it returns — including one that started immediately.
-    //
-    // The old rule only wrote when the record was still parked ("a started
-    // record is covered by the run lifecycle"). That left a real window: the
-    // run's first snapshot is the first PROGRESS tick (or the probe's end), so
-    // a crash during `probe()` — the longest, most failure-prone phase, tens of
-    // seconds on a slow link — left a task the user had confirmed in NO file at
-    // all. The D-163 contract this "saved" is about not rewriting the file on
-    // pure progress; one structural record per enqueue is not that.
-    //
-    // The result is CHECKED (D-242): a failed write used to be logged and
-    // swallowed, so the caller reported success while nothing was durable.
-    if (this.batchDepth === 0) {
-      await this.persistOrThrow('任务已加入队列，但队列快照未能写入磁盘，重启后该任务可能丢失');
-    }
   }
 
   /**
@@ -1001,7 +1028,34 @@ export class TaskQueue implements ITaskQueue {
         this.transition(record, 'Canceled');
         // A run is not guaranteed to be in flight to persist for us (a restored
         // record sits here without a slot) — mirror the pending-branch behaviour.
-        await this.persistSnapshot();
+        //
+        // D-259 (audit P3): "mirror" must include the WRITE CHECK. The result
+        // used to be ignored, so this branch answered a confirmed `true` while
+        // tasks.json still held the pre-cancel value — shutdown-cancel's
+        // per-task report (D-248) then classified the task as `confirmed`
+        // instead of `persist-failed`. Unlike the pending branch there is
+        // nothing to roll back: the transition above has been emitted and
+        // `Canceled` has no legal edge back to `ReadyWithInfo` / `Running`.
+        // The window and its alignment, spelled out once:
+        //   * memory = `Canceled` (and `cancelRequested` holds the id, so an
+        //     in-flight run still refuses to spawn the download), disk = the
+        //     pre-cancel value;
+        //   * MEMORY is the single source of truth for every LATER write:
+        //     `persistSnapshot()` always serialises the in-memory records and
+        //     the failed attempt un-reserved the fingerprint, so the next
+        //     trigger (another task's tick / run end / any mutation) writes
+        //     `Canceled` to disk;
+        //   * if the process dies before that next write, `restore()` reads
+        //     the old value and the existing boot rules decide: a persisted
+        //     `Running` is defensively rewritten to `Canceled` (D-209), a
+        //     persisted `ReadyWithInfo` comes back restartable-but-never-
+        //     auto-started (M4-3). No path resumes the download by itself.
+        const persisted = await this.persistSnapshot();
+        if (!persisted) {
+          throw new Error(
+            `任务取消已受理，但队列快照未能写入磁盘（${this.lastPersistError ?? '写入失败'}），重启后该任务可能按取消前状态恢复`,
+          );
+        }
         return true;
       }
       return false;
@@ -1043,6 +1097,19 @@ export class TaskQueue implements ITaskQueue {
     if (this.running.has(taskId)) {
       throw new Error(`task still running, retry refused: ${taskId}`);
     }
+    // D-263: everything below mutates the LIVE record in place (transitions +
+    // the D-107/D-115 field resets). A failed snapshot write must restore the
+    // EXACT pre-restart object, so capture it — and the FIFO slot, if the
+    // record was parked — before the first mutation.
+    const pendingIndex = this.pending.indexOf(taskId);
+    const before: TaskRecord = {
+      ...record,
+      artifacts: [...record.artifacts],
+      // Key-shape fidelity: `subtitleFiles` may legitimately be absent on a
+      // settled record; materialising `[]` would change the restored object's
+      // shape (first thing a `toEqual` pin notices).
+      ...(record.subtitleFiles === undefined ? {} : { subtitleFiles: [...record.subtitleFiles] }),
+    };
     const target: TaskState = record.mediaInfo !== null ? 'ReadyWithInfo' : 'Idle';
     // D-199: a restored `Idle` / `ReadyWithInfo` record already sits ON the
     // target state and the machine has no self-loop edges, so the unconditional
@@ -1086,14 +1153,33 @@ export class TaskQueue implements ITaskQueue {
     this.dropFromPending(taskId);
     // D-200: a cancel recorded for the OLD run must not kill the fresh one.
     this.cancelRequested.delete(taskId);
+    // D-263 (audit follow-up; same defect shape as D-259's enqueue): the write
+    // now GATES the start. The old order (pending → pump() → persist) let a
+    // free slot spawn the retry first, so a failed write reported failure
+    // about a download that was already running — and, unlike enqueue,
+    // restart had ALSO mutated the record in place (transitions + resets),
+    // leaving memory and disk disagreeing. Now the write happens before the
+    // task can compete for a slot; failure rolls the record back to the exact
+    // pre-restart state (memory matches the unchanged disk) and the thrown
+    // error is literally true: the retry did not happen. Success lets pump()
+    // start it as before. The D-163 write-count contract is untouched: still
+    // exactly one structural write per restart. Exemptions mirror enqueue
+    // (D-259): D-231 batch members (`batchDepth > 0`) follow the batch-end
+    // write rules; no `taskStore` (core/L0) keeps the fully synchronous pump
+    // the M4-2 pins describe. Transitions emitted before a failure are bounded
+    // to that failure path; the poll-based list self-corrects on the next
+    // TASK_LIST read.
+    if (this.batchDepth === 0 && this.deps.taskStore !== undefined) {
+      try {
+        await this.persistOrThrow('任务未能重试：队列快照未能写入磁盘');
+      } catch (error) {
+        this.records.set(taskId, before);
+        if (pendingIndex !== -1) this.pending.splice(pendingIndex, 0, taskId);
+        throw error;
+      }
+    }
     this.pending.push(record.id);
     this.pump();
-    // D-231, same rule as `enqueue()`: a retry that parks behind a full slot
-    // has no other writer, and its state/artifacts just changed (e.g.
-    // `Completed → ReadyWithInfo`). D-242: the write is now issued for a retry
-    // that started immediately too, and its failure is reported instead of
-    // being logged and forgotten.
-    if (this.batchDepth === 0) await this.persistOrThrow('重试任务已启动，但队列快照未能写入磁盘，重启后该状态可能丢失');
   }
 
   /**
@@ -1108,18 +1194,35 @@ export class TaskQueue implements ITaskQueue {
    * happen, and the next launch restored the record. Now the write is checked:
    * on failure the in-memory row is put back (memory must agree with disk) and
    * the rejection carries the reason.
+   *
+   * D-259 (audit P3): "put back" must include the FIFO. `remove()` also runs
+   * for QUEUED tasks (that is how a user cancels-and-deletes a parked row), and
+   * the old failure path restored only `records` — leaving a record in the map
+   * with NO pending entry: a ghost that `pump()` can never reach (never starts,
+   * never auto-fills) and whose card the UI can neither run nor cancel. The
+   * exact pre-remove position is captured BEFORE the drop and restored on the
+   * failure path, the same shape the `cancel()` pending branch has used since
+   * D-242.
    */
   async remove(taskId: string): Promise<boolean> {
     if (this.running.has(taskId)) return false;
     const record = this.records.get(taskId);
     if (record === undefined) return false;
+    // D-259: capture the FIFO position first — `dropFromPending` erases it.
+    const pendingIndex = this.pending.indexOf(taskId);
     this.dropFromPending(taskId);
-    // D-200: the id leaves the queue; drop any cancel recorded for it.
+    // D-200: the id leaves the queue; drop any cancel recorded for it. (A
+    // recorded request only ever targets an id that occupies a slot, which
+    // `remove()` refuses above — a leftover entry here is stale, so it stays
+    // deleted even on the failure path below.)
     this.cancelRequested.delete(taskId);
     this.records.delete(taskId);
     const persisted = await this.persistSnapshot();
     if (!persisted) {
+      // D-242 + D-259: memory must agree with the (unchanged) disk again —
+      // the record AND its FIFO position.
       this.records.set(taskId, record);
+      if (pendingIndex !== -1) this.pending.splice(pendingIndex, 0, taskId);
       throw new Error(`任务记录未能从队列快照中删除（${this.lastPersistError ?? '写入失败'}），记录已保留`);
     }
     return true;
