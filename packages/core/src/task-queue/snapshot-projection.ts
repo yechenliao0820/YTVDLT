@@ -91,7 +91,7 @@ export function buildPersistProjection(
   return records.map((record) => {
     const request = record.request;
     // external online audit P2 · malformed request must not break
-    // restore/persist (decision number pending): the old guard read
+    // restore/persist (D-268): the old guard read
     // `request.network.proxy` after only a `request !== null` check, so ONE
     // malformed row — a non-null `request` that is not a plain object, or one
     // whose `network` domain is missing (old schema / hand-edited / damaged

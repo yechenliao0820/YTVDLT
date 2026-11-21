@@ -2900,3 +2900,13 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 验证 | task-queue 49 → 60（动态 extractor 子目录 + 静态子目录旧文件 → `_(1)`；深度 3 层内纳入 / 4 层外不纳入；无 `/` 模板不递归快路径钉点；子目录模板并发孪生仍独立命名；250 文件超限 → 根目录名照常取到 + 截断 WARNING）；copy-suffix 12/12、既有钉点零改动；全量 unit+contract 0 failed；四包 typecheck OK。 |
 | 未覆盖 | 深度/目录数上限是防失控的工程取舍（4 层以下的极端嵌套模板仍可能漏检——漏检时回落到 D-101 的旧行为：yt-dlp 复用旧文件，如实完成但不加副本，不是数据损坏）；真实 yt-dlp 对子目录模板的落地路径未在集成层实测（本机系统代理干扰 L2，见手册 §9 坑 45）；打包版真机未实测（铁律 9）。 |
 
+## D-274 · 2026-11-21 · 回归审计收尾：restart 入口拒绝 + 四域守卫 + 扫描预算只计成功目录（外部在线审计 follow-up）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 六项修复（D-268…D-273）提交后回归审计（6 个对抗性审计智能体 + 跨项交互与全 diff 兜底）发现：① D-268 遗留——request=null 记录（legacy 或归一化）点重试时，run 的拒绝门执行 `ReadyWithInfo -> Error` 迁移但状态机无此边，`IllegalTaskTransitionError` 被 runSafely 吞掉并覆盖门内错误 → 记录卡死 ReadyWithInfo + UNKNOWN、重试永远假成功（D-268 决策声明的「干净拒绝」与事实不符）；② D-273 遗留（探针实证）——`COPY_SUFFIX_SCAN_MAX_DIRS=200` 把「对文件 readdir 的 ENOTDIR 尝试」也计次，根目录文件密集（字母序排在子目录名之前）时目标子目录在预算线外被饿死 → 旧副本漏检 → yt-dlp 静默复用旧文件，D-273 要修的症状原样复发且未被其「未覆盖」登记；③ D-268 守卫只查 paths，paths-only 快照在 run 的 `detectPostprocessed`（读 format/advanced/subtitle 域）抛 TypeError 落进同一卡死（生产 boot 有 D-161 五域 sanitize 前置，仅手构快照直调 restore 可达）。 |
+| 根因 | ① 「拒绝」被递给了 run 的门，而门依赖一条状态机不存在的迁移边——拒绝应在入口完成；② 预算计次把「尝试过的目标」与「读到的目录」混为一谈；③ 归一化守卫的域级判定窄于 run 的实际解引用面。 |
+| 决策 | ① restart() 入口（unknown-task 检查之后、任何 transition/字段变更/`before` 捕获之前）对 `record.request === null` 直接 throw「任务未能重试：下载请求缺失或损坏，无法安全重启」——零变更零回滚；taskDetail 的 retry 经既有转换回 REFUSED（与 D-263 快照写失败同一转换路径）；② `restoredRequestIsUsable()` 扩为 paths/format/subtitle/advanced 四域均为非 null 非数组对象（network 保持可选——宿主 hook 重建、下游读取容错；对齐 D-161 域级判定但不清 artifacts）；③ 扫描预算只对 readdir **成功**的目录计次（DEPTH=3 不变，`copySuffix.scanTruncated` WARNING 如实表示「读满 200 个真目录」）；④ 分流条件 `includes('/')` 改 `/[\\/]/`（反斜杠模板也走树扫描）；⑤ 三处 pending 注释回填 D-268。D-209/D-263/D-199 全部既有 restart 钉点零变化。 |
+| 验证 | task-snapshot-persist 24→25、task-queue 60→62（根目录 250 文件饿死场景 + 反斜杠模板钉点；red-check：临时还原旧代码恰两新钉点红）、copy-suffix 12/12；全量 unit+contract **3059 过 + 6 skipped / 0 failed**；core typecheck OK。回归审计其它结论：D-269/D-270/D-271/D-272 全部 CLEAN（无 P0/P1/P2）；跨项交互 6 条推演全部闭合；全 diff 逐 hunk 归因完毕、无脱离意图的改动、无测试放松。 |
+| 未覆盖 | 审计登记的 P4 项一律记录不修：单删 IPC 内联承担全量封面扫描延迟（大缓存下的纯延迟）、`ThumbnailPort.purgeCovers?` 可选成员的装配约束、importJson 入参零校验（D-238 逐字接受语义，改它需另立决策）、预览与 yt-dlp 端的既存残余差异（argv 截断主体、子目录净化、`.B` 字节截断）、`PATH_PREVIEW` 死桩、外层 DECISIONS.md 阅读副本此前滞后（本次已同步）；打包版真机未实测（铁律 9）。 |实测（本机系统代理干扰 L2，见手册 §9 坑 45）；打包版真机未实测（铁律 9）。 |
+

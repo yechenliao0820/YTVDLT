@@ -811,6 +811,53 @@ describe('external online audit P3 · 模板子目录：副本扫描跟随模板
     expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(extractor)s/%(title)s [%(id)s]_(1).%(ext)s');
     expect(mem.state.logLines.some((line) => line.includes('copySuffix.scanTruncated'))).toBe(true);
   });
+
+  it('external online audit follow-up · 预算只计真目录：250 个排序在前面的文件不再饿死目标子目录', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    // Mirror the REAL fs: readdir on a FILE throws ENOTDIR. The in-memory
+    // default resolves with `[]` for a file path (indistinguishable from an
+    // empty directory), which would hide exactly the budget semantics under
+    // test — only directories that actually READ consume
+    // COPY_SUFFIX_SCAN_MAX_DIRS; a failed attempt costs nothing.
+    const innerReaddir = mem.ports.fs.readdir.bind(mem.ports.fs);
+    mem.ports.fs.readdir = async (dir: string): Promise<string[]> => {
+      if (mem.state.files.has(dir) || mem.state.bytes.has(dir)) {
+        throw new Error(`ENOTDIR: illegal operation on a directory, open '${dir}'`);
+      }
+      return innerReaddir(dir);
+    };
+    // 250 files whose names come BEFORE the target subdirectory (the NTFS
+    // alphabetical norm). Under the old per-attempt budgeting they exhausted
+    // COPY_SUFFIX_SCAN_MAX_DIRS (200) before `Sub` was ever dequeued: the old
+    // copy inside it was never seen, `nextCopySuffix` returned `''` and
+    // yt-dlp silently reused the old file — the exact D-273 symptom, one
+    // level deeper.
+    for (let i = 0; i < 250; i += 1) {
+      mem.state.files.set(`C:/out/aaa${String(i).padStart(3, '0')}.mp4`, 'junk');
+    }
+    mem.state.files.set('C:/out/Sub/Title [fixture].mp4', 'old-bytes');
+    await queue.enqueue(recordWithTemplate('t1', STATIC));
+    await tick();
+    // The subdirectory is still reached and its old copy earns the suffix.
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('Sub/%(title)s [%(id)s]_(1).%(ext)s');
+    expect(queue.get('t1')?.state).toBe('Completed');
+    // And the bound was never hit: two real directories read (root + Sub),
+    // 250 ENOTDIR attempts cost nothing — no truncation warning.
+    expect(mem.state.logLines.some((line) => line.includes('copySuffix.scanTruncated'))).toBe(false);
+  });
+
+  it('external online audit follow-up · 反斜杠子目录模板（Sub\\…）也走树扫描拿到 (1)', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    mem.state.files.set('C:/out/Sub/Title [fixture].mp4', 'old-bytes');
+    // A hand-edited config.json can carry a `\` separator template; the
+    // request sanitizer never rewrites `\`, so the old `includes('/')` check
+    // took the flat readdir while the file lands in `<dir>\Sub\` — the old
+    // copy was invisible and yt-dlp reused it. Separator-CLASS dispatch now.
+    await queue.enqueue(recordWithTemplate('t1', 'Sub\\%(title)s [%(id)s].%(ext)s'));
+    await tick();
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('Sub\\%(title)s [%(id)s]_(1).%(ext)s');
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
 });
 
 // --- T2 · persistSnapshot failure is visible, never fatal -------------------

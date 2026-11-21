@@ -851,7 +851,7 @@ describe('D-259 · 写失败不改变队列事实：FIFO 原位还原 / 批量�
 
 /**
  * external online audit P2 · malformed request must not break restore/persist
- * (decision number pending).
+ * (D-268).
  *
  * One root, two failures: `restore()` used to feed whatever `request` a row
  * carried straight into the queue, and `buildPersistProjection()` read
@@ -869,6 +869,19 @@ describe('D-259 · 写失败不改变队列事实：FIFO 原位还原 / 批量�
  * object. A request missing ONLY `network` stays usable: the host's
  * `repairRestoredRequest` hook rebuilds that domain from live config, so the
  * row runs AND its proxy still never reaches the file.
+ *
+ * external online audit follow-up (two D-268 leftovers pinned here too):
+ *   1. the usability guard covers ALL FOUR consumed domains (`paths` +
+ *      `format` + `subtitle` + `advanced`, aligned with TaskStore's D-161
+ *      domain-level sanitize; `network` stays optional) — a paths-only
+ *      snapshot used to survive restore and throw inside `run()`'s
+ *      `detectPostprocessed()`;
+ *   2. `restart()` refuses a `request === null` record AT THE DOOR — the old
+ *      flow let the restart "succeed" (toast 已重新入队), its run hit the
+ *      request gate, and the gate's `ReadyWithInfo -> Error` transition threw
+ *      `IllegalTaskTransitionError`, which `runSafely` turned into a stuck
+ *      `ReadyWithInfo` card with a junk error that fake-succeeded on every
+ *      retry.
  */
 describe('external audit P2 · 畸形 request 不炸 restore / persist', () => {
   /** jitter session with the engine state exposed (restart-refusal pin). */
@@ -893,22 +906,35 @@ describe('external audit P2 · 畸形 request 不炸 restore / persist', () => {
     return { mem, queue, rewrites, engineState };
   };
 
-  it('restore 缺 network、paths 完好的记录：不抛错、记录保留、落盘无 network/proxy', async () => {
+  /**
+   * The four CONSUMED domains (`paths` / `format` / `subtitle` / `advanced`)
+   * intact, NO `network` domain — the shape the D-236 host hook rebuilds.
+   * external online audit follow-up: under the four-domain usability guard
+   * this is the minimal network-less shape restore keeps verbatim; the old
+   * paths-only fixtures (`{paths: …}`) now normalize to `null` exactly like
+   * any other request missing a consumed domain.
+   */
+  const requestWithoutNetwork = (taskId: string): Record<string, unknown> => {
+    const req = request(taskId);
+    return { paths: req.paths, format: req.format, subtitle: req.subtitle, advanced: req.advanced };
+  };
+
+  it('restore 缺 network、四域完好的记录：不抛错、记录保留、落盘无 network/proxy', async () => {
     const { queue, rewrites } = auditSession();
     const snapshot = parse(JSON.stringify({
-      tasks: [{ ...record('t1'), state: 'Canceled', request: { paths: request('t1').paths } }],
+      tasks: [{ ...record('t1'), state: 'Canceled', request: requestWithoutNetwork('t1') }],
     }));
     // Before the fix this restore threw: the final persistSnapshot built the
     // projection over a request whose `network` was missing.
     await expect(queue.restore(snapshot)).resolves.toBe(1);
     // Kept verbatim — a `network`-less request is NOT normalized (the host
     // hook rebuilds it in production).
-    expect(queue.get('t1')?.request).toEqual({ paths: request('t1').paths });
+    expect(queue.get('t1')?.request).toEqual(requestWithoutNetwork('t1'));
     // The restore write landed; the row is in it with no network domain at all.
     expect(rewrites.length).toBeGreaterThanOrEqual(1);
     const persisted = parse(rewrites[rewrites.length - 1] ?? '{}');
     expect(persisted.tasks.map((task) => task.id)).toEqual(['t1']);
-    expect(persisted.tasks[0]?.request).toEqual({ paths: request('t1').paths });
+    expect(persisted.tasks[0]?.request).toEqual(requestWithoutNetwork('t1'));
     expect(JSON.stringify(persisted)).not.toContain('"network"');
     expect(JSON.stringify(persisted)).not.toContain('proxy');
   });
@@ -938,7 +964,7 @@ describe('external audit P2 · 畸形 request 不炸 restore / persist', () => {
       }),
     });
     const snapshot = parse(JSON.stringify({
-      tasks: [{ ...record('t1'), state: 'Canceled', request: { paths: request('t1').paths } }],
+      tasks: [{ ...record('t1'), state: 'Canceled', request: requestWithoutNetwork('t1') }],
     }));
     await expect(queue.restore(snapshot)).resolves.toBe(1);
     expect(queue.get('t1')?.request?.network.proxy).toBe(PROXY);
@@ -975,26 +1001,72 @@ describe('external audit P2 · 畸形 request 不炸 restore / persist', () => {
     }
   });
 
-  it('畸形记录的 restart 被拒绝：零下载、记录保留（D-203 拒绝语义）', async () => {
-    const { queue, engineState } = auditSession();
+  it('域级判定：四域齐（即使全空对象）→ 可用保留原样；paths-only → 归一 null', async () => {
+    const { queue } = auditSession();
     const snapshot = parse(JSON.stringify({
-      tasks: [{ ...record('mg1'), state: 'Canceled', request: 'garbage' }],
+      tasks: [
+        // Four consumed domains present — even EMPTY objects pass: `run()`
+        // reads them as objects, so nothing throws downstream. `network` is
+        // the one domain that may be absent (the host hook rebuilds it).
+        { ...record('ok-4d'), state: 'Canceled', request: { paths: {}, format: {}, subtitle: {}, advanced: {} } },
+        // paths-only: the old paths-only guard kept this verbatim, but the
+        // run's `detectPostprocessed()` reads `format` / `advanced` /
+        // `subtitle` and threw a TypeError on exactly this shape — the same
+        // stuck-card hole the restart door-refusal closes. Restore now
+        // normalizes it to `null` (D-203 semantics, row kept).
+        { ...record('paths-only'), state: 'Canceled', request: { paths: {} } },
+      ],
+    }));
+    await expect(queue.restore(snapshot)).resolves.toBe(2);
+    expect(queue.get('ok-4d')?.request).toEqual({ paths: {}, format: {}, subtitle: {}, advanced: {} });
+    expect(queue.get('paths-only')?.request ?? null).toBeNull();
+    // Row kept either way — the D-203 red line.
+    expect(queue.list().map((task) => task.id).sort()).toEqual(['ok-4d', 'paths-only']);
+    expect(queue.get('paths-only')?.state).toBe('Canceled');
+  });
+
+  it('request=null 记录的 restart 在入口被拒绝：零变更、零下载、状态与 error 保持原状（D-203 拒绝语义）', async () => {
+    const { queue, engineState } = auditSession();
+    // Both origins of a request-less record: a legacy `request: null` row
+    // (landed in ReadyWithInfo — the exact stuck state the audit observed)
+    // and a damaged one the D-268 restore guard normalized.
+    const snapshot = parse(JSON.stringify({
+      tasks: [
+        { ...record('mg-legacy'), state: 'ReadyWithInfo', request: null },
+        { ...record('mg-normalized'), state: 'Canceled', request: 'garbage' },
+      ],
     }));
     await queue.restore(snapshot);
-    expect(queue.get('mg1')?.request ?? null).toBeNull();
-    expect(queue.get('mg1')?.state).toBe('Canceled');
+    expect(queue.get('mg-legacy')?.request ?? null).toBeNull();
+    expect(queue.get('mg-legacy')?.state).toBe('ReadyWithInfo');
+    expect(queue.get('mg-normalized')?.request ?? null).toBeNull();
+    const beforeLegacy = queue.get('mg-legacy');
+    const beforeNormalized = queue.get('mg-normalized');
 
-    await expect(queue.restart('mg1')).resolves.toBeUndefined();
-    // run() refuses at the exact request gate a request-less record hits —
-    // wait until the gate has actually fired (the probe resolved, the refusal
-    // is pinned as the record's error), then assert the refusal contract.
-    for (let i = 0; i < 100 && queue.get('mg1')?.error === null; i += 1) await tick(5);
-    expect(queue.get('mg1')?.error).not.toBeNull();
-    // No download was ever spawned on the normalized record, and the row
-    // itself is kept (never dropped) — the D-203 red line, at queue level.
+    // The refusal is the restart itself — NOT a run-phase gate failure behind
+    // a resolved toast. The message follows the D-263 「任务未能重试：…」
+    // style and names the missing request.
+    await expect(queue.restart('mg-legacy')).rejects.toThrow(/任务未能重试：下载请求缺失或损坏/);
+    await expect(queue.restart('mg-normalized')).rejects.toThrow(/任务未能重试：下载请求缺失或损坏/);
+    // Zero mutation: no transition, no D-107/D-115 field reset, no FIFO slot,
+    // no persist. The old flow transitioned and reset everything, then the
+    // run's request gate threw `IllegalTaskTransitionError` (no
+    // `ReadyWithInfo -> Error` edge), `runSafely` pinned the MIGRATION error
+    // over the gate error and the card stuck in `ReadyWithInfo` forever.
+    expect(queue.get('mg-legacy')).toEqual(beforeLegacy);
+    expect(queue.get('mg-legacy')?.state).toBe('ReadyWithInfo');
+    expect(queue.get('mg-legacy')?.error ?? null).toBeNull();
+    expect(queue.get('mg-normalized')).toEqual(beforeNormalized);
+    expect(queue.get('mg-normalized')?.state).toBe('Canceled');
+    expect(queue.get('mg-normalized')?.error ?? null).toBeNull();
+    expect(queue.isPending('mg-legacy')).toBe(false);
+    expect(queue.isPending('mg-normalized')).toBe(false);
     expect(engineState.downloadCalls).toBe(0);
-    expect(queue.get('mg1')?.state).not.toBe('Running');
-    expect(queue.list().map((task) => task.id)).toEqual(['mg1']);
+    await tick();
+    // Stable: no run is in flight to resurrect either record.
+    expect(queue.get('mg-legacy')).toEqual(beforeLegacy);
+    expect(queue.get('mg-normalized')).toEqual(beforeNormalized);
+    expect(engineState.downloadCalls).toBe(0);
   });
 
   it('畸形记录在场时 enqueue / remove / restart 不再抛「快照写入失败」', async () => {
@@ -1013,12 +1085,16 @@ describe('external audit P2 · 畸形 request 不炸 restore / persist', () => {
     // remove of a malformed record reports success honestly (the write works).
     await expect(queue.remove('mg1')).resolves.toBe(true);
     expect(queue.get('mg1')).toBeUndefined();
-    // restart of the second malformed record proceeds — its RUN is refused by
-    // the request gate (the D-203 refusal), which is not a snapshot failure.
-    await expect(queue.restart('mg2')).resolves.toBeUndefined();
-    for (let i = 0; i < 100 && queue.get('mg2')?.error === null; i += 1) await tick(5);
-    expect(queue.get('mg2')?.error).not.toBeNull();
-    expect(queue.get('mg2')?.state).not.toBe('Running');
+    // restart of the second malformed record is refused AT THE DOOR (its
+    // request is null after the restore normalization) — the rejection is the
+    // door-refusal message, NOT the old fake success and NOT a snapshot-write
+    // failure either: the write path is never even reached.
+    await expect(queue.restart('mg2')).rejects.toThrow(/任务未能重试：下载请求缺失或损坏/);
+    // Zero mutation behind the refusal: the row keeps its restored state, no
+    // junk error, no FIFO slot, no second download.
+    expect(queue.get('mg2')?.state).toBe('Canceled');
+    expect(queue.get('mg2')?.error ?? null).toBeNull();
+    expect(queue.isPending('mg2')).toBe(false);
     // Only t9 ever downloaded; the file agrees with memory.
     expect(engineState.downloadCalls).toBe(1);
     expect(queue.get('t9')?.state).toBe('Running');

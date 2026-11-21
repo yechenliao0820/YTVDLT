@@ -108,50 +108,70 @@ function pathKeyOf(path: string): string {
 
 /**
  * external online audit P3 · bounds for the copy-suffix scan when the output
- * template carries a `/` (`%(extractor)s/%(title)s [%(id)s].%(ext)s` writes
- * into `<videoDir>/<subdir>/`, which the flat readdir never saw — so
+ * template carries a path separator (`%(extractor)s/%(title)s [%(id)s].%(ext)s`
+ * writes into `<videoDir>/<subdir>/`, which the flat readdir never saw — so
  * `nextCopySuffix` returned `''`, yt-dlp printed "has already been downloaded"
  * and exited 0 reusing the OLD file (坑 11 / D-101), and the user got a
  * Completed card without a new file).
  *
  * The scan descends at most `COPY_SUFFIX_SCAN_MAX_DEPTH` directory levels
- * below the output root and touches at most `COPY_SUFFIX_SCAN_MAX_DIRS`
- * readdir targets (each target counts once, whether it turns out to be a
- * readable directory, a file — readdir throws ENOTDIR — or an unreadable
- * entry). Past the bound the scan stops HONESTLY: names already collected
- * stay candidates, the walk just ends, and one WARNING line goes to the log
- * sink so the truncation is visible instead of silent. The bound exists so a
- * pathological tree can never turn a name lookup into a whole-library walk;
- * a flat template (no `/`) never enters this path and keeps the exact
- * pre-existing flat readdir.
+ * below the output root and reads at most `COPY_SUFFIX_SCAN_MAX_DIRS`
+ * directories. external online audit follow-up (D-273 leftover): only a
+ * target that actually READS as a directory consumes the budget — a file
+ * (readdir throws ENOTDIR) or an unreadable entry costs nothing. Counting
+ * every attempt starved real subdirectories: 200+ files whose names sort
+ * before the target subdirectory (the NTFS alphabetical norm) used up the
+ * whole bound before the subdirectory was ever dequeued, its old copy was
+ * never seen and yt-dlp silently reused the file. Past the bound the scan
+ * stops HONESTLY: names already collected stay candidates, the walk just
+ * ends, and one WARNING line goes to the log sink so the truncation is
+ * visible instead of silent — the warning now truthfully means "read 200
+ * real directories". The bound exists so a pathological tree can never turn
+ * a name lookup into a whole-library walk; a flat template (no path
+ * separator) never enters this path and keeps the exact pre-existing flat
+ * readdir.
  */
 const COPY_SUFFIX_SCAN_MAX_DEPTH = 3;
 const COPY_SUFFIX_SCAN_MAX_DIRS = 200;
 
 /**
  * external online audit P2 · malformed request must not break restore/persist
- * (decision number pending): is a restored `request` structurally usable?
+ * (D-268): is a restored `request` structurally usable?
  *
  * `request === null` is the long-standing shape (a legacy request-less
  * record); what this guard adds is the DAMAGED shape — a non-null `request`
- * that is not a plain object, or whose `paths` domain is missing / not an
- * object. Such a value can never drive a run (`run()` and every downstream
+ * that is not a plain object, or whose consumed domains are missing / not
+ * objects. Such a value can never drive a run (`run()` and every downstream
  * reader consume the `paths` / `format` / `subtitle` / `advanced` domains
  * directly) and used to poison `buildPersistProjection()` into throwing on
  * every snapshot write. Restore normalizes it to `null` — the D-203
  * semantics for a request-less record: the row is kept, every run / action on
  * it is refused, nothing is silently dropped. A request whose `network`
- * domain is missing but whose `paths` are intact stays usable ON PURPOSE: the
- * host's `repairRestoredRequest` hook rebuilds `network` from live config
- * (spreading `undefined` is safe), so both the projection's proxy strip and
- * the run itself still get a real domain to work with.
+ * domain is missing stays usable ON PURPOSE: the host's
+ * `repairRestoredRequest` hook rebuilds `network` from live config (spreading
+ * `undefined` is safe), so both the projection's proxy strip and the run
+ * itself still get a real domain to work with.
+ *
+ * external online audit follow-up (D-268 leftover): the guard checks ALL FOUR
+ * consumed domains (`paths` + `format` + `subtitle` + `advanced`), aligned
+ * with TaskStore's D-161 domain-level sanitize but WITHOUT clearing
+ * `artifacts` and without touching the D-203 semantics. The original
+ * paths-only check let a `{paths:{…}}` snapshot through restore and into
+ * `run()`, where `detectPostprocessed()` reads the `format` / `advanced` /
+ * `subtitle` domains and threw a TypeError — which landed in the same
+ * stuck-card shape the `restart()` door-refusal now closes. A domain missing
+ * here is normalized to `null` at the restore layer, before any reader.
  */
 function restoredRequestIsUsable(
   value: DownloadRequest | null | undefined,
 ): value is DownloadRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const paths: unknown = (value as { paths?: unknown }).paths;
-  return typeof paths === 'object' && paths !== null && !Array.isArray(paths);
+  const domains = value as unknown as Record<string, unknown>;
+  for (const key of ['paths', 'format', 'subtitle', 'advanced'] as const) {
+    const domain: unknown = domains[key];
+    if (typeof domain !== 'object' || domain === null || Array.isArray(domain)) return false;
+  }
+  return true;
 }
 
 export class TaskQueue implements ITaskQueue {
@@ -848,8 +868,9 @@ export class TaskQueue implements ITaskQueue {
    * also includes RUNNING twins' claims — their partials sit in their own
    * tempDir and are invisible to readdir, which let two concurrent downloads
    * of the same video pick the same final name. external online audit P3: a
-   * template containing `/` writes into a subdirectory of the output root
-   * (`%(extractor)s/…`, a static `Sub/…`), so the scan follows the tree down —
+   * template containing a path separator (`/` or `\`) writes into a
+   * subdirectory of the output root (`%(extractor)s/…`, a static `Sub/…`), so
+   * the scan follows the tree down —
    * bounded (`COPY_SUFFIX_SCAN_*`) — instead of only looking at the root; a
    * flat template keeps the exact flat readdir it always was. Anything
    * unexpected (custom template without the id token, unreadable directory,
@@ -869,9 +890,14 @@ export class TaskQueue implements ITaskQueue {
     const dir = request.format.extractAudio ? request.paths.audioDir : request.paths.videoDir;
     if (typeof dir !== 'string' || dir.trim() === '') return request;
 
-    // Flat templates keep the byte-identical fast path; a template with a `/`
-    // descends into the subdirectories it will actually write into.
-    const names: readonly string[] = template.includes('/')
+    // Flat templates keep the byte-identical fast path; a template carrying a
+    // path separator descends into the subdirectories it will actually write
+    // into. external online audit follow-up (D-273 leftover): the check is
+    // separator-CLASS based (`/` OR `\`) — the request sanitizer never
+    // rewrites `\`, so a hand-edited `Sub\%(title)s…` config template used to
+    // take the flat readdir while its files land in `<dir>\Sub\` and the old
+    // copy was never seen.
+    const names: readonly string[] = /[\\/]/.test(template)
       ? await this.scanOutputTreeForCopySuffix(dir)
       : await this.readOutputDirForCopySuffix(dir);
     // D-237: a concurrent twin is invisible to readdir (its partials live in
@@ -908,16 +934,20 @@ export class TaskQueue implements ITaskQueue {
    * candidates when the template writes into subdirectories.
    *
    * Breadth-first from the output root, collecting the readdir names of every
-   * directory reachable within `COPY_SUFFIX_SCAN_MAX_DEPTH` levels; each
-   * readdir target counts once toward `COPY_SUFFIX_SCAN_MAX_DIRS` whether it is
-   * a readable directory, a file (readdir throws ENOTDIR) or an unreadable
-   * entry — the catch-and-skip is the same style the flat scan has always
-   * used. Candidates are BARE names: `nextCopySuffix` matches the `[<id>]`
-   * token in the NAME, not the path, so names from different levels collapse
-   * into one candidate list. Past the bound the walk stops with the names
-   * already collected and logs one `copySuffix.scanTruncated` WARNING through
-   * the existing logSink facility (same line shape as the persist-failure and
-   * containment warnings) — the truncation is reported, never silent.
+   * directory reachable within `COPY_SUFFIX_SCAN_MAX_DEPTH` levels. Only a
+   * target that actually READS as a directory counts toward
+   * `COPY_SUFFIX_SCAN_MAX_DIRS`; a file (readdir throws ENOTDIR) or an
+   * unreadable entry costs nothing — the catch-and-skip is the same style the
+   * flat scan has always used, and a failed attempt no longer eats the budget
+   * that a later target subdirectory still needs (external online audit
+   * follow-up: per-attempt budgeting let 200 files sorted ahead of the target
+   * subdirectory starve it past the bound). Candidates are BARE names:
+   * `nextCopySuffix` matches the `[<id>]` token in the NAME, not the path, so
+   * names from different levels collapse into one candidate list. Past the
+   * bound the walk stops with the names already collected and logs one
+   * `copySuffix.scanTruncated` WARNING through the existing logSink facility
+   * (same line shape as the persist-failure and containment warnings) — the
+   * truncation is reported, never silent.
    */
   private async scanOutputTreeForCopySuffix(root: string): Promise<readonly string[]> {
     const names: string[] = [];
@@ -931,15 +961,18 @@ export class TaskQueue implements ITaskQueue {
       }
       const next = pending.shift();
       if (next === undefined) break;
-      visited += 1;
       let entries: readonly string[];
       try {
         entries = await this.deps.ports.fs.readdir(next.dir);
       } catch {
         // A file (ENOTDIR) or an unreadable directory: no names here and no
         // descent — the flat scan's catch style, extended to the tree walk.
+        // This attempt does NOT consume the budget: only directories that
+        // actually read do, so files (or unreadable entries) sorted ahead of
+        // a target subdirectory can never starve it past the bound.
         continue;
       }
+      visited += 1;
       const parent = `${next.dir.replace(/[\\/]+$/, '')}/`;
       for (const entry of entries) {
         if (typeof entry !== 'string' || entry === '') continue;
@@ -1222,6 +1255,27 @@ export class TaskQueue implements ITaskQueue {
   async restart(taskId: string): Promise<void> {
     const record = this.records.get(taskId);
     if (record === undefined) throw new Error(`unknown task: ${taskId}`);
+    // external online audit follow-up (D-268 leftover): a record whose
+    // `request` is `null` (a legacy request-less row, or a damaged one the
+    // D-268 restore guard normalized) used to restart "successfully" — the
+    // transitions and field resets all ran and the toast said 已重新入队 —
+    // and then its run hit the request gate in `run()`, which pins the error
+    // and calls `transition(record, 'Error')`. From `ReadyWithInfo` that edge
+    // does not exist, so the gate's own refusal threw
+    // `IllegalTaskTransitionError`, `runSafely` caught it, OVERWROTE the gate
+    // error with the migration error and swallowed the second transition too:
+    // the row settled in `ReadyWithInfo` forever with a junk error, and every
+    // retry fake-succeeded. Refuse at the door instead — BEFORE `before` is
+    // captured, before any transition or field reset, so there is nothing to
+    // roll back: the record keeps its exact pre-restart state and error, no
+    // run is spawned, and the throw is honest. The message mirrors the D-263
+    // 「任务未能重试：…」 style; `task-detail`'s retry converts the throw into
+    // the REFUSED result the card shows (same path the D-263 write failure
+    // takes). Records with a real request are untouched: the Canceled / Error
+    // / Idle restart paths below behave exactly as before.
+    if (record.request === null) {
+      throw new Error('任务未能重试：下载请求缺失或损坏，无法安全重启');
+    }
     // D-142: a record may still occupy a slot while its STATE looks settled —
     // the window between a successful cancel and the engine's close event, or
     // a cancel whose kill failed (the record then stays in its non-terminal
@@ -1388,9 +1442,10 @@ export class TaskQueue implements ITaskQueue {
       // loses the proxy nor revives a removed one.
       //
       // external online audit P2 · malformed request must not break
-      // restore/persist (decision number pending): a row whose `request` is
-      // non-null but UNUSABLE — not a plain object, or `paths` missing / not
-      // an object — is normalized to `null` here, BEFORE the host hook or any
+      // restore/persist (D-268): a row whose `request` is non-null but
+      // UNUSABLE — not a plain object, or any of the four consumed domains
+      // (`paths` / `format` / `subtitle` / `advanced`) missing / not an
+      // object — is normalized to `null` here, BEFORE the host hook or any
       // later reader ever sees it. This is exactly the D-203 semantics for a
       // request-less record: the row itself is kept (never silently dropped),
       // every run / TASK_ACTION on it refuses, the UI shows 「无法验证归属」.
@@ -1398,9 +1453,9 @@ export class TaskQueue implements ITaskQueue {
       // row made this method's final `persistSnapshot()` (D-242 / D-259 /
       // D-263 rethrow write failures) blow up the whole boot and then report
       // 「快照写入失败」 for every later structural write. `network` missing
-      // with intact `paths` is deliberately NOT normalized: the host's
-      // `repairRestoredRequest` hook rebuilds that domain from live config, so
-      // the row stays fully usable.
+      // with the four consumed domains intact is deliberately NOT normalized:
+      // the host's `repairRestoredRequest` hook rebuilds that domain from live
+      // config, so the row stays fully usable.
       const request = restoredRequestIsUsable(raw.request)
         ? (this.deps.repairRestoredRequest === undefined
           ? raw.request
