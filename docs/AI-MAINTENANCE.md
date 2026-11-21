@@ -243,6 +243,7 @@ ui（零依赖） ← preload ← apps/desktop
 | **切语言 / 启动瞬间冒出 6 条演示任务** | ① `queue.js::tasks()` 的 live 分支是否又回退到 `SAMPLE`（fixture 常量在 `queue-model.js`）② 是否在首条 `TASK_LIST` 回来前就 `render()` ③ 详情页是否把 `index.html` 里的 fixture 值直接画了出来 | 截图 fixture 只服务 `file://` 静态基线；live 模式「还不知道」必须是空白 / `data-state="loading"`，**绝不允许**用样例数据顶替（D-141） | 再查首条回复是否被 paint-key 吞掉（空队列尤其）、2.5 s 看门狗有没有转错误态 |
 | **「下载并安装」看不到下载进度** | ① 设置页刷新定时器是否只认 `phase`——`download` 要等整包下载完才 resolve，期间 `data-update-state` 恒为 `available`，条件自锁 ② 弹窗轮询间隔（下载中应为 0.8 s）③ 缓存命中会直接跳 `ready`，本来就没有进度 | 用「phase 决定要不要去读 phase」就是自锁；`appBusy` 才是 action 未返回期间的唯一信号 | 再查 `onProgress` 是否更新 `downloadedBytes`、`totalBytes` 是否为 null（百分比会恒 0） |
 | **设置页选目录被拒「所选目录是盘符根或共享根…」** | ① 这不是 bug，是 D-211 有意拒绝——选其中的具体文件夹即可 | 盘符根/裸 UNC 共享根会让产物封链门把每个下载判越界（旧行为：配置照写、下载全败、报错误导） | 若确需整盘做下载目录，属产品决策变更：先在 `DECISIONS.md` 立新决策，再动 `isSpecificRoot` 语义 |
+| **L2 集成验收（真实 yt-dlp）大面积 502 / 进度超时假红** | ① 系统代理是否开着（`ProxyEnable` / Clash 类工具）② 把失败用例隔离复跑是否全绿 | 代理把发往 127.0.0.1 测试服务器的请求转发出去再吃 502，是环境不是代码（原理见 §9 坑 45） | 给验收进程套 env 直连重跑（坑 45）；**不要动用户的系统代理设置** |
 
 ---
 
@@ -532,6 +533,8 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 43. **「配置里有两个同名开关」时先找写方，再找读方**（D-229，隐私承诺失效级）：`general.privateMode` 由界面写、`paths.privateMode` 由任务构建读，双方从不对齐——开关亮着、记录照样落盘、文件照样进普通目录。判断一个开关是不是活的：`grep -rn "<key>" apps packages | grep -v dist` 里必须同时出现**写方**（`SETTINGS_SET` 白名单 + handler）和**读方**（请求 / 计划 / 路径），只有一边就是断线。同一族的第二坑：**「读出来的常量」也可能是令牌**——私有目录常量是 `%LOCALAPPDATA%/…`，spawn 不经 shell（坑 3 / D-79），令牌原样进 `-P` 会建出字面量目录，随后被产物封链门判「根外」让每个任务失败。任何要进 argv 的路径都必须是**已经展开的绝对路径**，展开点在入口（`readDefaults`），纯计划器只负责拼根与模板。
 
 44. **`setAttribute('hidden','false')` 显示不了没有自带 display 规则的元素**（D-251）：UA 样式表对 `hidden` **属性存在即隐藏**（不看值），作者样式表的 `display:*` 规则才压得过它。本仓库约定用 `hidden='true'/'false'` 字符串切换（页面 CSS 只有 `[hidden="true"]{display:none!important}`），所以成立的**成对条件**是：元素自身要有作者 `display` 规则（`.detail-grid` 的 `display:grid`、`.actions` 的 `display:flex` 正是这么工作的）；对没有 display 规则的裸元素（如 `<pre id="ytvdlt-output">`），显示时必须显式带 `display:block`（D-251 的状态条即范例）或改用 `removeAttribute('hidden')`。假 DOM 测试两者都看不出差别——这类回归只在真机可见。
+
+45. **系统代理（Clash 类 `127.0.0.1:7897`）会让 L2 集成验收假红**（2026-11-21 实测）：验收里的真实 yt-dlp 子进程不发 `--proxy` 时读 **Windows 系统代理**（注册表 `ProxyEnable`），把发往 `127.0.0.1` 测试服务器的请求转发给代理 → 大批 `HTTP Error 502: Bad Gateway` / 进度等待超时的**假失败**；单测与 e2e 不受影响（不走真实网络栈），隔离复跑单个用例全绿即可证与代码无关。处理：**不要动用户的系统代理设置**（那是用户正在用的网络工具），给验收进程套进程级 env 强制直连——`http_proxy` / `https_proxy` 设哑值（如 `http://127.0.0.1:9`）+ `no_proxy='127.0.0.1,localhost'`：urllib/requests 看到非空 env 代理就不再回落注册表，no_proxy 又放行本地直连。系统代理开关一天一个样，这条坑会「时红时绿」——验收假红先查它。
 
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
