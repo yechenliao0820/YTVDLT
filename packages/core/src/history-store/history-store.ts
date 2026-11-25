@@ -286,17 +286,30 @@ export class HistoryStore implements IHistoryStore {
   }
 
   /**
-   * Import with dedupe; returns the number of newly added entries.
+   * Import with dedupe; reports how many entries were added and how many were
+   * rejected as unusable.
    * Same persist-first, commit-after contract as `add()`/`remove()`: the old
    * code pushed straight into `this.entries` before persisting, which on a
    * persist failure left imported rows in memory but not on disk. The queue
    * task now builds the next array, persists it and only then commits.
+   *
+   * D-277 (external audit P3, 2026-11-22 round): elements are validated with
+   * the SAME `isUsableHistoryEntry` predicate the load path uses (D-271)
+   * BEFORE they can enter the store. Previously an entry with a `videoPath`
+   * but no `completedAt` was imported verbatim and crashed `applyQuery`'s
+   * newest-first sort (`b.completedAt.localeCompare` dereferences the field on
+   * EVERY comparison), and an element without a string `videoPath` crashed
+   * `dedupeKey` itself. Unusable elements are rejected, counted, and never
+   * touch the memory or the disk. D-274 had registered this as a P4 ("改它需
+   * 另立决策"); that decision is this one.
    */
-  async importJson(json: string): Promise<number> {
+  async importJson(json: string): Promise<{ added: number; rejected: number }> {
     await this.init();
     const parsed: unknown = JSON.parse(json);
     const candidate = parsed as Partial<HistoryFile>;
-    const incoming = Array.isArray(candidate.entries) ? candidate.entries : [];
+    const rawElements: unknown[] = Array.isArray(candidate.entries) ? candidate.entries : [];
+    const incoming = rawElements.filter(isUsableHistoryEntry);
+    const rejected = rawElements.length - incoming.length;
     return this.enqueue(async () => {
       const seen = new Set(this.entries.map((entry) => dedupeKey(entry)));
       const next = [...this.entries];
@@ -312,7 +325,7 @@ export class HistoryStore implements IHistoryStore {
         await this.persist(next); // persist the would-be state first
         this.entries = next;      // commit memory only after the write succeeded
       }
-      return added;
+      return { added, rejected };
     });
   }
 

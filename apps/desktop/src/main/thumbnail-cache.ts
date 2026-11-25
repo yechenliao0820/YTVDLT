@@ -84,7 +84,7 @@ import type { HttpPort } from '@ytvdlt/shared';
 import { isPublicHttpsUrl } from './adapters/http-policy.js';
 import { upgradeThumbnailUrl } from './thumbnail-url.js';
 import {
-  coverNamesOwnedOnlyBy,
+  coverNamesOwnedOnlyBy, isMissingFileError,
   normalizeThumbnailCachePolicy, planThumbnailPrune,
   type ThumbnailCacheEntry, type ThumbnailCachePolicy, type ILogger,
 } from '@ytvdlt/core';
@@ -313,7 +313,14 @@ function isSafeCacheName(name: string): boolean {
 
 function parseIndex(raw: string): IndexFile {
   const parsed: unknown = JSON.parse(raw);
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return emptyIndex();
+  // D-276: a TOP-LEVEL unusable file (unparsable JSON, or JSON that is not an
+  // object) must reach the caller as a failure so the raw bytes get backed up
+  // before recovery — silently returning an empty index here was exactly the
+  // "markers evaporated without a trace" path. Per-ENTRY problems below stay
+  // quarantined: one malformed entry never poisons the rest of the file.
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('thumbnail index: not a JSON object');
+  }
   const record = parsed as Record<string, unknown>;
   const rawEntries = record['entries'];
   const entries: Record<string, IndexEntry> = {};
@@ -387,12 +394,79 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
     return normalizeThumbnailCachePolicy(raw, now());
   }
 
-  async function readIndex(): Promise<IndexFile> {
-    try { return parseIndex(await readFile(indexPath, 'utf8')); }
-    catch { return emptyIndex(); }
+  /**
+   * What the boot read found. D-276 (external audit P2, 2026-11-22 round):
+   * these states are no longer collapsed into one silent `emptyIndex()`:
+   *   - `absent`    — no index.json yet (first run): nothing to preserve.
+   *   - `ok`        — parsed fine (element-level quarantine inside parseIndex
+   *                   stays as it was: one bad ENTRY never poisons the file).
+   *   - `corrupt`   — the file was READ but did not parse as an index. Its
+   *                   raw bytes are preserved (`raw`) and a byte-level backup
+   *                   is written before the recovered (empty) index may
+   *                   overwrite anything — the same idiom as D-159 / D-230 /
+   *                   D-249. Losing this distinction was a privacy hole: the
+   *                   `purgePending` / `purgeSticky` markers live in this file,
+   *                   and silently starting from an empty index both erased
+   *                   them and let the next write overwrite the evidence.
+   *   - `unreadable` — a real read failure (EACCES / EBUSY / EIO …). Writes
+   *                   are BLOCKED until a later read succeeds (D-246 style):
+   *                   overwriting a file this process never saw could destroy
+   *                   purge markers it still holds.
+   */
+  type IndexReadState = 'absent' | 'ok' | 'corrupt' | 'unreadable';
+
+  async function readIndex(): Promise<{ file: IndexFile; state: IndexReadState; raw: string | null }> {
+    let raw: string;
+    try {
+      raw = await readFile(indexPath, 'utf8');
+    } catch (error) {
+      if (isMissingFileError(error)) return { file: emptyIndex(), state: 'absent', raw: null };
+      return { file: emptyIndex(), state: 'unreadable', raw: null };
+    }
+    try {
+      return { file: parseIndex(raw), state: 'ok', raw: null };
+    } catch {
+      return { file: emptyIndex(), state: 'corrupt', raw };
+    }
   }
 
+  /**
+   * D-276: preserve the bytes of an unparsable index.json BEFORE the recovered
+   * index can be written over them (D-159 idiom). Never deletes anything; the
+   * backup is not a cache-image name, so `scanDisk()` and the prune rules
+   * ignore it. One attempt per session (a collision gets `-2`, `-3`, …).
+   */
+  async function preserveCorruptIndex(raw: string): Promise<void> {
+    const stamp = new Date(now()).toISOString().replace(/[:.]/g, '-');
+    for (let attempt = 1; attempt <= 9; attempt += 1) {
+      const backupName = attempt === 1
+        ? `index.corrupt-${stamp}.json`
+        : `index.corrupt-${stamp}-${attempt}.json`;
+      try {
+        await writeFile(join(dir, backupName), raw, 'utf8');
+        await logger.warn('thumbnail-cache', 'index.json failed to parse; original preserved as a .corrupt backup — purge markers it held are NOT recoverable from the live index until the file is restored', {
+          backup: backupName,
+        });
+        return;
+      } catch { /* next name; if every name fails the WARNING below still fires */ }
+    }
+    await logger.warn('thumbnail-cache', 'index.json failed to parse AND the corrupt-original backup could not be written; proceeding with an empty recovered index', {});
+  }
+
+  /**
+   * D-276: while the index file exists but cannot be READ (EACCES / EBUSY /
+   * EIO …), every write is blocked. Overwriting a file this process never saw
+   * could destroy `purgePending` markers it still holds — the exact "silent
+   * privacy-marker loss" this decision closes. The block lifts as soon as a
+   * later `readIndex()` succeeds (see `commitIndex`'s retry), mirroring
+   * D-246's "读错误阻断写入并清 memo 可重试".
+   */
+  let indexUnreadable = false;
+
   async function writeIndex(): Promise<void> {
+    if (indexUnreadable) {
+      throw new Error('thumbnail index unreadable; overwrite blocked to preserve possible purge markers (D-276)');
+    }
     await mkdir(dir, { recursive: true });
     const temp = `${indexPath}.tmp`;
     await writeFile(temp, `${JSON.stringify(index, null, 2)}\n`, 'utf8');
@@ -411,6 +485,25 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
    */
   function commitIndex(mutate: (current: IndexFile) => void): Promise<boolean> {
     const step = writeChain.then(async () => {
+      // D-276: a session that booted against an unreadable index retries the
+      // read here, serialized by the write chain. 'absent' / 'ok' lift the
+      // block and adopt the disk state (the in-memory `byTask` map re-links
+      // its references through the next `reconcile()`); 'corrupt' gets the
+      // same backup-then-recover treatment as a corrupt boot. A STILL
+      // unreadable file keeps the block — the disk write is skipped, but the
+      // in-memory mutation IS applied first: the D-258 purge contract depends
+      // on "marked in memory, disk without the marker" so the caller sees
+      // `false` and skips the byte deletion honestly.
+      if (indexUnreadable) {
+        const retry = await readIndex();
+        if (retry.state === 'unreadable') {
+          mutate(index);
+          throw new Error('thumbnail index still unreadable; write remains blocked (D-276)');
+        }
+        indexUnreadable = false;
+        index = retry.file;
+        if (retry.state === 'corrupt') await preserveCorruptIndex(retry.raw ?? '');
+      }
       mutate(index);
       await writeIndex();
       return true;
@@ -482,11 +575,25 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
     }
   }
 
-  /** Load once at construction; every async method awaits this. */
-  const indexReady = readIndex().then(async (loaded) => {
-    index = loaded;
+  /**
+   * Load once at construction; every async method awaits this. D-276: the
+   * boot read is CLASSIFIED now — a corrupt file is preserved as a byte-level
+   * backup before the recovered (empty) index may be written, and an
+   * unreadable file latches `indexUnreadable` so nothing can overwrite bytes
+   * this process never saw. Both states log a WARNING: losing purge markers
+   * silently is what turned an index hiccup into a privacy-hole audit finding.
+   */
+  const indexReady = (async () => {
+    const loaded = await readIndex();
+    index = loaded.file;
+    if (loaded.state === 'corrupt') {
+      await preserveCorruptIndex(loaded.raw ?? '');
+    } else if (loaded.state === 'unreadable') {
+      indexUnreadable = true;
+      await logger.warn('thumbnail-cache', 'index.json cannot be read; index writes are blocked until a read succeeds — purge markers it may hold stay untouched (D-276)', {});
+    }
     await reconcile();
-  }).catch(() => { index = emptyIndex(); });
+  })().catch(() => { index = emptyIndex(); });
 
   /**
    * D-258: every reference the cache currently knows for `name` — the index

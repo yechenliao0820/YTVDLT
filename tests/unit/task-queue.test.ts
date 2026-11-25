@@ -858,6 +858,60 @@ describe('external online audit P3 · 模板子目录：副本扫描跟随模板
     expect(engineState.lastRequest?.paths.outputTemplate).toBe('Sub\\%(title)s [%(id)s]_(1).%(ext)s');
     expect(queue.get('t1')?.state).toBe('Completed');
   });
+
+  it('D-275 · 分类目录开关（子目录层在 -o 前缀里）同样触发树扫描拿到 (1)', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    mem.state.files.set('C:/out/YouTube/Title [fixture].mp4', 'old-bytes');
+    // The categorized-directory switches put their subdirectory layers into
+    // the `-o` template PREFIX (built inside the plan), so the REQUEST
+    // template itself stays flat. The old separator test alone took the flat
+    // readdir, never saw `<dir>/<extractor>/`, and yt-dlp silently reused the
+    // old file — the D-273 symptom, one decision later.
+    const base = record('t1');
+    const req = base.request;
+    expect(req).not.toBeNull();
+    await queue.enqueue({
+      ...base,
+      request: {
+        ...req!,
+        paths: { ...req!.paths, outputTemplate: '%(title)s [%(id)s].%(ext)s', subdirByExtractor: true },
+      },
+    });
+    await tick();
+    // The suffix lands in the REQUEST template (the plan adds the -o prefix
+    // on top when building argv).
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(title)s [%(id)s]_(1).%(ext)s');
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+
+  it('D-278 · 总条目预算：一个 readdir 返回的超大目录在 10000 条目处如实截断，不再逐条 ENOTDIR', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    // 10_050 entries inside ONE directory: the per-directory budget (200) is
+    // untouched by this, so before D-278 the walk pushed every name into the
+    // pending queue and paid one readdir attempt (ENOTDIR on a real fs) per
+    // file. The entry bound stops the walk after 10_000 collected names.
+    for (let i = 0; i < 10_050; i += 1) {
+      mem.state.files.set(`C:/out/f${String(i).padStart(5, '0')}.mp4`, 'junk');
+    }
+    mem.state.files.set('C:/out/Title [fixture].mp4', 'old-bytes');
+    await queue.enqueue(recordWithTemplate('t1', DYNAMIC));
+    await tick();
+    const line = mem.state.logLines.find((l) => l.includes('copySuffix.scanTruncated'));
+    expect(line).toBeDefined();
+    const payload = JSON.parse(line!).payload as { visited: number; encountered: number; collected: number; entryLimit: number };
+    // Only the root itself was read; the 10_000 bound (not the 200-dir bound)
+    // stopped the walk, and the collected list is capped at the bound.
+    expect(payload.visited).toBe(1);
+    expect(payload.entryLimit).toBe(10_000);
+    expect(payload.encountered).toBe(10_000);
+    expect(payload.collected).toBe(10_000);
+    // Truncation is honest, not fatal: the task still completes. The old copy
+    // sat BEYOND the bound (insertion order), so it was never seen — the
+    // documented D-101 fallback applies: no suffix, yt-dlp may reuse the old
+    // file, and nothing is corrupted.
+    expect(queue.get('t1')?.state).toBe('Completed');
+    expect(engineState.lastRequest?.paths.outputTemplate).toBe('%(extractor)s/%(title)s [%(id)s].%(ext)s');
+  });
 });
 
 // --- T2 · persistSnapshot failure is visible, never fatal -------------------
@@ -974,7 +1028,7 @@ describe('audit · an error pinned by runSafely reaches the persisted snapshot',
       get: (id: string) => history.get(id),
       remove: (id: string) => history.remove(id),
       exportJson: (): Promise<string> => history.exportJson(),
-      importJson: (json: string): Promise<number> => history.importJson(json),
+      importJson: (json: string): Promise<{ added: number; rejected: number }> => history.importJson(json),
     };
     const queue = new TaskQueue({
       ports: mem.ports, engine: fakeEngine(engineState), verifier: okVerifier(),

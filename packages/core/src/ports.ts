@@ -144,7 +144,18 @@ export interface IHistoryStore {
    */
   remove(id: string): Promise<boolean>;
   exportJson(): Promise<string>;
-  importJson(json: string): Promise<number>;
+  /**
+   * D-277 (external audit P3, 2026-11-22 round): every incoming element is
+   * validated with the SAME `isUsableHistoryEntry` predicate the load path
+   * uses (D-271) BEFORE it can enter the history — an element without a string
+   * `videoPath` / `completedAt` is rejected, not imported (a `completedAt`
+   * -less row would crash `applyQuery`'s newest-first sort on every
+   * comparison). The report counts both sides honestly: `added` is the number
+   * of NEW rows that entered the store and the disk, `rejected` the number of
+   * incoming elements that failed validation (deduped rows are neither added
+   * nor rejected).
+   */
+  importJson(json: string): Promise<{ added: number; rejected: number }>;
 }
 
 /**

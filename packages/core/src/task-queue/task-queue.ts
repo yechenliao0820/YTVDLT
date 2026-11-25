@@ -133,6 +133,19 @@ function pathKeyOf(path: string): string {
  */
 const COPY_SUFFIX_SCAN_MAX_DEPTH = 3;
 const COPY_SUFFIX_SCAN_MAX_DIRS = 200;
+/**
+ * D-278 (external audit P3, 2026-11-22 round): the walk ALSO stops after this
+ * many file-system ENTRIES (names collected from successful readdirs). The
+ * per-directory budget above bounds how many DIRECTORIES are read, but a
+ * single directory whose readdir returns hundreds of thousands of names would
+ * still push every one of them into the candidate list and the pending queue —
+ * hundreds of thousands of guaranteed-ENOTDIR readdir attempts on the files
+ * among them. One bounded number for total entries closes that: past the
+ * bound the walk stops, the truncation WARNING reports both counters, and the
+ * unseen remainder falls back to the documented D-101 behaviour (an unseen old
+ * copy means yt-dlp may reuse it — never data corruption).
+ */
+const COPY_SUFFIX_SCAN_MAX_ENTRIES = 10_000;
 
 /**
  * external online audit P2 · malformed request must not break restore/persist
@@ -897,7 +910,15 @@ export class TaskQueue implements ITaskQueue {
     // rewrites `\`, so a hand-edited `Sub\%(title)s…` config template used to
     // take the flat readdir while its files land in `<dir>\Sub\` and the old
     // copy was never seen.
-    const names: readonly string[] = /[\\/]/.test(template)
+    // D-275: the categorized-directory switches ALSO descend now. Their
+    // subdirectory layers ride the `-o` template PREFIX built inside the plan
+    // (`categorizedTemplatePrefix`), so the REQUEST template itself can stay
+    // flat — the separator test alone would take the flat readdir while the
+    // real files land in `<dir>/<extractor>[/<playlist>]\` and the old copy
+    // was never seen.
+    const names: readonly string[] = (/[\\/]/.test(template)
+      || request.paths.subdirByExtractor === true
+      || request.paths.subdirByPlaylist === true)
       ? await this.scanOutputTreeForCopySuffix(dir)
       : await this.readOutputDirForCopySuffix(dir);
     // D-237: a concurrent twin is invisible to readdir (its partials live in
@@ -948,19 +969,29 @@ export class TaskQueue implements ITaskQueue {
    * `copySuffix.scanTruncated` WARNING through the existing logSink facility
    * (same line shape as the persist-failure and containment warnings) — the
    * truncation is reported, never silent.
+   *
+   * D-278 (external audit P3, second round): the walk additionally stops at
+   * `COPY_SUFFIX_SCAN_MAX_ENTRIES` total entries (see the constant), and the
+   * pending queue is drained with an index CURSOR instead of `shift()` — one
+   * readdir of a huge directory pushes every name into the queue, and shift()
+   * would make each dequeue O(n) for a quadratic total. Nothing is removed
+   * from the array; the cursor simply walks it forward, so visit order is
+   * byte-identical to the shift() version.
    */
   private async scanOutputTreeForCopySuffix(root: string): Promise<readonly string[]> {
     const names: string[] = [];
     const pending: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
     let visited = 0;
+    let encountered = 0;
+    let cursor = 0;
     let truncated = false;
-    while (pending.length > 0) {
-      if (visited >= COPY_SUFFIX_SCAN_MAX_DIRS) {
+    while (cursor < pending.length) {
+      if (visited >= COPY_SUFFIX_SCAN_MAX_DIRS || encountered >= COPY_SUFFIX_SCAN_MAX_ENTRIES) {
         truncated = true;
         break;
       }
-      const next = pending.shift();
-      if (next === undefined) break;
+      const next = pending[cursor];
+      cursor += 1;
       let entries: readonly string[];
       try {
         entries = await this.deps.ports.fs.readdir(next.dir);
@@ -976,6 +1007,10 @@ export class TaskQueue implements ITaskQueue {
       const parent = `${next.dir.replace(/[\\/]+$/, '')}/`;
       for (const entry of entries) {
         if (typeof entry !== 'string' || entry === '') continue;
+        // Total-entry bound (D-278): stop BEFORE the pending queue and the
+        // candidate list can grow without limit on a huge directory.
+        if (encountered >= COPY_SUFFIX_SCAN_MAX_ENTRIES) break;
+        encountered += 1;
         names.push(entry);
         if (next.depth < COPY_SUFFIX_SCAN_MAX_DEPTH) {
           pending.push({ dir: `${parent}${entry}`, depth: next.depth + 1 });
@@ -994,6 +1029,8 @@ export class TaskQueue implements ITaskQueue {
             limit: COPY_SUFFIX_SCAN_MAX_DIRS,
             depth: COPY_SUFFIX_SCAN_MAX_DEPTH,
             collected: names.length,
+            encountered,
+            entryLimit: COPY_SUFFIX_SCAN_MAX_ENTRIES,
           },
         }));
       } catch { /* a dead log sink must not break the run */ }

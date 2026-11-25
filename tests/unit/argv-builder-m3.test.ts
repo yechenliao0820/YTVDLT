@@ -217,9 +217,16 @@ const CODEC_FIELD: Readonly<Record<string, string>> = {
 // M4-0 / QA-D2: no mirror table — the implementation's exported map is the
 // single source of truth, so a drifted `abr~` value fails the test immediately.
 const ABR_FIELD: Readonly<Record<string, string | null>> = AUDIO_BITRATE_FIELDS;
+// D-275: `-P` carries the ROOT for every combination; the categorized layers
+// ride the `-o` TEMPLATE instead (the engine does not field-expand `-P`).
 const EXPECTED_DIRS: readonly string[] = [
-  'C:/V', 'C:/V/%(extractor_key)s', 'C:/V/%(playlist)s',
-  'C:/V/%(extractor_key)s/%(playlist)s',
+  'C:/V', 'C:/V', 'C:/V', 'C:/V',
+];
+const EXPECTED_TEMPLATES: readonly string[] = [
+  '%(title)s.%(ext)s',
+  '%(extractor_key)s/%(title)s.%(ext)s',
+  '%(playlist|)s/%(title)s.%(ext)s',
+  '%(extractor_key)s/%(playlist|)s/%(title)s.%(ext)s',
 ];
 
 function combinationRequest(index: number): DownloadRequest {
@@ -286,8 +293,10 @@ describe('B3 · 64 combination cases (8 x 2 x 6 x 5 x 4, all dimensions enumerat
       else expect(argv[argv.indexOf('--convert-subs') + 1]).toBe(convertTo);
       expect(argv.filter((x) => x === '--write-subs')).toHaveLength(1);
 
-      // path 4 combinations.
+      // path 4 combinations (D-275): the root is constant in `-P`; the layers
+      // show up in the `-o` template per combo.
       expect(argv[argv.indexOf('-P') + 1]).toBe(EXPECTED_DIRS[index % 4]);
+      expect(argv[argv.indexOf('-o') + 1]).toBe(EXPECTED_TEMPLATES[index % 4]);
       expect(argv).not.toContain('--restrict-filenames');
       expect(argv).not.toContain('--ppa');
       expect(argv.some((x) => x.startsWith('temp:'))).toBe(false);

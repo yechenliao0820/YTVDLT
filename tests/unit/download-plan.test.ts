@@ -373,15 +373,40 @@ describe('B1 · network / advanced / path derivation', () => {
     expect(plan.downloadArchive).toBe('C:/archive.txt');
   });
 
-  it('buildOutputDir 4 combinations (00/10/01/11)', () => {
+  it('D-275 · categorized layers ride the -o template, -P keeps the bare root (4 combos)', () => {
     const base = { subdirByExtractor: false, subdirByPlaylist: false };
-    expect(resolveDownloadPlan(req({ paths: paths(base) })).outputDir).toBe('C:/V');
-    expect(resolveDownloadPlan(req({ paths: paths({ ...base, subdirByExtractor: true }) })).outputDir)
-      .toBe('C:/V/%(extractor_key)s');
-    expect(resolveDownloadPlan(req({ paths: paths({ ...base, subdirByPlaylist: true }) })).outputDir)
-      .toBe('C:/V/%(playlist)s');
-    expect(resolveDownloadPlan(req({ paths: paths({ subdirByExtractor: true, subdirByPlaylist: true }) })).outputDir)
-      .toBe('C:/V/%(extractor_key)s/%(playlist)s');
+    const plan = (o: Partial<typeof base>) => resolveDownloadPlan(req({ paths: paths({ ...base, ...o }) }));
+    // 00 — untouched.
+    expect(plan({}).outputDir).toBe('C:/V');
+    expect(plan({}).outputTemplate).toBe('%(title)s.%(ext)s');
+    // 10 — extractor layer as an -o prefix; `-P` never carries a %( token
+    // (the engine's get_output_path does not field-expand -P values, so the
+    // old shape created literal `%(extractor_key)s` directories).
+    expect(plan({ subdirByExtractor: true }).outputDir).toBe('C:/V');
+    expect(plan({ subdirByExtractor: true }).outputTemplate)
+      .toBe('%(extractor_key)s/%(title)s.%(ext)s');
+    // 01 — playlist layer with the EMPTY default (a single video skips it).
+    expect(plan({ subdirByPlaylist: true }).outputDir).toBe('C:/V');
+    expect(plan({ subdirByPlaylist: true }).outputTemplate)
+      .toBe('%(playlist|)s/%(title)s.%(ext)s');
+    // 11 — both layers, extractor first.
+    expect(plan({ subdirByExtractor: true, subdirByPlaylist: true }).outputDir).toBe('C:/V');
+    expect(plan({ subdirByExtractor: true, subdirByPlaylist: true }).outputTemplate)
+      .toBe('%(extractor_key)s/%(playlist|)s/%(title)s.%(ext)s');
+    expect(plan({ subdirByExtractor: true, subdirByPlaylist: true }).outputDir).not.toContain('%(');
+  });
+
+  it('D-275 · the chapter: template SELECTOR stays the -o value first token; the prefix follows it', () => {
+    const plan = resolveDownloadPlan(req({
+      paths: paths({ subdirByExtractor: true, subdirByPlaylist: true }),
+      advanced: advanced({ splitChapters: true }),
+    }));
+    expect(plan.chapterPrefix).toBe('chapter:');
+    // `-o chapter:%(extractor_key)s/%(playlist|)s/%(title)s.%(ext)s` — inserting
+    // the prefix BEFORE the selector would turn it into literal filename text.
+    expect(plan.outputTemplate).toBe('chapter:%(extractor_key)s/%(playlist|)s/%(title)s.%(ext)s');
+    expect(plan.outputTemplate.startsWith('chapter:')).toBe(true);
+    expect(plan.outputDir).toBe('C:/V');
   });
 
   it('D-229: private mode keeps the root the intake resolved (no %VAR% in -P)', () => {
