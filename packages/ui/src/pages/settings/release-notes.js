@@ -20,6 +20,42 @@
 
   var NOTES = [
     {
+      version: '0.3.4',
+      date: '2026-11-26',
+      zh: [
+        '本版全部是修复，没有新增下载功能。',
+        '',
+        '更新与安装',
+        '· 应用内点「安装」改为「先退出、后安装」：不再弹「YTVDLT 正在运行 / 无法关闭」，也不会出现点了确定、安装包自己消失的情况。',
+        '· 取消更新包下载不再显示「临时文件清理失败」；取消会直接释放暂存文件占用的磁盘空间。',
+        '· 新增「安装完成后自动清理安装包」开关（设置 → 应用本体，默认开启）；关闭后安装包保留，重新打开开关会在下次启动清理。',
+        '· 修复安装包清理标记：此前文件名规则只认 0.2.x 的旧命名，标记从未写出、清理实际未生效；现在按真实资产名记录与核对，并新增「本版更新内容」面板。',
+        '',
+        '封面',
+        '· 系统代理 / TUN / Fake-IP 环境下，YouTube 等境外站点封面能正常显示：直连被 Fake-IP 拒绝时自动改用 Chromium 网络栈重试（仍需 https 且通过公网校验）。',
+        '· 封面抓取失败后 5 分钟内不再重复请求，日志不再刷屏。',
+        '',
+        '验证：typecheck 5/5；单测 3,098 过；E2E 31/31 + 反例 5/5。'
+      ].join('\n'),
+      en: [
+        'A fixes-only release. No new download features.',
+        '',
+        'Update and install',
+        '· In-app install now quits first and installs after: no more "is running / cannot be closed" prompts, and no more "clicked OK and the installer vanished".',
+        '· Cancelling an update download no longer reports a cleanup failure, and it frees the staged file immediately.',
+        '· New "Delete the installer after updating" switch (Settings → App update, on by default). Turn it off to keep the package; re-enable it and the next launch cleans up.',
+        '· The cleanup marker now accepts the real asset name. The old rule only matched the 0.2.x naming, so nothing was ever recorded and cleanup never ran.',
+        '',
+        'Covers',
+        '· YouTube covers now load behind a system proxy / TUN / Fake-IP: when the pinned fetch is refused for a fake-IP, the same https URL is retried through Chromium\'s network stack.',
+        '· A failed cover fetch is not retried for 5 minutes, so the log no longer floods while a task runs.',
+        '',
+        'Also in this release: Settings → App update → "What\'s new in this version", readable any time, offline, in both languages.',
+        '',
+        'Verification: typecheck 5/5; 3,098 unit tests passed; E2E 31/31 + 5/5 negative checks.'
+      ].join('\n'),
+    },
+    {
       version: '0.3.3',
       date: '2026-11-26',
       zh: [

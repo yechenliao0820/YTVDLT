@@ -72,27 +72,25 @@ describe('update download cancellation', () => {
     return { dir, controller, progress, trash, pending };
   };
 
-  it('recycles the .part file on cancel and keeps the cancel outcome', async () => {
+  it('frees the .part immediately on cancel (no recycle-bin copy left on disk)', async () => {
     const url = await serveStalledInstaller();
     const h = await startDownload(false, url);
     await h.progress;
     h.controller.abort();
     await expect(h.pending).rejects.toThrow(/abort/i);
-    expect(h.trash).toHaveBeenCalledOnce();
-    const files = await readdir(h.dir);
-    expect(files).toHaveLength(1);
-    expect(files[0]).toMatch(/\.part\.recycled$/);
-    expect(files).not.toContain('setup.exe');
+    // D-289: a cancelled download is app-owned temp — delete it now instead of
+    // moving 226 MB into the recycle bin, where it keeps occupying the disk.
+    expect(h.trash).not.toHaveBeenCalled();
+    expect(await readdir(h.dir)).toEqual([]);
   });
 
   /**
-   * D-285 · the exact report from the field: cancel + a failing recycle-bin
-   * move used to reject with 「临时文件清理失败，文件保留在 …」, so the settings
-   * page showed a cleanup failure for a cancel that had worked. A cancel must
-   * stay a cancel; the leftover `.part` is ours, uniquely named and never
-   * reused, so the fallback deletes it directly and stays quiet.
+   * D-285/D-289 · the exact report from the field: cancel + a failing
+   * recycle-bin move used to reject with 「临时文件清理失败，文件保留在 …」.
+   * Cancel now deletes directly, so a broken recycle bin is irrelevant; a
+   * failing unlink still cannot turn the cancel into an error.
    */
-  it('a failing recycle-bin move never hides a cancel (D-285)', async () => {
+  it('a failing recycle-bin move never hides a cancel', async () => {
     const url = await serveStalledInstaller();
     const h = await startDownload(true, url);
     await h.progress;
@@ -100,8 +98,6 @@ describe('update download cancellation', () => {
     await expect(h.pending).rejects.toThrow(/abort/i);
     const reason = await h.pending.catch((error: unknown) => error as Error);
     expect(reason.message).not.toContain('临时文件清理失败');
-    expect(h.trash).toHaveBeenCalledOnce();
-    // The direct-delete fallback removed the partial: nothing left behind.
     expect(await readdir(h.dir)).toEqual([]);
   });
 

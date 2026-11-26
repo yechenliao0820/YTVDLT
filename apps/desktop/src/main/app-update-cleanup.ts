@@ -27,24 +27,55 @@ export function createUpdateCleanupFiles(hash: (path: string) => Promise<string>
   };
 }
 
+/**
+ * D-289: the REAL installer names this project ships under.
+ *
+ * The old pattern was `/^YTVDLT-Setup-[…]\.exe$/i` — it matched the 0.2.x
+ * asset naming (`YTVDLT-Setup-0.2.1.exe`) and silently rejected everything
+ * from 0.3.x on (`YTVDLT.Setup.0.3.3.exe`): `safeFileName()` only strips
+ * Windows-illegal characters, so the dots survive on disk. `validPending()`
+ * therefore returned false, `rememberPendingUpdate()` returned before writing
+ * the marker, and `cleanupCompletedUpdate()` never had anything to read. The
+ * mechanism (and the D-286 switch on top of it) was dead in production; the
+ * unit tests hid it by using a hyphenated fixture name.
+ *
+ * Accepts every shape that can actually reach the updates directory:
+ *   YTVDLT.Setup.0.3.3.exe   (GitHub asset name, dots)
+ *   YTVDLT Setup 0.3.3.exe   (local build name, spaces)
+ *   YTVDLT-Setup-0.2.1.exe   (legacy asset name, hyphens)
+ *   YTVDLT-Setup.exe         (safeFileName fallback)
+ * The prefix is fixed and the tail excludes `/` and `\`, so a crafted
+ * `fileName` can never escape `<dataDir>/updates` through `join()`.
+ */
+const INSTALLER_FILE_NAME = /^YTVDLT[ .-]Setup(?:[ .-][A-Za-z0-9._-]+)?\.exe$/i;
+
 function validPending(value: unknown): value is PendingUpdate {
   if (value === null || typeof value !== 'object') return false;
   const item = value as Record<string, unknown>;
   return typeof item['fromVersion'] === 'string'
     && typeof item['targetVersion'] === 'string'
     && typeof item['fileName'] === 'string'
-    && /^YTVDLT-Setup-[a-zA-Z0-9._-]+\.exe$/i.test(item['fileName'])
+    && INSTALLER_FILE_NAME.test(item['fileName'])
     && typeof item['sha256'] === 'string'
     && /^[a-f0-9]{64}$/.test(item['sha256']);
 }
 
+/**
+ * Write the cleanup marker. Returns `false` when nothing was recorded, so the
+ * caller can log it: an invalid file name used to be a SILENT no-op, which is
+ * exactly how D-289 stayed invisible for months.
+ */
 export async function rememberPendingUpdate(
   files: UpdateCleanupFiles, updatesDir: string, fromVersion: string,
   targetVersion: string, installerPath: string, sha256: string,
-): Promise<void> {
+): Promise<boolean> {
   const pending = { fromVersion, targetVersion, fileName: basename(installerPath), sha256: sha256.toLowerCase() };
-  if (!validPending(pending) || !isNewerVersion(targetVersion, fromVersion)) return;
+  // Not an upgrade (same / older target): nothing to clean up later, and that
+  // is not an error.
+  if (!isNewerVersion(targetVersion, fromVersion)) return false;
+  if (!validPending(pending)) return false;
   await files.write(join(updatesDir, 'pending-update-cleanup.json'), JSON.stringify(pending));
+  return true;
 }
 
 export async function cleanupCompletedUpdate(

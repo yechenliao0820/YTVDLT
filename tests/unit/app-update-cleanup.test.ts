@@ -114,3 +114,45 @@ describe('completed app update cleanup', () => {
     expect(h.data.size).toBe(0);
   });
 });
+
+/**
+ * D-289 · the marker had been frozen on the 0.2.x asset naming
+ * (`YTVDLT-Setup-0.2.1.exe`). Everything shipped since 0.3.0 is
+ * `YTVDLT.Setup.X.Y.Z.exe` (GitHub normalises spaces to dots) and
+ * `safeFileName()` does NOT rewrite dots — so `validPending()` rejected the
+ * real name, `rememberPendingUpdate()` returned before writing, and the whole
+ * cleanup (including the D-286 switch) never ran in production. The old test
+ * used a hyphenated fixture, which is exactly why it stayed green.
+ */
+describe('D-289 · the cleanup marker accepts the installer names we actually ship', () => {
+  const REAL = 'YTVDLT.Setup.0.3.3.exe';
+
+  it('records and cleans up the GitHub dot-name asset', async () => {
+    const h = setup();
+    expect(await rememberPendingUpdate(h.files, DIR, '0.3.2', '0.3.3', join(DIR, REAL), HASH)).toBe(true);
+    expect(h.data.has(join(DIR, 'pending-update-cleanup.json'))).toBe(true);
+    expect(await cleanupCompletedUpdate(h.files, DIR, '0.3.3')).toBe(true);
+    expect(h.removed).toEqual([join(DIR, REAL)]);
+  });
+
+  it('accepts the space-form local build name too', async () => {
+    const h = setup();
+    const local = 'YTVDLT Setup 0.3.3.exe';
+    expect(await rememberPendingUpdate(h.files, DIR, '0.3.2', '0.3.3', join(DIR, local), HASH)).toBe(true);
+    expect(await cleanupCompletedUpdate(h.files, DIR, '0.3.3')).toBe(true);
+    expect(h.removed).toEqual([join(DIR, local)]);
+  });
+
+  it('refuses names that are not ours and writes no marker', async () => {
+    const h = setup();
+    for (const bad of ['setup.exe', 'YTVDLT.Setup.0.3.3.exe.bak', '..\\evil.exe', 'YTVDLTXSetup0.3.3.exe']) {
+      expect(await rememberPendingUpdate(h.files, DIR, '0.3.2', '0.3.3', join(DIR, bad), HASH)).toBe(false);
+    }
+    expect(h.data.has(join(DIR, 'pending-update-cleanup.json'))).toBe(false);
+  });
+
+  it('does not record a non-upgrade', async () => {
+    const h = setup();
+    expect(await rememberPendingUpdate(h.files, DIR, '0.3.3', '0.3.3', join(DIR, REAL), HASH)).toBe(false);
+  });
+});

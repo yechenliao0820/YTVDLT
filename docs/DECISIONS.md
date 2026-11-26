@@ -3040,3 +3040,16 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 照 D-214 的修法补一个**只在必要时启用**的旁路：① `ThumbnailCacheOptions` 新增可选 `fetchViaProxy`；② 直连抓取失败时，只有错误文本命中 `blocked resolved address at hop N: 198.18|198.19.x.x`（导出 `isProxyFakeIpBlock()` 判定）才用 Chromium 栈重试同一 https URL；③ 生产端直接复用 `updateNetwork.httpPort`（`mode:'system'` → 走系统代理/TUN；用户显式配置的 `network.proxy` 同样生效），URL 仍先过 `isPublicHttpsUrl`，响应仍要过图片签名 + `maxBytes` + 超时；④ 404 / TLS / 策略拒绝**不**触发代理旁路，直连路径与 D-137 钉扎一字未改；⑤ 顺带加 5 分钟失败冷却（`FAILED_RETRY_MS`），同一 URL 失败后不再每个队列 tick 重试。 |
 | 验证 | 新增 5 例：`isProxyFakeIpBlock` 只认 198.18/198.19（私网 10.x、404、undefined 均 false）；fake-IP 拒绝 → 代理回退成功并把图片入库；普通 404 不调用代理旁路；同一 URL 第二次 ensure 在冷却期内零请求、超过 5 分钟后才重试。全量 **3093 过 / 6 skipped / 0 failed**；`typecheck` 5/5；`build-desktop` 后 `main.cjs` 命中新符号。 |
 | 未覆盖 | **真实网络端到端未验**：本机沙箱到 `i.ytimg.com` 的 TLS 被拦（`curl` 同样 0 字节），无法在这里证明 Chromium 经 TUN 能取到图；需业主在真机重下一条 YouTube 视频复验封面。IPv6 Fake-IP（`fcc0::/10`）不在判定内（node 对这类 CDN 先返回 IPv4，漏判只回落旧行为）。其它代理形态（PAC/WPAD/固定 SOCKS）的端到端仍依赖用户环境，D-214 的未覆盖项同样适用。 |
+
+## D-289 · 2026-11-26 · 复核 D-284…D-288：清理标记从未生效 + 冷却漏路径 + 取消不释放磁盘
+
+| 项 | 内容 |
+|---|---|
+| 来源 | 业主转来第三方审计，指 D-286 为「伪修复」、D-288 为「部分修复」、D-285/284 各有缺口。逐条核对后：**D-286 成立且是重大缺陷，D-288 成立，D-285 成立（轻微），D-284 成立（边界）**；D-287 的「0.3.3 里没有」属事实但非缺陷（该功能本就面向 0.3.4）。 |
+| 缺陷 1（重大，D-286 连带更早） | `app-update-cleanup.ts::validPending` 的文件名白名单写死 `/^YTVDLT-Setup-[…]\.exe$/i`（连字符），只匹配 0.2.x 的资产名；0.3.0 起 GitHub 资产是 `YTVDLT.Setup.0.3.0.exe`（点号），而 `safeFileName()` 只替换 Windows 非法字符、**不会把点号改回连字符**。于是 `validPending()` 恒 false → `rememberPendingUpdate()` 在写标记前静默 return → 标记文件从未存在 → `cleanupCompletedUpdate()` 永远读不到东西。**结论：自 0.3.0 起安装包清理从未生效；D-286 的开关只是开关**。单测用 `YTVDLT-Setup-0.3.0.exe` 假名，正好绕过该 bug。 |
+| 缺陷 2（D-288 漏路径） | `fetchAndStore` 里对「空响应 / 超上限 / 非图片 / 读回失败」用 `return null` 早退，绕过了 `failedUntil` 冷却——CDN 返回 HTML 错误页时仍按 progress 事件频率反复请求。 |
+| 缺陷 3（D-285 遗留） | 取消时走回收站：`.part` 的 226 MB 只是进了回收站，磁盘没释放，与「不必要占用」的诉求相反。 |
+| 缺陷 4（D-284 边界） | 等待器只报 spawn 成功，`Start-Process` 失败（杀软隔离、组策略、安装包被移走）无人观测，表现为「应用退了、安装器没起」。 |
+| 决策 | ① 白名单改为 `/^YTVDLT[ .-]Setup(?:[ .-][A-Za-z0-9._-]+)?\.exe$/i`，覆盖点号资产名 / 空格本地名 / 0.2.x 连字符名 / fallback 名，尾部不含路径分隔符，`join()` 无法越界；② `rememberPendingUpdate` 改为返回 `boolean`，`install()` 在 false 时写 WARNING（`installer cleanup marker not written`），同类回归不再静默；③ 封面校验失败改为抛 `UnusableCoverError`，统一走 catch 的冷却 + 日志；④ 取消路径**先 `unlink`**（应用自有、一次性 UUID 的 `.part`），失败才回退回收站；非取消的真实失败仍抛 `PartialCleanupError` 并保留文件；⑤ 等待器 `Start-Process` 重试 3 次，全失败时向 `<updates>/installer-launch.log` 追加一行，供下次启动排查；⑥ 顺手把 **0.3.4 的说明**写进 `release-notes.js`（D-287 面板按版本取，打包即带上）。 |
+| 验证 | `app-update-cleanup` 7→11 例：**真实点号名**能写标记并清理、空格本地名同样、`setup.exe` / `….exe.bak` / `..\evil.exe` / `YTVDLTXSetup…` 一律拒绝且不写文件、同版本不记录；`thumbnail-cache` 46→47 例：非图片响应第二次 ensure 零请求；`app-update-cancel` 4 例改写：取消后目录为空且**回收站零调用**、回收站不可用也不影响取消；`settings-release-notes` 5 例含 0.3.4 条目。全量 **3098 过 / 6 skipped / 0 failed**；`typecheck` 5/5。 |
+| 未覆盖 | 0.3.3 已发布，不重打——上述修复随 0.3.4 生效；等待器的失败日志没有 UI 入口（只能看文件）；杀软/组策略拦截仍可能让安装不启动，只是不再静默；真实网络下的 YouTube 封面仍需真机复验（同 D-288）。 |

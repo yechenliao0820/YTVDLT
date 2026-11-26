@@ -825,6 +825,13 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
  * Returns false when the waiter cannot even be spawned (PowerShell missing /
  * blocked); the caller then falls back to the old `openPath` behaviour rather
  * than leaving the user without an install path.
+ *
+ * D-289: the waiter used to fire `Start-Process` exactly once and, if it
+ * failed (AV quarantine, group policy, the package moved between download and
+ * install), the error vanished with the process — "the app quit and nothing
+ * happened". It now retries three times and, when every attempt fails, appends
+ * one line to `<updates>/installer-launch.log` so the next launch has a
+ * discoverable trace instead of silence.
  */
 function scheduleInstallerAfterExit(installerPath: string): Promise<boolean> {
   // The path travels through the environment, never interpolated into the
@@ -832,7 +839,9 @@ function scheduleInstallerAfterExit(installerPath: string): Promise<boolean> {
   const script = [
     '$deadline = (Get-Date).AddSeconds(45)',
     `while ((Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 200 }`,
-    "Start-Process -FilePath $env:YTVDLT_INSTALLER -ArgumentList '--updated'",
+    '$ok = $false',
+    'for ($i = 0; $i -lt 3 -and -not $ok; $i++) { try { Start-Process -FilePath $env:YTVDLT_INSTALLER -ArgumentList \'--updated\' -ErrorAction Stop; $ok = $true } catch { Start-Sleep -Milliseconds 700 } }',
+    'if (-not $ok) { try { Add-Content -Path $env:YTVDLT_LAUNCH_LOG -Value ((Get-Date -Format o) + " launch failed: " + $env:YTVDLT_INSTALLER) -ErrorAction Stop } catch { } }',
   ].join('; ');
   return new Promise<boolean>((resolve) => {
     try {
@@ -843,7 +852,12 @@ function scheduleInstallerAfterExit(installerPath: string): Promise<boolean> {
           detached: true,
           stdio: 'ignore',
           windowsHide: true,
-          env: { ...process.env, YTVDLT_INSTALLER: installerPath },
+          env: {
+            ...process.env,
+            YTVDLT_INSTALLER: installerPath,
+            // D-289: the only channel left after this process exits.
+            YTVDLT_LAUNCH_LOG: join(dirname(installerPath), 'installer-launch.log'),
+          },
         },
       );
       child.once('error', () => { resolve(false); });

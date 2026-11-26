@@ -148,6 +148,9 @@ export function isProxyFakeIpBlock(error: unknown): boolean {
   return a === 198 && (b === 18 || b === 19);
 }
 
+/** D-289: a response that arrived but cannot be used as a cover. */
+class UnusableCoverError extends Error {}
+
 /** What the settings page shows; all sizes are bytes on disk. */
 export interface ThumbnailCacheStatus {
   readonly files: number;
@@ -764,9 +767,15 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       }
       // Still checked here: an injected HttpPort (tests, future adapters) is not
       // required to honour the ceiling itself.
-      if (bytes.byteLength === 0 || bytes.byteLength > maxBytesPerFile) return null;
+      // D-289: these used to `return null` INSIDE the try, which skipped the
+      // cool-down below — a CDN answering with an empty body / HTML error page
+      // was re-requested on every progress tick. They now throw a labelled
+      // error so the single catch handles cooling, logging and the null result.
+      if (bytes.byteLength === 0 || bytes.byteLength > maxBytesPerFile) {
+        throw new UnusableCoverError('cover rejected: empty or oversized response');
+      }
       const ext = signatureOf(bytes);
-      if (ext === null) return null;
+      if (ext === null) throw new UnusableCoverError('cover rejected: response is not a supported image');
 
       const name = `${createHash('sha1').update(fetchUrl).digest('hex')}.${ext}`;
       const target = join(dir, name);
@@ -779,7 +788,7 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       }
       // Confirm the bytes really are on disk before advertising the path.
       const stored = await readFile(target).catch(() => null);
-      if (stored === null) return null;
+      if (stored === null) throw new UnusableCoverError('cover rejected: stored file could not be read back');
       await attach(name, taskId, bytes.byteLength, true, privateCover); // D-258: this attempt wrote the bytes
       failedUntil.delete(fetchUrl);
       maybeAutoPrune();

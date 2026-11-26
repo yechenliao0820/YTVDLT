@@ -1000,6 +1000,21 @@ describe('D-288 · proxy Fake-IP cover fallback', () => {
     expect(proxied).toBe(0);
   });
 
+  it('cools down an unusable response too (not just thrown errors)', async () => {
+    // D-289: an HTML error page / empty body used to `return null` inside the
+    // try and skip the cool-down, so the next progress tick asked again.
+    let calls = 0;
+    let clock = 1_000;
+    const h = harness({
+      now: () => clock,
+      httpBytes: async () => { calls += 1; return new Uint8Array([1, 2, 3, 4]); },
+    });
+    const cache = h.create();
+    expect(await cache.ensure('t1', 'https://x.test/a.jpg')).toBeNull();
+    expect(await cache.ensure('t2', 'https://x.test/a.jpg')).toBeNull();
+    expect(calls).toBe(1);
+  });
+
   it('cools the URL down instead of refetching on every queue tick', async () => {
     let calls = 0;
     let clock = 1_000;

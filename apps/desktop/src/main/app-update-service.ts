@@ -704,12 +704,21 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
     }
     try {
       if (latest !== null && expected !== null) {
-        await rememberPendingUpdate(
+        const recorded = await rememberPendingUpdate(
           createUpdateCleanupFiles((path) => ports.hash.sha256File(path)), deps.updatesDir,
           deps.currentVersion, latest.version, executable, expected,
         ).catch(async (error: unknown) => {
           await logger.warn('app-update', 'could not record installer cleanup', { detail: messageOf(error) });
+          return false;
         });
+        // D-289: a rejected file name used to be a silent no-op. Installing
+        // still proceeds, but the miss is now visible in the log instead of
+        // quietly disabling cleanup forever.
+        if (!recorded) {
+          await logger.warn('app-update', 'installer cleanup marker not written; the package will be kept', {
+            fileName: executable.split(/[\\/]/).pop() ?? executable,
+          });
+        }
       }
       // D-284: preferred order — schedule the installer for AFTER this process
       // is gone, then quit. The old order (open now, quit 800 ms later) let the
