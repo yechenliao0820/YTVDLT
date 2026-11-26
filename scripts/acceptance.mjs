@@ -574,6 +574,8 @@ const M3_TEST_FILE_MAP = {
   'win-fs-link-security.test.ts': ['A-D206'],
   // D-245 · 配置/插件隔离前缀覆盖每一次 yt-dlp spawn（config-isolation-argv）。
   'config-isolation-argv.test.ts': ['A-D245'],
+  // D-275：真实随包 yt-dlp 的分类目录落地实测（A-D275）。
+  'categorized-dir-local.test.ts': ['A-D275'],
   // D-247 · 退出安全：退出路径取消在跑下载 + 有界等待子进程退出证据（shutdown-cancel）；
   // Alt+F4 语义回归 close→托盘（app-menu / bootstrap 菜单接线）；component-updater
   // 版本探测补 D-245 前缀。四处测试文件共享同一条 A-D247 断言。
@@ -1468,6 +1470,10 @@ const M5_ASSERTIONS = [
   // builder 与引擎 spawn 的 argv 都以 --ignore-config --no-plugin-dirs 开头
   // （用户显式 --config-locations 仍被 M3_FORBIDDEN_OPTIONS 与 core 白名单拒绝）。
   { id: 'A-D245', layer: 'L1', subject: '配置/插件隔离前缀覆盖每一次 yt-dlp spawn：CONFIG_ISOLATION_FLAGS 恒为 --ignore-config --no-plugin-dirs，三个 argv builder（probe/下载/自定义模板）与引擎六个 spawn 点（version/probe/probePlaylist/listExtractors/checkUrlSupport/download 流式）以及 SelfUpdater 的 yt-dlp.exe 版本探测全部以前缀开头（aria2c.exe 除外——它不认识 yt-dlp 的旗标），--config-locations 维持禁用', tests: ['config-isolation-argv'], needs: ['vitest'], evidence: ['reports/vitest-results.json::config-isolation-argv.test.ts', 'packages/engine-ytdlp/src/argv-builder.ts::CONFIG_ISOLATION_FLAGS', 'packages/engine-ytdlp/src/argv-compliance.ts::ALLOWED_DOWNLOAD_OPTIONS', 'docs/DECISIONS.md::D-245'] },
+  // D-275 · 外部在线审计 P2：分类子目录不能走 `-P`（引擎对 `-P` 只做
+  // expand_path + sanitize_path，不做模板字段替换）。真实随包 yt-dlp 落地实测，
+  // 不是纯函数推演——这也是 M5-GATE-file-coverage 要求登记的那条新测试文件。
+  { id: 'A-D275', layer: 'L2', subject: '分类目录子目录层进 `-o` 模板前缀、`-P` 绝不带模板 token：真实随包 yt-dlp（127.0.0.1 fixture，env 直连绕系统代理）在 subdirByExtractor + subdirByPlaylist 全开时，产物落 `<output>/<Extractor>/<file>`，全路径无 `%(` 残留、盘上不存在字面量 `%(extractor_key)s` 目录，单视频 playlist 层塌缩（无 `/NA/` 层），录得产物 stat 有字节', tests: ['categorized-dir-local'], needs: ['vitest'], evidence: ['reports/vitest-results.json::categorized-dir-local.test.ts', 'packages/core/src/path-resolver/path-resolver.ts::categorizedTemplatePrefix', 'packages/core/src/decision/download-plan.ts::resolveDownloadPlan', 'docs/DECISIONS.md::D-275'] },
   // D-247 · 外部在线审计：菜单「退出」/Alt+F4 不检查活跃下载——退出直接结束
   // 进程，yt-dlp 子进程变孤儿继续跑。修复后：真退出（before-quit 首段）先经
   // TaskQueue 公开 cancel API 取消在跑/排队任务，再有界等待（总预算 5s）队列

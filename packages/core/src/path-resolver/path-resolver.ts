@@ -10,8 +10,14 @@
  *                               // same call at the same point as the planner
  *                               // (download-plan.ts) — external online audit P3
  *   ① renderTemplate()          // %(title)s/%(id)s/%(ext)s/%(playlist)s/%(extractor_key)s
+ *                               // (+ D-275: `%(field|default)s` defaults)
  *   ② sanitizeFileName()        // illegal chars / reserved names / trailing dot or space
- *   ③ buildOutputDir()          // 4 combinations <dir>[/<extractor>][/<playlist>]
+ *   ③ buildOutputDir()          // ROOT ONLY — the categorized subdirectory
+ *                               // layers live in the `-o` template prefix
+ *                               // (categorizedTemplatePrefix, D-275): `-P`
+ *                               // never carries a `%(…)` token, because the
+ *                               // engine's `get_output_path()` does not
+ *                               // field-expand `-P` values.
  *   ④ truncateWindowsPath()     // 259/260/261 boundary + \\?\ / \\?\UNC\ prefix
  *   ⑤ sanitizeToken()           // last argv-safety net: whitespace/control -> '_'
  */
@@ -57,8 +63,11 @@ const ILLEGAL_FILENAME_RE = /[<>:"/\\|?*\u0000-\u001f\u007f]/g;
 const TRAILING_DOT_SPACE_RE = /[. ]+$/g;
 /** Whitespace + C0/C1 control characters; kept as a single `_` per run. */
 const TOKEN_UNSAFE_RE = /[\s\u0000-\u001f\u007f]+/g;
-/** yt-dlp output-template token, e.g. `%(title)s` or `%(title).200B`. */
-const TEMPLATE_RE = /%\((\w+)\)(?:\.(\d+)B)?s?/g;
+/** yt-dlp output-template token, e.g. `%(title)s`, `%(title).200B` or
+ * `%(playlist|)s` (the `|` group is the engine's default-value syntax: a
+ * missing/empty field renders the default instead of the NA placeholder —
+ * D-275, used by the categorized-directory prefix). */
+const TEMPLATE_RE = /%\((\w+)(?:\|([^)]*))?\)(?:\.(\d+)B)?s?/g;
 
 const RESERVED_NAMES: ReadonlySet<string> = new Set([
   'CON', 'PRN', 'AUX', 'NUL',
@@ -132,11 +141,22 @@ export function hasUnresolvedEnvToken(value: string): boolean {
   return typeof value === 'string' && /%([^%]+)%/.test(value);
 }
 
-/** Render the five supported yt-dlp output-template tokens. Unknown tokens survive. */export function renderTemplate(template: string, vars: TemplateVars): string {
+/**
+ * Render the five supported yt-dlp output-template tokens. Unknown tokens
+ * survive.
+ *
+ * D-275: a token carrying yt-dlp's default-value syntax (`%(field|default)s`)
+ * renders the default when the field is missing / null / EMPTY — the engine
+ * treats an empty value as unavailable exactly the same way (the sanitize step
+ * turns `''` back into None). Without a default, behaviour is unchanged.
+ */export function renderTemplate(template: string, vars: TemplateVars): string {
   if (typeof template !== 'string' || template.length === 0) return '';
-  return template.replace(TEMPLATE_RE, (match, key: string, limit: string | undefined) => {
+  return template.replace(TEMPLATE_RE, (match, key: string, fallback: string | undefined, limit: string | undefined) => {
+    const raw = key in vars ? vars[key as keyof TemplateVars] : undefined;
+    const available = raw !== undefined && raw !== null && String(raw) !== '';
+    if (!available && fallback !== undefined) return fallback;
     if (!(key in vars)) return match;
-    const value = String(vars[key as keyof TemplateVars] ?? '');
+    const value = String(raw ?? '');
     if (limit === undefined) return value;
     const max = Number(limit);
     return Number.isFinite(max) && max > 0 ? value.slice(0, max) : value;
@@ -144,8 +164,9 @@ export function hasUnresolvedEnvToken(value: string): boolean {
 }
 
 /**
- * 4 combinations (00 / 10 / 01 / 11) of `subdirByExtractor` x `subdirByPlaylist`.
- * An optional baseDir selects `audioDir` (audio mode).
+ * The output ROOT handed to `-P` (yt-dlp's "home" path). Strips trailing
+ * separators; falls back to `paths.videoDir` when the supplied base dir is not
+ * a usable string (audio mode passes `paths.audioDir`).
  *
  * D-229 (audit P1): private mode NO LONGER rewrites the root here.
  *
@@ -160,26 +181,45 @@ export function hasUnresolvedEnvToken(value: string): boolean {
  *
  * Routing now happens ONCE, at intake (`m4-host.ts::readDefaults` expands the
  * private directory and writes it into `request.paths.videoDir` / `audioDir`).
- * This function stays a pure "root + optional subdirs" resolver, so nothing can
- * hand yt-dlp a `%VAR%` it will not expand.
+ *
+ * D-275 (external audit P2): this function ALSO used to append the
+ * categorized subdirectories as literal `%(extractor_key)s` / `%(playlist)s`
+ * tokens when `subdirByExtractor` / `subdirByPlaylist` were on. The engine's
+ * `get_output_path()` — the code path behind `-P` — only runs `expand_path()`
+ * (env vars / tilde) plus `sanitize_path()` on the value; output-template
+ * FIELD substitution happens in a different path (`prepare_outtmpl` →
+ * `evaluate_outtmpl`, i.e. `-o`). So those tokens reached the filesystem
+ * VERBATIM and every categorized download landed in directories literally
+ * named `%(extractor_key)s` / `%(playlist)s`. The dynamic segments now live in
+ * the `-o` template prefix built by {@link categorizedTemplatePrefix}, which
+ * the engine DOES field-expand. `-P` must never carry a `%(…)` token again.
  */
 export function buildOutputDir(
   paths: PathsDomain,
-  extractorKey: string,
-  playlistTitle: string,
   baseDir: string = paths.videoDir,
 ): string {
   const root = (typeof baseDir === 'string' && baseDir.length > 0 ? baseDir : paths.videoDir)
     .replace(/[\\/]+$/, '');
-  const segments: string[] = [root];
-  if (paths.subdirByExtractor === true) {
-    const token = sanitizeToken(extractorKey);
-    if (token.length > 0) segments.push(token);
-  }
-  if (paths.subdirByPlaylist === true) {
-    const token = sanitizeToken(playlistTitle);
-    if (token.length > 0) segments.push(token);
-  }
+  return root;
+}
+
+/**
+ * D-275: the categorized subdirectory layers as an OUTPUT TEMPLATE prefix
+ * (they belong in `-o`, never in `-P` — see {@link buildOutputDir}). Returns
+ * `''` when both switches are off; otherwise
+ * `%(extractor_key)s` / `%(playlist|)s` / both joined with `/`.
+ *
+ * The `|` in `%(playlist|)s` is yt-dlp's default-value syntax: a single video
+ * has no playlist (the field is None) and without a default the engine would
+ * render its NA placeholder — a literal `NA` directory. With the empty default
+ * the playlist layer collapses and the file lands directly under the extractor
+ * directory (owner decision, 2026-11-22: 置空跳过该层). {@link renderTemplate}
+ * understands the same syntax so the preview and the argv stay on one chain.
+ */
+export function categorizedTemplatePrefix(paths: PathsDomain): string {
+  const segments: string[] = [];
+  if (paths.subdirByExtractor === true) segments.push('%(extractor_key)s');
+  if (paths.subdirByPlaylist === true) segments.push('%(playlist|)s');
   return segments.join('/');
 }
 
@@ -255,8 +295,20 @@ export function resolveOutputPath(paths: PathsDomain, vars: TemplateVars): Outpu
   const rendered = renderTemplate(safeTemplate, vars);
   const sanitized = sanitizeFileName(rendered);
   const sanitizationApplied = sanitized !== rendered;
-  const dir = buildOutputDir(paths, vars.extractor_key, vars.playlist);
-  const full = `${dir}/${sanitized}`;
+  const dir = buildOutputDir(paths);
+  // D-275: the categorized layers are part of the TEMPLATE the engine really
+  // receives (`-o` prefix), so the preview renders the same prefix through the
+  // same renderer — one chain, per D-270. Each segment is sanitized like a
+  // filename because yt-dlp sanitizes every field individually and a directory
+  // segment IS a filename; the FILENAME portion below is still sanitized as
+  // one string (registered residual difference, D-274 未覆盖).
+  const prefixRendered = renderTemplate(categorizedTemplatePrefix(paths), vars);
+  const prefix = prefixRendered
+    .split('/')
+    .filter((segment) => segment !== '')
+    .map((segment) => sanitizeFileName(segment))
+    .join('/');
+  const full = prefix === '' ? `${dir}/${sanitized}` : `${dir}/${prefix}/${sanitized}`;
   const analysis = analyzeWindowsPath(full);
   const warnings: string[] = [];
   if (sanitizationApplied) warnings.push('FILE_NAME_SANITIZED');

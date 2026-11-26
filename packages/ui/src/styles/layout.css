@@ -37,6 +37,28 @@
   --content-max: clamp(760px, calc(960px + (100vw - 1280px) * 0.6), 2200px);
 }
 
+/* D-279: complete the `hidden` convention the pages already use.
+ *
+ * The pages hide/show with `setAttribute('hidden', flag ? 'true' : 'false')`,
+ * and every page stylesheet carries `[hidden="true"] { display: none }`. That
+ * only works in ONE direction: `hidden` is a BOOLEAN attribute, so
+ * `hidden="false"` still matches the UA rule `[hidden] { display: none }`
+ * (attribute selectors beat the UA `p`/`button`/`pre` rules on specificity).
+ * An element therefore came back only when some author rule gave it an
+ * explicit `display` — `.cards` (grid), `.empty` (flex) and `.modal-backdrop`
+ * (flex) did, while `#queue-status`, the delete dialog's checkbox/note, the
+ * settings "open release page" button, `.log-lines` and `#batch-rows` did not
+ * and stayed invisible forever.
+ *
+ * `display: revert` restores the UA value (block / inline-block / inline) for
+ * exactly those elements. It is deliberately placed BEFORE the page-level
+ * stylesheets: an author rule with its own `display` (same specificity, later
+ * source order) still wins, so `.cards` stays `grid` and `.empty` stays
+ * `flex`. Never add `!important` here — that would flatten every grid/flex
+ * container back to `block`.
+ */
+[hidden="false"] { display: revert; }
+
 /* Undo the frozen dialog canvas for real windows. The body stays a flex/flow
    host at 100% of the viewport; each page owns its own scrolling region. */
 html, body { width: 100%; height: 100%; }

@@ -2910,3 +2910,83 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 验证 | task-snapshot-persist 24→25、task-queue 60→62（根目录 250 文件饿死场景 + 反斜杠模板钉点；red-check：临时还原旧代码恰两新钉点红）、copy-suffix 12/12；全量 unit+contract **3059 过 + 6 skipped / 0 failed**；core typecheck OK。回归审计其它结论：D-269/D-270/D-271/D-272 全部 CLEAN（无 P0/P1/P2）；跨项交互 6 条推演全部闭合；全 diff 逐 hunk 归因完毕、无脱离意图的改动、无测试放松。 |
 | 未覆盖 | 审计登记的 P4 项一律记录不修：单删 IPC 内联承担全量封面扫描延迟（大缓存下的纯延迟）、`ThumbnailPort.purgeCovers?` 可选成员的装配约束、importJson 入参零校验（D-238 逐字接受语义，改它需另立决策）、预览与 yt-dlp 端的既存残余差异（argv 截断主体、子目录净化、`.B` 字节截断）、`PATH_PREVIEW` 死桩、外层 DECISIONS.md 阅读副本此前滞后（本次已同步）；打包版真机未实测（铁律 9）。 |实测（本机系统代理干扰 L2，见手册 §9 坑 45）；打包版真机未实测（铁律 9）。 |
 
+
+## D-275 · 2026-11-22 · 分类目录子目录层进 `-o` 模板前缀，`-P` 绝不带模板 token（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `subdirByExtractor` / `subdirByPlaylist` 开启时，计划器把 `%(extractor_key)s` / `%(playlist)s` 字面量经 `buildOutputDir` 放进 `-P`；yt-dlp 的 `-P` 处理路径（`get_output_path()`，对照 master 源码核实）只做 `expand_path()`（环境变量/tilde）+ `sanitize_path()`，输出模板字段替换只存在于 `-o` 链路（`prepare_outtmpl` → `evaluate_outtmpl`）→ 目录落成字面量 `%(extractor_key)s` / `%(playlist)s`。预览链（`resolveOutputPath`）与 argv 共用 `buildOutputDir`，预览显示同样的字面量目录——「一致但一致地错」；既有三套测试（download-plan / path-resolver / argv 4 组合）钉住的正是字面量行为。 |
+| 根因 | 「分类子目录」本质是 yt-dlp 输出模板字段，却被当成路径常量交给了 `-P`；引擎的两条处理链（`-P` 无字段替换 / `-o` 有）被混淆。属功能实现缺陷，非任意写入漏洞。 |
+| 决策 | ① `buildOutputDir` 收敛为「只回根」（签名去掉 extractor/playlist 参数，去尾分隔符语义不变）；② 新增纯函数 `categorizedTemplatePrefix(paths)`：`''` / `%(extractor_key)s` / `%(playlist|)s` / 二者以 `/` 连接——playlist 层带**空默认**（yt-dlp 默认值语法），单视频 playlist 为 None 时该层塌缩，绝不出 `NA` 目录（业主 2026-11-22 拍板「置空跳过该层」）；③ `download-plan.ts` 把前缀插进 `-o` 模板：`${chapterPrefix}${prefix}/${safeTemplate}`——`chapter:` 选择器必须保持为 `-o` 值首 token，前缀插在其后；④ `renderTemplate`/`TEMPLATE_RE` 扩展 `%(field|default)s` 语法（预览链用同一渲染器渲染同一前缀，D-270 单链不破；缺值/空值渲染默认对齐引擎「空值视同不可用」，未知键带默认渲染默认、无默认保持逐字原样）；⑤ `resolveOutputPath` 预览按段渲染前缀并逐段 `sanitizeFileName`（目录段即文件名；文件名主体仍整串 sanitize——残余差异维持 D-274 登记）；⑥ `withCopySuffix` 树扫描触发条件从「模板含 `[\/]`」扩为「模板含分隔符 **或** 任一分类开关开启」——开关层在 plan 前缀里、请求模板可以仍是平的，漏掉这条分类目录下的旧副本永远扫不到（D-273 症状换马甲复发）。`-P` 从此绝不携带 `%(…)` token，与 D-79 / D-229 的「绝不携带 %VAR%」同一红线家族；`request.ts` 冻结域零改动（开关成员本就在 `PathsDomain`，D-50 append-only 未动）。 |
+| 验证 | 新增离线集成 `categorized-dir-local`（**真实随包 yt-dlp** + 127.0.0.1 fixture，两开关全开，env 直连绕系统代理）：产物落 `out/Generic/<file>`、全路径无 `%(`、盘上无字面量 token 目录、单视频无 `/NA/` 层、录得路径 stat 有字节——真实引擎最终落地路径首次实测（顺带闭环 D-273「未覆盖」的落地路径项）。单测：path-resolver（根语义 / 前缀 4 组合 / 默认值语法 4 形态 / 分类预览与单视频塌缩）、download-plan（4 组合 `-P`=根 + `-o` 前缀逐条 + `chapter:` 次序钉点）、argv-builder-m3（64 组合 `-o` 逐 combo 断言 + `-P` 恒根）、task-queue（分类开关触发树扫描拿到 `_(1)`）。 |
+| 未覆盖 | 播放列表下载的 playlist 层形态（多视频进 `<playlist>/`）未在集成层实测（fixture 为单视频页；纯函数层已钉）；`%(playlist|)s` 以 master 源码 + 本地真实下载实测为准，更老引擎版本未测（随包引擎恒定）；预览对目录段逐段 sanitize 是「更干净」方向的残余差异（D-274 登记在案）；打包版真机未测（铁律 9）。 |
+
+## D-276 · 2026-11-22 · 缩略图索引损坏先字节级备份、读错误阻断写入（外部在线审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `readIndex()` 把「读失败 / 解析失败 / 顶层形状不对」一律折叠成 `emptyIndex()`：损坏的 `index.json` 会被下一次 `writeIndex` 静默覆盖，`purgePending` / `purgeSticky` 隐私标记随之蒸发；无痕封面变 untracked 孤儿，`autoCleanThumbnailCache` 关闭时永久残留——「boot prune 无视开关回收」（D-252/D-267）依赖标记，标记丢失即承诺空转，且全程零日志零痕迹。 |
+| 根因 | 全仓 JSON 存储都已有损坏处理惯用法（D-159 tasks / D-230+D-271 history / D-249 command-template），缩略图索引是唯一例外；「读不了就当不存在」恰好碰上的是存隐私标记的文件。 |
+| 决策 | ① boot 读取分类四态：`absent`（ENOENT/ENOTDIR，首跑）/ `ok` / `corrupt`（读到了但解析失败**或顶层非对象**——`parseIndex` 顶层形状不对改抛错，条目级隔离保持原样）/ `unreadable`（其余 errno，判定复用 core `isMissingFileError`）；② `corrupt` → 先写字节级备份 `index.corrupt-<UTC戳>[-N].json`（同目录、非图片名不进 scanDisk，永不删除）+ WARNING，再以空索引恢复；③ `unreadable` → `indexUnreadable` 上锁，`writeIndex` 一律拒绝（D-246「读错误阻断写入」同款：进程没读过的文件绝不被覆盖）；每次 `commitIndex` 经写链串行重试读取——`absent`/`ok` 解锁并采纳盘上状态（`byTask` 引用由下一次 reconcile 重连），`corrupt` 走同一备份恢复，仍不可读则保持上锁；④ 上锁期间**内存变更照常应用后才拒绝写盘**——D-258「内存已标记、盘上无标记 → 跳过删除如实报 failed」语义原样成立（既有 D-258 钉点把 index.json 伪装成目录，恰好成为新路径的第一个真实调用者）。审计建议四条全部落实：区分错误类 / 先备份后恢复 / 不谎报清理完成（WARNING + failed 记账）/ 补损坏场景测试。 |
+| 验证 | 新增 4 例：unparsable → 备份字节逐字相等 + 损坏原文不被覆盖 + 关自动清理时孤儿封面保留 + WARNING；顶层 `[]` 同样算损坏并备份；index.json 被目录伪装（EISDIR）→ 写入被挡 + `purgeCovers` `{marked:1, removed:0, failed:1}` + 垃圾桶零调用 + 原「文件」未动；恢复可读 → 下一次提交自动解锁并写出可解析索引。既有 D-258/D-267 全部钉点语义不变。 |
+| 未覆盖 | 备份无自动回灌机制（与 D-159/D-230 同口径：取证用，人工恢复）；设置页不展示「索引损坏」状态（WARNING 日志是唯一信号，DTO append-only 未扩）；真机 Electron `shell.trashItem` 端到端仍未测（沿用 §10 登记）。 |
+
+## D-277 · 2026-11-22 · `importJson()` 元素级校验，与加载面共用同一谓词（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `importJson()` 只按 `dedupeKey` 去重、元素原样入列：缺 `completedAt` 的行（有 `videoPath`）能进历史，`applyQuery` 新序排序**每次比较**都解引用 `completedAt.localeCompare` → 导入一条后每次 `query()` 抛错；缺字符串 `videoPath` 的元素让 `dedupeKey` 自己抛 TypeError。`isUsableHistoryEntry`（D-271）就在同文件，但只用于 load。`importJson` 未接任何 IPC（grep 证实），属底层 API 隐患而非用户可见故障——D-274 已登记 P4「改它需另立决策」，本轮业主点名修复，即该决策。 |
+| 根因 | 导入面与加载面校验双标：同一条畸形数据从文件加载会被隔离（D-271），从 API 导入却直通。 |
+| 决策 | 入列前逐元素过同一个 `isUsableHistoryEntry`；不合格元素拒绝、计数、绝不入内存不入盘（persist-first commit-after 契约不变）；返回值从 `number` 改 `{ added, rejected }`（接口 append-only 变更：唯一实现 HistoryStore + 测试假件同步，无生产消费方）；不加更深字段校验（对齐 D-271 最小判据：老数据带无害怪字段必须原样活下来）。 |
+| 验证 | 新增 3 例 + 既有 3 例改断言：8 个畸形元素（缺 completedAt / 缺 videoPath / 非串 videoPath / null / 串 / 数字 / 空数组）混 1 合法 → `{added:1, rejected:8}`、query 存活、重开 store 盘上只有合法行；怪字段合法行原样导入（最小校验语义钉点）；无 entries 数组的 JSON → `{0,0}`。round-trip / fixture / 去重断言改新返回形状；task-queue 假件签名同步。 |
+| 未覆盖 | `importJson` 依旧没有 UI 入口（修的是 API 隐患，不是新功能）；schemaVersion 仍是 1，跨版本字段演进无迁移逻辑（本来就没有）。 |
+
+## D-278 · 2026-11-22 · 副本扫描总条目预算 + cursor 替代 shift()（外部在线审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `scanOutputTreeForCopySuffix` 只有 `MAX_DIRS=200`（D-274 起「成功目录」计次）与 `MAX_DEPTH=3` 两个预算：一个 readdir 返回几十万条目的目录仍会把全部名字推进候选列表与 pending 队列，其中每个文件条目还要再付一次必然 ENOTDIR 的 readdir；且 `pending.shift()` 每次出队 O(n)——极端目录树下半方级开销 + 无界内存。 |
+| 根因 | 「目录数」与「条目数」是两个维度，只封前一个封不住单个超大目录。 |
+| 决策 | ① 新增 `COPY_SUFFIX_SCAN_MAX_ENTRIES = 10_000` 总条目预算：每个 readdir 结果条目计一次（先于 push、超限即断），超限走既有 `copySuffix.scanTruncated` WARNING（payload append-only 增 `encountered` / `entryLimit` 两字段）；② pending 队列改索引 cursor 出队（去掉 `shift()`，访问次序与 shift 版逐字一致）；③ D-274「只计成功目录」与 D-273 深度上限逐字不动；漏检回落 D-101 旧行为（复用旧文件，不损坏数据）口径不变。 |
+| 验证 | 新增钉点：单目录 10_050 条目 → WARNING `visited=1 / encountered=10000 / collected=10000 / entryLimit=10000`（证明没有逐条 ENOTDIR 尝试、没有越界收集）、任务照常 Completed、界外旧副本如实未收集（模板原样无后缀，D-101 回落）；既有 D-273/D-274 三例（250 junk 模拟目录超 200 目录预算、250 真文件不占预算、反斜杠模板）全部原样绿——新预算在它们的规模下不触发。全量 unit+contract+integration：873 文件 / 3079 项 / 3073 过 + 6 skipped / 0 failed（当日快照，2026-11-22）；`turbo typecheck` 5/5、`check-layering` 0 violations、`frozen-gate` exit 0。 |
+| 未覆盖 | 10_000 是防失控取舍（十万级目录中的旧副本在预算外漏检——回落 D-101 口径）；真实 NTFS 大目录（非 mock）未实测（本机无此环境）；打包版真机未测（铁律 9）。 |
+
+## D-279 · 2026-11-26 · `hidden="false"` 显示契约补全（发布审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 全站用 `setAttribute('hidden', flag ? 'true' : 'false')` 做显隐，各页只写了 `[hidden="true"] { display: none }`。`hidden` 是**布尔属性**：`hidden="false"` 仍命中 UA 的 `[hidden] { display: none }`，元素只有在**作者样式另给了 `display`** 时才回得来。`.cards`（grid）/ `.empty`（flex）/ `.modal-backdrop`（flex）恰好有，所以队列主体正常；没有 `display` 声明的那批永久不可见：队列状态行 `#queue-status`（`notify()` 的唯一文字出口，含入队/删除/私密开关/拒绝原因）、队列页调试行 `#ytvdlt-output`、删除确认弹窗的复选框 `#queue-modal-with-files` 与说明句 `#queue-modal-note`、设置页「打开发布页」按钮 `#settings-app-page`、日志页正文 `.log-lines`、批量页行列表 `#batch-rows`。项目自己在 `queue/index.html:63` 写过这条规则、手册 §9 坑 44 也记录过这个机制，但当时的处置是「逐个补 display / 特例 `removeAttribute`」，没有收口——于是每新增一个裸元素就复发一次。 |
+| 根因 | 显隐契约只完成了「隐藏」方向；「显示」方向依赖每个元素恰好有作者 display，没人系统检查。单测只断言 `getAttribute('hidden') === 'false'`（假 DOM 不算样式），E2E 基线又把缺失画面当成"正确"冻结下来，所以长期无人发现。 |
+| 决策 | 在 `styles/layout.css` 顶部加一条低特异性规则 `[hidden="false"] { display: revert; }`。`revert` 回到 UA 值（p→block、button→inline-block、pre→block、checkbox→inline-block、small→inline），而页面/组件自己的 `display` 规则（同特异性、源码更靠后）照旧胜出，`.cards` 仍是 grid、`.empty` 仍是 flex。**不加 `!important`**（会把这些容器压回 block）；**不改 JS、不改属性契约、不动 45 条既有断言**——它们钉的是实现细节，改掉等于顺手重写测试契约。M3 三个弹窗不引用 layout.css，且不走 `hidden="false"` 路径，保持冻结。 |
+| 验证 | 真实 Chromium（151.0.7922）计算样式实测：`p=block / button=inline-block / small=inline / pre=block / checkbox=inline-block / .cards=grid / .modal-backdrop=flex / hidden="true"=none`。E2E 首轮只有 2 例像素变化且 DOM 全等：`batch-ready`（272 368 px，26.6%）、`log-ready`（673 771 px，65.8%）——正是行列表与日志正文从"永久空白"恢复可见，属预期；按 §7 逐 case `--update-baselines` 重建这两张 PNG（未全量覆盖），重建后全量 31/31 + 反例 5/5。全量 unit+contract 173 文件 / 3084 项 / 3078 过 + 6 skipped / 0 failed。 |
+| 未覆盖 | 其余页面元素未逐个像素复核（依赖全量 E2E 兜底）；M3 弹窗若有未来新增的 `hidden="false"` 元素，需要把 layout.css 引入或自行补 `display`——这条已写进 layout.css 注释。 |
+
+## D-280 · 2026-11-26 · 畸形 `mediaInfo` 零抛错 + `run()` 收尾必定补槽（发布审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `stripCredentialUrls()` 直接 `info.formats.map(...)` / `tracks.map(...)`；`TaskStore.sanitizeRecord()` 只保证 `formats` 是数组（不看元素）、完全不碰 `subtitles` / `automatic_captions`。一份被手改/损坏的 `tasks.json` 带 `formats:[null]` 就能让 `buildPersistProjection()` 抛 `TypeError: Cannot read properties of null (reading 'url')`——而这一步在 `persistSnapshot()` 的 try **之外**。后果连锁：启动 `restoreTasks()` reject（宿主创建失败）、之后每次 enqueue/restart/remove 报「快照写入失败」、进度 tick 的 `void persistSnapshot()` 变成未处理拒绝。同一族的第二处：`run().finally` 里 `await persistSnapshot()` 在 `pump()` **之前**，投影一抛错就永久跳过补槽，排队任务停在"排队中"直到用户再动一次队列。D-268 已为 `request` 立过零抛错契约，`mediaInfo` 是漏掉的那一半。 |
+| 根因 | 快照投影的「零抛错」只在一个域落地；`finally` 把「落盘」与「补槽」串成一条依赖链，落盘抛错就吞掉补槽。 |
+| 决策 | ① `snapshot-media.ts` 全部改为形状检查：非对象/非数组**原样透传**（不在投影里发明数据，归一化仍归 load 侧），合法条目只摘 `url`；② `run().finally` 把 `persistSnapshot()` 包进 `try/catch`，异常走新私有 `reportProjectionFailure()`（WARNING `snapshot.projection.failed` + 记 `lastPersistError`），**永不吞掉 `pump()`**。 |
+| 验证 | 直接执行复现：修复前 `formats:[null]` → TypeError；修复后 `queue.restore()` resolves、记录保留、落盘仍摘掉合法条目的签名链接、畸形值原样透传。新增 2 例（`formats:[null]`+`subtitles:"x"`；`mediaInfo:"garbage"`），`task-snapshot-persist` 25→27 全绿；全量 3078 过 / 0 failed。 |
+| 未覆盖 | `pump()` 守卫分支未单独造测试（投影已保证零抛错，构造"投影必抛"的用例只能靠 Proxy 这类人造对象，收益低于维护成本）；`TaskStore` 加载侧仍不做元素级归一化（本轮只保证不炸，不保证洗形）。 |
+
+## D-281 · 2026-11-26 · 普通下载目录展开失败 fail-closed（默认令牌豁免，发布审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-254 只给无痕目录加了 `hasUnresolvedEnvToken` 门。普通 `paths.videoDir` / `audioDir` 若残留 `%NAME%`（手改、导入、旧配置），`-P` 会拿到相对字面量路径（spawn 不经 shell，坑 3/43），yt-dlp 建一个叫 `%NAME%` 的目录，产物随后被 D-184/203 封链门逐条判「根外」——用户只看到一句"产物超出输出目录"。 |
+| 根因 | 同 D-254：`expandEnvVars()` 故意保留解析不了的令牌，但没有第二道门阻止它进请求。 |
+| 决策 | `readDefaults()` 在非无痕模式下检查两个下载根：**值等于出厂默认令牌（`%USERVIDEOS%/YTVDLT`、`…/Audio`）时豁免**，其余仍含 `%token%` 一律抛稳定码 `DOWNLOAD_DIR_UNRESOLVABLE`（中文 message + 渲染层 code→i18n 键 `queue.precheck.downloadDir`，中英各一条）。豁免的理由是宿主契约：`electron-entry` 在建任何请求前注入 `USERVIDEOS`（D-117）。**无条件检查被实测否决**——单测/CLI 宿主不注入该令牌，无条件版让 23 条既有用例变红，等于把"环境差异"变成"所有下载被拒"。三条入口（单条 / TXT / 播放列表）共用 `dirUnresolvableCode()`，整批拒绝、逐条带码。 |
+| 验证 | 新增 3 例：自定义 `videoDir` 残留令牌 → `DOWNLOAD_DIR_UNRESOLVABLE` 且队列零新增；默认令牌在未注入 `USERVIDEOS` 的宿主照常入队（不误伤）；TXT 批量逐条 reason 带码。全量 3078 过 / 0 failed。 |
+| 未覆盖 | 路径里含两个 `%` 的正常目录（如 `D:/100%/x%`）会被误判为未解析令牌——与 D-254 同一谓词的已知边界，报错可读且可在设置页改回；`commandDir` / `tempDir` 不在本门范围内（前者只用于模板文件，后者按任务解析且有 D-254 同款展开路径）。 |
+
+## D-282 · 2026-11-26 · 发布门禁修复 + close-lag 探针去抖（发布审计 P0 门禁/P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | ① `a37e441`（D-278）把 `pending.shift()` 改成 cursor 后删掉了 `undefined` 守卫，`noUncheckedIndexedAccess` 下 4 处 TS18048 让 `pnpm typecheck` 必红（core 报错，engine-ytdlp / apps/desktop 连带），CI 的 required check 必挂；② D-275 新增的 `tests/integration/offline/categorized-dir-local.test.ts` 未登记 `M3_TEST_FILE_MAP`，`M5-GATE-file-coverage` FAIL → `releaseReady=false`；③ `stream-tail-buffer.test.ts` 的 `closeLagReproducible` 探针从 spawn 起算 1.5 s，满载时进程启动就吃光预算 → 误判"可复现"，随后 test 7 在 close 不滞后的环境里跑，5000 ms 断言实测 270 ms 失败（2026-11-25 全量 1 红，同日两次全量 1 红 2 绿）。 |
+| 根因 | ① 重构时把类型层守卫当成运行时冗余删掉；② 新测试文件漏登记（手册 §7 步骤 8 的既有教训）；③ 探针把"进程启动时间"算进了"close 滞后窗口"。 |
+| 决策 | ① 补回 `if (next === undefined) break;`（不放宽 `noUncheckedIndexedAccess`、不用非空断言）；② `M3_TEST_FILE_MAP` 增 `categorized-dir-local.test.ts: ['A-D275']`，并在 `M5_ASSERTIONS` 增 A-D275 真断言（真实随包 yt-dlp 落地 `<Extractor>/`、无字面量 token 目录、单视频无 NA 层）；③ 探针改为从子进程 `exit` 起算 1.5 s，并加 8 s 外层守卫——子进程根本没退出时判"不可复现"（跳过），绝不判"可复现"。test 7 自身断言一字未改。 |
+| 验证 | `pnpm typecheck` 5/5 successful；`node scripts/acceptance.mjs --milestone M5` 见当次输出（目标 `releaseReady=true`）；全量 unit+contract 3078 过；E2E 31/31 + 反例 5/5。 |
+| 未覆盖 | 探针只在本机（Windows 11 / Chrome for Testing 151）验证；CI 的 windows-latest 负载特征不同，若仍偶发红，下一步是把 test 7 的 8.5 s 上界也改成"相对 exit 计时"而非绝对上限。 |

@@ -370,22 +370,40 @@ describe('D-144 · streaming spawn against the real bundled node.exe (L2)', () =
 // show close ALWAYS follows exit within milliseconds even when a grandchild
 // inherits the stdio pipes — so this probe detects the capability once and
 // the fire-path test below skips honestly where it cannot reproduce.
+//
+// D-279: the window is measured FROM THE CHILD'S `exit`, not from spawn. The
+// old probe started a 1.5 s timer at spawn, so a loaded machine (the full
+// suite runs 173 files with fork workers) could burn that budget on process
+// start-up alone, report "lag reproduced", and then run test 7 in an
+// environment where `close` actually follows immediately — the 270 ms vs
+// 5 000 ms assertion failure seen in the 2026-11-25 full run. Anchoring to
+// `exit` removes start-up time from the measurement; a child that never
+// exits within the outer guard is treated as NOT reproducible (skip), never
+// as a positive.
 const closeLagReproducible = await (async (): Promise<boolean> => {
   const probe = 'const cp=require("child_process");'
     + 'const g=cp.spawn(process.execPath,["-e","setInterval(()=>{},3000)"],'
     + '{stdio:["ignore","inherit","inherit"]});'
     + 'g.on("spawn",()=>{setTimeout(()=>process.exit(0),100);});';
-  const t0 = Date.now();
   const child = spawn(NODE_EXE, ['-e', probe], {
     shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const lagAfterExit = new Promise<boolean>((resolve) => {
+    child.once('exit', () => {
+      const exitedAt = Date.now();
+      const timer = setTimeout(() => resolve(true), 1_500);
+      child.once('close', () => {
+        clearTimeout(timer);
+        // close followed within 1 s of the exit → no lag on this platform.
+        resolve(Date.now() - exitedAt > 1_000);
+      });
+    });
+  });
   const lagged = await Promise.race([
-    new Promise<boolean>((resolve) => {
-      child.on('close', () => resolve(Date.now() - t0 > 1_000));
-    }),
-    // close did NOT arrive quickly while the grandchild holds the pipes →
-    // the platform does reproduce the lag → the watchdog fire path is real.
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 1_500)),
+    lagAfterExit,
+    // The probe child never even exited (spawn failure / hopeless load):
+    // we cannot claim the capability — skip the fire-path test honestly.
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 8_000)),
   ]);
   child.removeAllListeners();
   try { child.kill('SIGKILL'); } catch { /* already gone */ }

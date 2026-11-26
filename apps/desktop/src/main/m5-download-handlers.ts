@@ -21,7 +21,7 @@ import { assertPreviewId, MAX_URL_CHARS, validateM5Payload } from './m5-contract
 import type { M5HandlerContext, M5Handler, M5HandlerMap } from './m5-channels.js';
 import type { AudioFormatChoice, AudioQualityChoice, M5ChannelDeps, VideoQualityChoice } from './m5-channels.js';
 import type { TxtImportEnqueueDto, TxtImportPickDto } from './txt-import-service.js';
-import { isPrivateDirUnresolvableError, PRIVATE_DIR_UNRESOLVABLE } from './m4-host.js';
+import { dirUnresolvableCode } from './m4-host.js';
 import { failedPlaylistPreview, isPlaylistEntryAvailable } from './playlist-preview-service.js';
 import { blockedEntriesByUrl, precheckBatch } from './site-precheck-gate.js';
 
@@ -288,10 +288,14 @@ export function createDownloadHandlers(ctx: M5HandlerContext): M5HandlerMap {
         ...(consumption === null ? {} : { mediaInfo: consumption.media }),
       });
     } catch (error) {
-      if (!isPrivateDirUnresolvableError(error)) throw error;
+      // D-279: both root-expansion refusals answer in the same stable shape —
+      // the renderer maps the CODE to a localised sentence (it never prints the
+      // Chinese `reason` for a known code).
+      const code = dirUnresolvableCode(error);
+      if (code === null) throw error;
       return {
         accepted: false, enqueued: false, taskIds: [],
-        code: PRIVATE_DIR_UNRESOLVABLE, reason: error.message,
+        code, reason: error instanceof Error ? error.message : String(error),
       };
     }
     return {

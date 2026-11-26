@@ -147,16 +147,66 @@ describe('A-M2-21 · remove (row only — D-238 removed deleteFile) + export/imp
     await store.add(entry());
     const json = await store.exportJson();
     const target = setup().store;
-    expect(await target.importJson(json)).toBe(1);
-    expect(await target.importJson(json)).toBe(0); // already present
+    expect(await target.importJson(json)).toEqual({ added: 1, rejected: 0 });
+    expect(await target.importJson(json)).toEqual({ added: 0, rejected: 0 }); // already present
     expect(await target.query({})).toHaveLength(1);
   });
 
   it('imports the recorded fixture and de-duplicates the repeated videoPath', async () => {
     const { store } = setup();
     // history-valid.json has 3 entries, two of which normalize to the same path.
-    expect(await store.importJson(fixture('history-valid.json'))).toBe(2);
+    expect(await store.importJson(fixture('history-valid.json'))).toEqual({ added: 2, rejected: 0 });
     expect(await store.query({})).toHaveLength(2);
+  });
+
+  it('D-277 · rejects unusable elements instead of importing them (the sort-crash row)', async () => {
+    const { mem, store } = setup();
+    const json = JSON.stringify({
+      schemaVersion: 1,
+      entries: [
+        entry(), // the one valid row
+        // The exact row the external audit flagged: a videoPath with NO
+        // completedAt — `applyQuery`'s newest-first sort dereferences
+        // `completedAt.localeCompare` on EVERY comparison, so before D-277
+        // this import made every later query() throw.
+        { id: 'bad1', taskId: 't', url: 'https://example.org/x', title: 'No CompletedAt',
+          videoPath: 'C:/out/no-completed-at.mp4', createdAt: '2026-11-05T00:00:00.000Z' },
+        // No videoPath at all — before D-277 `dedupeKey` crashed on this one.
+        { id: 'bad2', completedAt: '2026-11-05T00:00:01.000Z' },
+        { videoPath: 123, completedAt: '2026-11-05T00:00:01.000Z' }, // non-string videoPath
+        { videoPath: null, completedAt: null }, // non-string everything
+        null, 'text', 42, [], // non-object elements
+      ],
+    });
+    expect(await store.importJson(json)).toEqual({ added: 1, rejected: 8 });
+    // query() survives — the store only holds the one usable row.
+    const all = await store.query({});
+    expect(all).toHaveLength(1);
+    expect(all[0]?.videoPath).toBe('C:/out/Alpha [id].mp4');
+    // And the disk holds exactly the same: a fresh store over the same ports
+    // must never see a rejected row (persist-first wrote the filtered state).
+    const reopened = new HistoryStore({ ports: mem.ports });
+    expect(await reopened.query({})).toHaveLength(1);
+  });
+
+  it('D-277 · an odd-but-minimally-valid entry still imports (no deeper validation)', async () => {
+    const { store } = setup();
+    // Same policy as the load path (D-271): videoPath + completedAt as strings
+    // is the MINIMUM the store's own consumers dereference; extra/unknown
+    // fields and odd-but-harmless values survive untouched.
+    const json = JSON.stringify({
+      schemaVersion: 1,
+      entries: [{ id: 'odd', videoPath: 'C:/out/odd.mp4', completedAt: 'not-a-date-but-a-string', futureField: { nested: true } }],
+    });
+    expect(await store.importJson(json)).toEqual({ added: 1, rejected: 0 });
+    expect((await store.query({ text: 'odd' }))[0]?.completedAt).toBe('not-a-date-but-a-string');
+  });
+
+  it('D-277 · a JSON blob with no entries array rejects nothing and adds nothing', async () => {
+    const { store } = setup();
+    expect(await store.importJson('{"schemaVersion":1}')).toEqual({ added: 0, rejected: 0 });
+    expect(await store.importJson('[]')).toEqual({ added: 0, rejected: 0 });
+    expect(await store.query({})).toHaveLength(0);
   });
 
   it('get() returns a single entry by id', async () => {

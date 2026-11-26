@@ -15,7 +15,7 @@ import type {
   FormatDomain, SubtitleDomain,
 } from '@ytvdlt/shared';
 import {
-  buildOutputDir, sanitizeToken, truncateWindowsPath,
+  buildOutputDir, categorizedTemplatePrefix, sanitizeToken, truncateWindowsPath,
 } from '../path-resolver/index.js';
 
 /**
@@ -250,13 +250,21 @@ export function resolveDownloadPlan(
   // `PathsDomain` (D-50), so it is read through a local widening: `buildRequest`
   // spreads the config domain verbatim, which is what makes it reach here.
   const restrictFilenames = (paths as unknown as Record<string, unknown>)['restrictFilenames'] === true;
-  const outputTemplate = truncateWindowsPath(`${chapterPrefix}${safeTemplate}`);
-  const outputDir = buildOutputDir(
-    paths,
-    '%(extractor_key)s',
-    '%(playlist)s',
-    extractAudio ? paths.audioDir : paths.videoDir,
+  // D-275 (external audit P2): `-P` does NOT expand yt-dlp output-template
+  // fields — the engine's `get_output_path()` only runs `expand_path()` (env
+  // vars) on `-P` values, and FIELD substitution happens exclusively on the
+  // `-o` path (`prepare_outtmpl` → `evaluate_outtmpl`). The categorized
+  // subdirectories therefore ride INSIDE the `-o` template now; the previous
+  // `-P`-based shape created literal directories named `%(extractor_key)s`.
+  // The `chapter:` per-chapter template SELECTOR must stay the `-o` value's
+  // first token, so the prefix is inserted AFTER it when one is present.
+  const categorizedPrefix = categorizedTemplatePrefix(paths);
+  const outputTemplate = truncateWindowsPath(
+    categorizedPrefix === ''
+      ? `${chapterPrefix}${safeTemplate}`
+      : `${chapterPrefix}${categorizedPrefix}/${safeTemplate}`,
   );
+  const outputDir = buildOutputDir(paths, extractAudio ? paths.audioDir : paths.videoDir);
   // D-118: a temp dir is a property of EVERY download, not of the ones that
   // happen to need post-processing. Until 0.2.6 `-P temp:` was emitted only
   // when a merge/convert step was in play, so a plain single-file download

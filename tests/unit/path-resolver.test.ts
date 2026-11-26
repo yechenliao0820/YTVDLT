@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   sanitizeToken, sanitizeFileName, renderTemplate, buildOutputDir,
+  categorizedTemplatePrefix,
   resolveOutputPath, truncateWindowsPath, analyzeWindowsPath, expandEnvVars,
   hasUnresolvedEnvToken,
   BUILTIN_OUTPUT_TEMPLATES,
@@ -120,34 +121,62 @@ describe('B2 PathResolver · renderTemplate (A-M3-09)', () => {
     expect(renderTemplate('', vars())).toBe('');
     expect(renderTemplate(null as unknown as string, vars())).toBe('');
   });
+
+  it('D-275 · %(field|default)s renders the default for missing / null / empty fields', () => {
+    // yt-dlp treats an empty value as unavailable (the sanitize step turns ''
+    // back into None), so the default applies to all three shapes.
+    expect(renderTemplate('%(playlist|NA)s', vars({ playlist: 'MyList' }))).toBe('MyList');
+    expect(renderTemplate('%(playlist|NA)s', { ...vars(), playlist: '' } as TemplateVars)).toBe('NA');
+    expect(renderTemplate('%(playlist|)s', { ...vars(), playlist: null } as unknown as TemplateVars)).toBe('');
+    // An unknown key WITH a default renders the default; without one it
+    // survives verbatim (unchanged behaviour).
+    expect(renderTemplate('%(future|fallback)s', vars())).toBe('fallback');
+    expect(renderTemplate('%(future)s', vars())).toBe('%(future)s');
+    // Tokens without the pipe syntax are untouched by the new group.
+    expect(renderTemplate('%(title)s', vars())).toBe('My Video');
+  });
 });
 
-describe('B2 PathResolver · buildOutputDir 4 combinations (A-4.4-03)', () => {
-  it('00 / 10 / 01 / 11', () => {
-    expect(buildOutputDir(paths(), 'YouTube', 'MyList')).toBe('C:/V');
-    expect(buildOutputDir(paths({ subdirByExtractor: true }), 'YouTube', 'MyList'))
-      .toBe('C:/V/YouTube');
-    expect(buildOutputDir(paths({ subdirByPlaylist: true }), 'YouTube', 'MyList'))
-      .toBe('C:/V/MyList');
-    expect(buildOutputDir(paths({ subdirByExtractor: true, subdirByPlaylist: true }), 'YouTube', 'MyList'))
-      .toBe('C:/V/YouTube/MyList');
+describe('B2 PathResolver · buildOutputDir (root only — D-275 moved the categorized layers into -o)', () => {
+  it('returns the root whatever the categorized switches say (no %( token in -P)', () => {
+    expect(buildOutputDir(paths())).toBe('C:/V');
+    expect(buildOutputDir(paths({ subdirByExtractor: true }))).toBe('C:/V');
+    expect(buildOutputDir(paths({ subdirByPlaylist: true }))).toBe('C:/V');
+    expect(buildOutputDir(paths({ subdirByExtractor: true, subdirByPlaylist: true }))).toBe('C:/V');
   });
 
   it('uses the supplied base dir; D-229 moved private routing to the intake', () => {
-    expect(buildOutputDir(paths(), 'YouTube', 'MyList', 'C:/A')).toBe('C:/A');
+    expect(buildOutputDir(paths(), 'C:/A')).toBe('C:/A');
     // The planner must never return a `%VAR%` token: `-P` reaches a spawned
     // process that will not expand it (D-79). `m4-host.ts::readDefaults` writes
     // the expanded private directory into the request instead.
-    expect(buildOutputDir(paths({ privateMode: true }), 'YouTube', 'MyList', 'C:/A'))
-      .toBe('C:/A');
-    expect(buildOutputDir(paths({ privateMode: true, videoDir: 'C:/private' }), 'Y', 'P'))
+    expect(buildOutputDir(paths({ privateMode: true }), 'C:/A')).toBe('C:/A');
+    expect(buildOutputDir(paths({ privateMode: true, videoDir: 'C:/private' })))
       .toBe('C:/private');
   });
 
-  it('sanitizes subdir tokens and strips trailing separators', () => {
-    expect(buildOutputDir(paths({ videoDir: 'D:/Videos/', subdirByExtractor: true }), 'My Extractor', 'P'))
-      .toBe('D:/Videos/My_Extractor');
-    expect(buildOutputDir(paths({ subdirByPlaylist: true }), 'YT', '')).toBe('C:/V');
+  it('strips trailing separators and never emits a template token', () => {
+    expect(buildOutputDir(paths({ videoDir: 'D:/Videos/' }))).toBe('D:/Videos');
+    expect(buildOutputDir(paths({ subdirByExtractor: true }))).not.toContain('%');
+  });
+});
+
+describe('B2 PathResolver · categorizedTemplatePrefix (D-275: layers ride the -o template)', () => {
+  it('00 / 10 / 01 / 11', () => {
+    expect(categorizedTemplatePrefix(paths())).toBe('');
+    expect(categorizedTemplatePrefix(paths({ subdirByExtractor: true }))).toBe('%(extractor_key)s');
+    expect(categorizedTemplatePrefix(paths({ subdirByPlaylist: true }))).toBe('%(playlist|)s');
+    expect(categorizedTemplatePrefix(paths({ subdirByExtractor: true, subdirByPlaylist: true })))
+      .toBe('%(extractor_key)s/%(playlist|)s');
+  });
+
+  it('the playlist layer carries the empty default: a single video skips it (no NA directory)', () => {
+    // yt-dlp renders a missing field as its NA placeholder unless the template
+    // carries `|default`. The empty default collapses the layer entirely.
+    expect(renderTemplate(categorizedTemplatePrefix(paths({ subdirByExtractor: true, subdirByPlaylist: true })), vars()))
+      .toBe('YouTube/MyList');
+    expect(renderTemplate(categorizedTemplatePrefix(paths({ subdirByExtractor: true, subdirByPlaylist: true })), vars({ playlist: '' })))
+      .toBe('YouTube/');
   });
 });
 
@@ -213,9 +242,26 @@ describe('B2 PathResolver · resolveOutputPath (Q-M3-09 fixed order / D-43)', ()
     );
     expect(resolution.sanitizationApplied).toBe(true);
     expect(resolution.warnings).toContain('FILE_NAME_SANITIZED');
-    expect(resolution.dir).toBe('C:/V/YouTube');
+    // D-275: `dir` is the -P root; the categorized extractor layer renders
+    // inside the PREVIEW (it rides the -o template prefix now).
+    expect(resolution.dir).toBe('C:/V');
     expect(resolution.template).not.toMatch(/[<>:"/\\|?*]/);
-    expect(resolution.preview).toContain('C:/V/YouTube');
+    expect(resolution.preview).toContain('C:/V/YouTube/');
+  });
+
+  it('D-275 · both categorized layers preview under the root; a single video skips the playlist layer', () => {
+    const both = resolveOutputPath(
+      paths({ subdirByExtractor: true, subdirByPlaylist: true }),
+      vars(),
+    );
+    expect(both.dir).toBe('C:/V');
+    expect(both.preview).toBe('C:/V/YouTube/MyList/My Video.mp4');
+    // playlist === '' -> the layer collapses instead of becoming an NA folder.
+    const single = resolveOutputPath(
+      paths({ subdirByExtractor: true, subdirByPlaylist: true }),
+      vars({ playlist: '' }),
+    );
+    expect(single.preview).toBe('C:/V/YouTube/My Video.mp4');
   });
 
   it('a long title with illegal chars is truncated and never throws', () => {

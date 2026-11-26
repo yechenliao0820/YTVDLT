@@ -8,7 +8,7 @@
  * and to be a cache image — never a user video.
  */
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, existsSync, readdirSync, rmdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -835,5 +835,122 @@ describe('external online audit P2 · 陈旧记账不再拦截（关窗回收）
       .toEqual({ marked: 0, removed: 0, failed: 0, keptReferenced: 0, deferred: 0 });
     expect(h.trashed).toEqual([]);
     expect(existsSync(path)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-276 · index.json 不再「读不了就当不存在」：损坏先备份、读错误阻断写入。
+// 外部审计 P2：purgePending / purgeSticky 隐私标记住在 index.json 里；旧
+// readIndex 把「解析失败 / 读失败」一律折叠成空索引，损坏文件会被下一次写入
+// 静默覆盖——标记蒸发、无痕封面变成 untracked 孤儿，自动清理开关一关就永久残留。
+// ---------------------------------------------------------------------------
+
+describe('D-276 · 损坏索引先备份，恢复不吞标记', () => {
+  function capturingLogger(): { logger: ILogger; warnings: string[] } {
+    const warnings: string[] = [];
+    const noop = async (): Promise<void> => undefined;
+    return {
+      warnings,
+      logger: {
+        log: noop, info: noop,
+        warn: async (_scope: string, message: string) => { warnings.push(message); },
+        error: noop, logArgv: noop, writeCrashReport: async () => '', exportLogs: async () => '',
+      },
+    };
+  }
+
+  it('unparsable index.json：字节级备份先落盘，损坏原文不被覆盖，孤儿封面如实保留', async () => {
+    const h = harness();
+    const original = '{"version":1,"entries":{"x.png":{"bytes":9,"lastUsedAt":1,"taskIds":["p1"],"purgePending":true,"purgeSti';
+    writeFileSync(join(h.dir, 'index.json'), original);
+    const coverName = `${hash('https://cdn.example/orphan.png')}.png`;
+    writeFileSync(join(h.dir, coverName), 'PNGORPHAN');
+    h.policyValues['enabled'] = false; // 隐私边界场景：自动清理关闭
+    const { logger, warnings } = capturingLogger();
+    const cache = h.create({ logger });
+    await cache.status(); // boot（读取 + 备份）是异步的：先等 indexReady 落定
+
+    // 备份先于恢复：原始字节完整保留，损坏原文不被空索引覆盖。
+    const backups = readdirSync(h.dir).filter((n) => n.startsWith('index.corrupt-'));
+    expect(backups).toHaveLength(1);
+    expect(readFileSync(join(h.dir, backups[0]!), 'utf8')).toBe(original);
+    expect(readFileSync(join(h.dir, 'index.json'), 'utf8')).toBe(original);
+
+    // 标记已无法恢复 → 孤儿封面按 untracked 走常规规则；开关关闭时不回收、
+    // 也不谎报「清理完成」。损失是响亮的 WARNING，不是静默。
+    const report = await cache.prune();
+    expect(report.removed).toBe(0);
+    expect(report.ok).toBe(true);
+    expect(existsSync(join(h.dir, coverName))).toBe(true);
+    expect(warnings.some((w) => w.includes('failed to parse'))).toBe(true);
+  });
+
+  it('顶层形状不对的合法 JSON（如 []）同样算损坏并备份', async () => {
+    const h = harness();
+    writeFileSync(join(h.dir, 'index.json'), '[]');
+    const { logger, warnings } = capturingLogger();
+    const cache = h.create({ logger });
+    await cache.status(); // 等 boot 完成
+    const backups = readdirSync(h.dir).filter((n) => n.startsWith('index.corrupt-'));
+    expect(backups).toHaveLength(1);
+    expect(readFileSync(join(h.dir, backups[0]!), 'utf8')).toBe('[]');
+    expect(warnings.some((w) => w.includes('failed to parse'))).toBe(true);
+  });
+});
+
+describe('D-276 · 读错误阻断写入（D-246 同款），可读后自动解除', () => {
+  function capturingLogger(): { logger: ILogger; warnings: string[] } {
+    const warnings: string[] = [];
+    const noop = async (): Promise<void> => undefined;
+    return {
+      warnings,
+      logger: {
+        log: noop, info: noop,
+        warn: async (_scope: string, message: string) => { warnings.push(message); },
+        error: noop, logArgv: noop, writeCrashReport: async () => '', exportLogs: async () => '',
+      },
+    };
+  }
+
+  it('index.json 不可读：写入被挡住，purge 如实报 failed，原文件字节不动', async () => {
+    const h = harness();
+    mkdirSync(join(h.dir, 'index.json')); // 目录伪装：readFile 抛 EISDIR（非「不存在」）
+    const { logger, warnings } = capturingLogger();
+    const cache = h.create({ logger });
+    await cache.status(); // 等 boot（读取失败 → 上锁）完成
+    expect(warnings.some((w) => w.includes('cannot be read'))).toBe(true);
+
+    // 封面字节可以照常落盘（下载不受影响），但索引写入被阻断。
+    const path = await cache.ensure('p1', 'https://cdn.example/private.png', { privateCover: true });
+    expect(path).not.toBeNull();
+    expect(warnings.some((w) => w.includes('index write failed'))).toBe(true);
+
+    // D-258 语义自动生效：标记写不进去 → 删除跳过 → 如实报 failed，字节不动。
+    cache.forget('p1');
+    expect(await cache.purgeCovers(['p1']))
+      .toEqual({ marked: 1, removed: 0, failed: 1, keptReferenced: 0, deferred: 0 });
+    expect(h.trashed).toEqual([]);
+    expect(existsSync(path!)).toBe(true);
+    // 原「文件」从未被写入破坏。
+    expect(statSync(join(h.dir, 'index.json')).isDirectory()).toBe(true);
+  });
+
+  it('文件恢复可读后，下一次提交自动解除阻断并写出索引', async () => {
+    const h = harness();
+    mkdirSync(join(h.dir, 'index.json'));
+    const { logger } = capturingLogger();
+    const cache = h.create({ logger });
+    await cache.ensure('t1', 'https://cdn.example/blocked.png'); // 写入被挡
+
+    // 现场恢复：目录移除，换成可读的正常索引文件。
+    rmdirSync(join(h.dir, 'index.json'));
+    writeFileSync(join(h.dir, 'index.json'), '{"version":1,"entries":{},"lastPrunedAt":null}');
+    await cache.ensure('t2', 'https://cdn.example/after-recovery.png');
+
+    // 阻断解除，索引重新落盘且可解析（t1 的引用由下一次 reconcile 经
+    // byTask 重连；这里只钉「阻断解除 + 真实写出」）。
+    const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8')) as { version: number; entries: Record<string, unknown> };
+    expect(raw.version).toBe(1);
+    expect(Object.keys(raw.entries).some((n) => n.startsWith(hash('https://cdn.example/after-recovery.png')))).toBe(true);
   });
 });
