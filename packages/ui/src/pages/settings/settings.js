@@ -953,6 +953,40 @@
       });
     }
 
+    // D-287: "本版更新内容" — the notes bundled with THIS build, readable any
+    // number of times, offline, in the active language. Reuses the same summary
+    // the update dialog showed when the version was offered.
+    var notesButton = doc.getElementById('settings-app-whatsnew');
+    var notesPanel = doc.getElementById('settings-release-notes');
+    var notesHead = doc.getElementById('settings-release-notes-head');
+    var notesBody = doc.getElementById('settings-release-notes-body');
+    if (notesButton !== null && notesPanel !== null && notesBody !== null) {
+      notesButton.addEventListener('click', function () {
+        if (notesPanel.getAttribute('hidden') === 'false') {
+          notesPanel.setAttribute('hidden', 'true');
+          notesButton.setAttribute('aria-expanded', 'false');
+          return;
+        }
+        var entry = null;
+        var registry = global.YTVDLTAppVersion;
+        var book = global.YTVDLTReleaseNotes;
+        if (registry && typeof registry.label === 'function' && book
+          && typeof book.forVersion === 'function') {
+          entry = book.forVersion(String(registry.label() || '').replace(/^v/i, ''));
+        }
+        var english = THEME_STATE.locale === 'en';
+        if (entry === null) {
+          if (notesHead !== null) notesHead.textContent = t('settings.app.whatsnew');
+          notesBody.textContent = t('settings.app.notesEmpty');
+        } else {
+          if (notesHead !== null) notesHead.textContent = entry.version + ' · ' + entry.date;
+          notesBody.textContent = english ? entry.en : entry.zh;
+        }
+        notesPanel.setAttribute('hidden', 'false');
+        notesButton.setAttribute('aria-expanded', 'true');
+      });
+    }
+
     // The persisted values are the truth, not `__YTVDLT_SETTINGS__` (which the
     // packaged app never injects — the settings page is a static file:// page).
     var pendingSettings = invokeBridge('ytvdlt:settings:get', {});

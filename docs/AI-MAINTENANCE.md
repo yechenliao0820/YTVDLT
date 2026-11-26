@@ -642,6 +642,11 @@ node scripts/check-layering.mjs                     # 有没有偷偷 import nod
 本机**没有 `gh` CLI**（`gh: command not found`），发布走 GitHub REST API，凭据复用
 Git Credential Manager 里那份（`git credential fill` 取 `password`，只在 shell 变量里用，不要打印）。
 
+**打包前先补本版说明（D-287）**：把这一版的用户可见变更写进
+`packages/ui/src/pages/settings/release-notes.js`——同一版本一条，`zh` / `en` 各一段（结尾附验证结论），
+版本号写纯 semver。设置页「应用本体 → 本版更新内容」直接读它，离线可看、可反复打开；
+不补的话该面板只会显示「此版本没有附带更新说明」。Release body 与它应当同源，改一处记得改另一处。
+
 ```bash
 CREDS=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill)
 TOKEN=$(printf '%s' "$CREDS" | sed -n 's/^password=//p')

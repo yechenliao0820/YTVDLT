@@ -3020,3 +3020,13 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 新增 `advanced.autoCleanUpdateInstaller`（append-only，默认 `true`）：进入 `SETTINGS_SET` 白名单，设置页「应用本体」卡片加一行复选框（中英各一条 `settings.app.cleanup`），`cleanupCompletedUpdate()` 增可选 `{ enabled }`，`electron-entry` 启动时按配置传入。关闭时**保留安装包并保留 pending 标记**——之后重新打开开关，下一次启动仍会清理那一个包（不会累积成"永远不清"）。`configRef` 在该闭包被 TS 收窄为 `null`，显式回写声明联合类型后读取。 |
 | 验证 | `app-update-cleanup` 6→7 例（`{enabled:false}` 不删且保留标记；随后默认调用清理一次且只一次）；`settings-autostart-repaint` 4→6 例（快照 `false` 能回填、无该键保持默认 ON）；全量 **3084 过 / 6 skipped / 0 failed**；`typecheck` 5/5。E2E：仅 `settings-appearance` / `settings-en-dark` 因新增一行控件同时 DOM+像素变化，按 §7 逐 case 重建两张基线与两份 DOM 快照，重建后 31/31 + 反例 5/5。 |
 | 未覆盖 | 未真机点选验证开关持久化（随 0.3.4 真机回归一起验）；崩溃残留的 `.download` / `.part` 不在此开关范围（D-285 已让取消路径自清，异常退出仍可能留一两个暂存文件）；用户「关闭」后安装包永久保留，需要手动删——按业主口径这是显式选择。 |
+
+## D-287 · 2026-11-26 · 设置页「本版更新内容」：随包、双语、可反复打开（业主提出）
+
+| 项 | 内容 |
+|---|---|
+| 需求 | 业主希望在 设置 → 更新 里能随时查看「这个版本更新了什么」，内容与下载安装时看到的说明一致；**不是只能看一次**，也不必再去 GitHub Releases 翻。 |
+| 约束 | 设置页是沙箱化的 `file://` 文档：没有 fs、`fetch` 本机 JSON 在 CSP 下不可靠；GitHub API 属国际出口（N3），离线时读不到；而且在应用内直接拉 release body 只有英文，页面却是双语的。因此**不能**靠实时请求，必须随包带一份说明。 |
+| 决策 | ① 新增 `packages/ui/src/pages/settings/release-notes.js`：`YTVDLTReleaseNotes.forVersion(version)`，按纯 semver 查表（自动去掉 `v` 前缀），每条含 `version` / `date` / `zh` / `en`，随前端目录一起被 `build-desktop` 打进包；② 设置页「应用本体」卡片在清理开关同一行加按钮「本版更新内容 / What's new in this version」，点击展开内联面板（`hidden` 属性切换，D-279 已保证可显示），再点收起——**反复打开不消耗**；③ 版本取 `YTVDLTAppVersion.label()` 去前缀，语言取当前 `THEME_STATE.locale`；④ 正文用 `textContent`（纯文本 `pre-wrap`，不做 markdown/HTML，杜绝注入）；⑤ 查不到本版条目时如实显示「此版本没有附带更新说明」。0.3.3 的条目已按当时的 GitHub 说明写出中英两版。 |
+| 验证 | 新增 `settings-release-notes` 5 例：数据层（`0.3.3` 与 `v0.3.3` 等价、旧版本/空串返回 null、每条中英均非空且有日期）+ 页面层（打开→关闭→再打开仍显示原文、英文 locale 取 `en`、无条目时显示 `notesEmpty`）。全量 **3089 过 / 6 skipped / 0 failed**（174 文件）；`typecheck` 5/5；E2E 仅两个设置页 case 因新增按钮变化，按 §7 逐 case 重建 DOM+PNG，重建后 31/31 + 反例 5/5。 |
+| 未覆盖 | 面板只渲染纯文本，不还原 markdown 的加粗/列表符号（安全优先，视觉上靠 `·` 与空行分段）；0.3.4 的说明需在打包前补进同一文件（已写进手册 §11 发版步骤）；未真机点选（随 0.3.4 真机回归一起验）。 |
