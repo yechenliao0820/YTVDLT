@@ -770,7 +770,13 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
       return hash.digest('hex');
     });
-    void cleanupCompletedUpdate(cleanupFiles, join(appDataDir, 'updates'), appVersion);
+    // `configRef` is assigned inside `createHost()`, which this closure cannot
+    // see, so TS narrows it to `null` here. Re-assert the declared union.
+    const cleanupConfig = configRef as IConfigStore | null;
+    void cleanupCompletedUpdate(cleanupFiles, join(appDataDir, 'updates'), appVersion, {
+      // D-286: Settings → App update → "自动清理安装包" (default ON).
+      enabled: cleanupConfig === null ? true : cleanupConfig.get('advanced', 'autoCleanUpdateInstaller') !== false,
+    });
   }
   return handle;
 }

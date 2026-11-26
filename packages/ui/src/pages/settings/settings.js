@@ -931,6 +931,28 @@
       });
     }
 
+    // D-286: delete the applied installer on the next launch. Default ON —
+    // the switch only exists so the user can keep the package deliberately.
+    var cleanupAuto = doc.getElementById('settings-update-cleanup');
+    if (cleanupAuto !== null) {
+      cleanupAuto.checked = settingsInjected().autoCleanUpdateInstaller !== false;
+      cleanupAuto.addEventListener('change', function () {
+        // D-190: same failure contract as appAuto / engineAuto — a rejected
+        // SETTINGS_SET must not leave the checkbox lying about config.
+        var bridge = global.ytvdltBridge;
+        if (bridge && typeof bridge.invoke === 'function') {
+          try {
+            var pending = bridge.invoke('ytvdlt:settings:set', { autoCleanUpdateInstaller: cleanupAuto.checked });
+            if (pending && typeof pending.catch === 'function') {
+              pending.catch(function () { cleanupAuto.checked = !cleanupAuto.checked; });
+            }
+          } catch (error) {
+            cleanupAuto.checked = !cleanupAuto.checked;
+          }
+        }
+      });
+    }
+
     // The persisted values are the truth, not `__YTVDLT_SETTINGS__` (which the
     // packaged app never injects — the settings page is a static file:// page).
     var pendingSettings = invokeBridge('ytvdlt:settings:get', {});
@@ -946,6 +968,9 @@
         }
         if (engineAuto !== null && typeof snapshot.autoCheckEngineUpdate === 'boolean') {
           engineAuto.checked = snapshot.autoCheckEngineUpdate;
+        }
+        if (cleanupAuto !== null && typeof snapshot.autoCleanUpdateInstaller === 'boolean') {
+          cleanupAuto.checked = snapshot.autoCleanUpdateInstaller;
         }
         // D-166 follow-up: `autostart` on the snapshot is the HKCU Run truth
         // (m5-channels reads the registry). The initial paint above falls back

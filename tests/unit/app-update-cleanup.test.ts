@@ -58,6 +58,23 @@ describe('completed app update cleanup', () => {
     expect(h.removed).toEqual([]);
   });
 
+  /**
+   * D-286: the switch in Settings → App update. Default ON (the parameter is
+   * absent in every call above); an explicit `false` must keep the package so
+   * the user can reinstall or archive it, and must NOT clear the pending
+   * marker — re-enabling the switch on a later launch still cleans it up.
+   */
+  it('keeps the installer and the marker when the user turned cleanup off', async () => {
+    const h = setup();
+    await remember(h.files);
+    expect(await cleanupCompletedUpdate(h.files, DIR, '0.3.0', { enabled: false })).toBe(false);
+    expect(h.removed).toEqual([]);
+    // The marker is untouched, so a later launch with the switch back ON does
+    // the cleanup exactly once.
+    expect(await cleanupCompletedUpdate(h.files, DIR, '0.3.0')).toBe(true);
+    expect(h.removed).toEqual([join(DIR, NAME)]);
+  });
+
   it('retains replaced files and links', async () => {
     const h = setup();
     await remember(h.files);

@@ -64,6 +64,8 @@ const PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
   [IPC_CHANNELS.SETTINGS_SET]: [
     'theme', 'accent', 'motion', 'language', 'privateMode',
     'autoCheckAppUpdate', 'autoCheckEngineUpdate', 'autostart',
+    // D-286: installer cleanup after a successful update.
+    'autoCleanUpdateInstaller',
   ],
   [IPC_CHANNELS.COMPONENT_STATUS]: [],
   [IPC_CHANNELS.COMPONENT_UPDATE]: [],

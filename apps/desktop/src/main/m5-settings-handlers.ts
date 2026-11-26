@@ -97,6 +97,8 @@ async function readAppearance(deps: M5ChannelDeps): Promise<AppearanceDto> {
     autostart: await readAutostart(deps),
     autoCheckAppUpdate: deps.config.get('advanced', 'autoCheckAppUpdate') !== false,
     autoCheckEngineUpdate: deps.config.get('advanced', 'autoCheckEngineUpdate') !== false,
+    // D-286: absent / non-boolean config resolves to ON, like the two above.
+    autoCleanUpdateInstaller: deps.config.get('advanced', 'autoCleanUpdateInstaller') !== false,
     systemAccent: deps.systemAppearance.accent(),
     prefersDark: deps.systemAppearance.prefersDark(),
     prefersReducedMotion: deps.systemAppearance.prefersReducedMotion(),
@@ -316,7 +318,7 @@ export function createSettingsHandlers(ctx: M5HandlerContext): M5HandlerMap {
     }
     // 0.2.1: the update switches live in `advanced`, not `general`.
     const advancedPatch: Record<string, unknown> = {};
-    for (const key of ['autoCheckAppUpdate', 'autoCheckEngineUpdate'] as const) {
+    for (const key of ['autoCheckAppUpdate', 'autoCheckEngineUpdate', 'autoCleanUpdateInstaller'] as const) {
       const value = record[key];
       if (value === undefined) continue;
       if (typeof value !== 'boolean') throw new Error(`[m5-ipc] invalid ${key}`);

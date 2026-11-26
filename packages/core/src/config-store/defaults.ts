@@ -131,6 +131,10 @@ export const DEFAULT_DOMAINS: Readonly<Record<ConfigDomainName, Record<string, u
     // by different downloads, so they never share one toggle.
     autoCheckAppUpdate: true,
     autoCheckEngineUpdate: true,
+    // D-286 (append-only): keep the downloaded installer after it was applied?
+    // Default ON — the applied package is dead weight once the new version runs,
+    // and without this switch every update left another ~216 MiB behind.
+    autoCleanUpdateInstaller: true,
     skippedAppVersion: '',
     lastAppUpdateCheckAt: '',
     lastEngineUpdateCheckAt: '',

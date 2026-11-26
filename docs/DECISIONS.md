@@ -3010,3 +3010,13 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 取消语义优先：`controller.signal.aborted` 为真时，回收站失败**不再抛**，改为 `unlink` 直接删除该 `.part`（文件名含新 UUID、永不被后续下载复用，属应用自有临时文件），删除再失败也保持静默；**非取消**的真实失败（网络中断、大小不符等）仍抛 `PartialCleanupError` 并保留文件，行为与文案一字未改。 |
 | 验证 | `app-update-cancel` 2→4 例：取消 + 回收站正常 → `.part.recycled`；取消 + 回收站失败 → 仍以 abort 结束且**不含**「临时文件清理失败」、目录为空（unlink 兜底生效）；非取消失败 + 回收站失败 → 仍抛「临时文件清理失败」且 `.part` 保留；预先 abort 不变。全量 3081 过 / 6 skipped；`typecheck` 5/5。 |
 | 未覆盖 | 未在真实 Windows 回收站失败场景复现（用会抛错的 `trashPartial` 替身模拟）；若 `unlink` 也失败（文件仍被占用），`.part` 会静默残留——唯一命名、不参与缓存复用，只占磁盘，不会误装。 |
+
+## D-286 · 2026-11-26 · 安装包自动清理开关（默认开启，可关闭）（业主提出）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主提问：安装完成后若检测到版本更新，会不会自动清理安装包？担心每次升级留下一个 ~216 MiB 的包。要求默认自动开启、允许用户手动关闭。 |
+| 现状（0.3.3 已有，非本轮新增） | 机制本来就在，只是没有开关：安装前 `rememberPendingUpdate()` 把 `{fromVersion,targetVersion,fileName,sha256}` 写入 `<dataDir>/updates/pending-update-cleanup.json`；**下次以新版本启动**时 `cleanupCompletedUpdate()` 校验「当前版本 == targetVersion 且新于 fromVersion」+ 文件名白名单 + **SHA-256 逐字节复核**，才删除那一个安装包并清空标记。失败一律静默、不阻塞启动。`.rejected-*` / `.replaced-*` 隔离副本按 D-233/D-104 **有意保留**（排查用），不在清理范围。 |
+| 决策 | 新增 `advanced.autoCleanUpdateInstaller`（append-only，默认 `true`）：进入 `SETTINGS_SET` 白名单，设置页「应用本体」卡片加一行复选框（中英各一条 `settings.app.cleanup`），`cleanupCompletedUpdate()` 增可选 `{ enabled }`，`electron-entry` 启动时按配置传入。关闭时**保留安装包并保留 pending 标记**——之后重新打开开关，下一次启动仍会清理那一个包（不会累积成"永远不清"）。`configRef` 在该闭包被 TS 收窄为 `null`，显式回写声明联合类型后读取。 |
+| 验证 | `app-update-cleanup` 6→7 例（`{enabled:false}` 不删且保留标记；随后默认调用清理一次且只一次）；`settings-autostart-repaint` 4→6 例（快照 `false` 能回填、无该键保持默认 ON）；全量 **3084 过 / 6 skipped / 0 failed**；`typecheck` 5/5。E2E：仅 `settings-appearance` / `settings-en-dark` 因新增一行控件同时 DOM+像素变化，按 §7 逐 case 重建两张基线与两份 DOM 快照，重建后 31/31 + 反例 5/5。 |
+| 未覆盖 | 未真机点选验证开关持久化（随 0.3.4 真机回归一起验）；崩溃残留的 `.download` / `.part` 不在此开关范围（D-285 已让取消路径自清，异常退出仍可能留一两个暂存文件）；用户「关闭」后安装包永久保留，需要手动删——按业主口径这是显式选择。 |

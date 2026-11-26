@@ -377,6 +377,8 @@ export interface AppearanceDto {
   /** 0.2.1 (D-93 / D-94): two independent startup-check switches. */
   readonly autoCheckAppUpdate: boolean;
   readonly autoCheckEngineUpdate: boolean;
+  /** D-286: delete the applied installer on the next launch (default true). */
+  readonly autoCleanUpdateInstaller: boolean;
   /** D-166: the real HKCU Run state; `general.autostart` is only the fallback mirror. */
   readonly autostart: boolean;
   readonly systemAccent: string | null;

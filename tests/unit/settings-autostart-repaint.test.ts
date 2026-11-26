@@ -22,6 +22,11 @@ function harness(snapshot: unknown, initial: { autostart: boolean; appAuto: bool
   const autostart = { checked: initial.autostart };
   const appAuto = { checked: initial.appAuto };
   const engineAuto = { checked: initial.engineAuto };
+  // D-286: the snapshot callback now also repaints the installer-cleanup
+  // switch. This harness runs a SLICE of settings.js, so every local the slice
+  // touches has to exist in the context — a missing one aborts the callback
+  // and silently keeps the defaults (exactly what happened before this line).
+  const cleanupAuto = { checked: true };
   const paintedPaths: unknown[] = [];
   let themePaints = 0;
   const context: Record<string, unknown> = {
@@ -31,6 +36,7 @@ function harness(snapshot: unknown, initial: { autostart: boolean; appAuto: bool
     appAuto,
     engineAuto,
     autostart,
+    cleanupAuto,
   };
   const start = source.indexOf('var pendingSettings = invokeBridge');
   const endMarker = '}).catch(function () { /* keep the defaults */ });\n    }';
@@ -38,7 +44,7 @@ function harness(snapshot: unknown, initial: { autostart: boolean; appAuto: bool
   expect(start).toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
   runInNewContext(source.slice(start, end), context);
-  return { autostart, appAuto, engineAuto, paintedPaths, themePaints: () => themePaints };
+  return { autostart, appAuto, engineAuto, cleanupAuto, paintedPaths, themePaints: () => themePaints };
 }
 
 const flush = async (): Promise<void> => {
@@ -86,5 +92,24 @@ describe('settings autostart · the snapshot repaints the checkbox (D-166 follow
     await flush();
     expect(app.autostart.checked).toBe(true);
     expect(app.appAuto.checked).toBe(true);
+  });
+
+  // D-286: the installer-cleanup switch follows the same snapshot rule.
+  it('D-286: repaints the installer-cleanup switch from the snapshot', async () => {
+    const app = harness(
+      { autostart: false, autoCleanUpdateInstaller: false },
+      { autostart: false, appAuto: true, engineAuto: true },
+    );
+    await flush();
+    expect(app.cleanupAuto.checked).toBe(false);
+  });
+
+  it('D-286: keeps the default (ON) when the snapshot has no cleanup key', async () => {
+    const app = harness(
+      { autostart: false },
+      { autostart: false, appAuto: true, engineAuto: true },
+    );
+    await flush();
+    expect(app.cleanupAuto.checked).toBe(true);
   });
 });

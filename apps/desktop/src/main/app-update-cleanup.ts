@@ -49,7 +49,11 @@ export async function rememberPendingUpdate(
 
 export async function cleanupCompletedUpdate(
   files: UpdateCleanupFiles, updatesDir: string, currentVersion: string,
+  options: { readonly enabled?: boolean } = {},
 ): Promise<boolean> {
+  // D-286: the user can keep the installed package (Settings → App update).
+  // Default ON: `enabled` is only false when the config says so explicitly.
+  if (options.enabled === false) return false;
   try {
     const pending: unknown = JSON.parse(await files.read(join(updatesDir, 'pending-update-cleanup.json')));
     if (!validPending(pending) || pending.targetVersion !== currentVersion
