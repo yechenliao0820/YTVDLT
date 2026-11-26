@@ -779,10 +779,39 @@ export class TaskQueue implements ITaskQueue {
       // artifact either sits in the output directory (readdir sees it) or
       // this attempt produced nothing for a name to collide with.
       this.copySuffixClaims.delete(record.id);
-      await this.persistSnapshot();
+      // D-279: persist first (D-163/D-242), but NEVER let a throw from the
+      // projection skip the refill below. `pump()` is the only place a freed
+      // slot is handed to the FIFO outside enqueue/restart, so a throwing
+      // persist left every parked task stuck at "排队中" until the user
+      // touched the queue again. The snapshot module now guarantees
+      // zero-throw; this guard keeps that promise from being load-bearing.
+      try {
+        await this.persistSnapshot();
+      } catch (error) {
+        await this.reportProjectionFailure(error);
+      }
       // A freed slot is immediately offered to the FIFO (auto-fill, ①).
       this.pump();
     }
+  }
+
+  /**
+   * D-279: a projection that throws is a bug, not a disk state — log it once
+   * and keep the queue moving. Never rethrows: the caller is `run().finally`,
+   * whose contract is that the slot is released and the FIFO is refilled.
+   */
+  private async reportProjectionFailure(error: unknown): Promise<void> {
+    const detail = error instanceof Error ? error.message : String(error);
+    this.lastPersistError = detail;
+    try {
+      await this.deps.ports.logSink.appendJsonl(JSON.stringify({
+        ts: nowIso(this.deps.ports),
+        level: 'WARNING',
+        scope: 'task-queue',
+        event: 'snapshot.projection.failed',
+        payload: { error: detail },
+      }));
+    } catch { /* a dead log sink must not break the run either */ }
   }
 
   /**
@@ -991,6 +1020,12 @@ export class TaskQueue implements ITaskQueue {
         break;
       }
       const next = pending[cursor];
+      // D-279: `noUncheckedIndexedAccess` types an indexed read as possibly
+      // undefined even though `cursor < pending.length` proves otherwise. The
+      // explicit guard (the pre-D-278 `shift()` shape) keeps the compiler
+      // honest without a non-null assertion, and the runtime branch is
+      // unreachable — `pending` only ever grows inside this loop.
+      if (next === undefined) break;
       cursor += 1;
       let entries: readonly string[];
       try {

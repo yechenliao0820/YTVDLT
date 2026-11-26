@@ -21,6 +21,7 @@ import {
   CommandTemplateStore, NotificationCenter, TaskDetailService,
   buildDownloadRequest, buildErrorReport, buildPlaylistBatchRecordsByUrl, expandEnvVars, formatErrorReport,
   hasUnresolvedEnvToken, PRIVATE_OUTPUT_DIR, resolveDownloadTempDir, toRateLimit,
+  DEFAULT_PATH_TOKENS,
   type ClipboardPort, type IArtifactVerifier, type DesktopNotification,
 } from '@ytvdlt/core';
 import { createTaskHost, type TaskHost } from './task-host.js';
@@ -194,9 +195,52 @@ export function isPrivateDirUnresolvableError(error: unknown): error is Error {
     && (error as Error & { code?: string }).code === PRIVATE_DIR_UNRESOLVABLE;
 }
 
-/** D-254: `<STABLE_CODE>：<中文原因>` — the form rendered verbatim in failure rows. */
-function privateDirUnresolvableReason(error: Error): string {
-  return `${PRIVATE_DIR_UNRESOLVABLE}：${error.message}`;
+/**
+ * D-279: the SAME fail-closed rule, now for the ordinary download roots.
+ *
+ * `expandEnvVars()` keeps an unresolvable `%NAME%` verbatim ON PURPOSE (a typo
+ * stays visible in the settings field). D-254 already refused to let that reach
+ * `-P` for the private directory; the configured `videoDir` / `audioDir` had no
+ * such gate. A hand-edited or imported config carrying `%FOO%/Videos` therefore
+ * spawned yt-dlp with a RELATIVE, literal `-P` (spawn never goes through a
+ * shell, D-79): the app created a folder literally named `%FOO%` and every
+ * artifact then failed the containment gate — a download that "worked" but
+ * landed nowhere the app would accept, with no explanation.
+ *
+ * Refuse at intake instead, exactly like the private root: nothing is
+ * enqueued, and the renderer receives a stable code it can localise.
+ */
+export const DOWNLOAD_DIR_UNRESOLVABLE = 'DOWNLOAD_DIR_UNRESOLVABLE';
+
+const DOWNLOAD_DIR_UNRESOLVABLE_MESSAGE =
+  '下载目录无法展开（配置里仍有无法识别的 %变量%），已取消本次下载，避免文件写入字面量目录；请在设置中重新选择下载位置';
+
+function downloadDirUnresolvableError(): Error {
+  const error = new Error(DOWNLOAD_DIR_UNRESOLVABLE_MESSAGE);
+  (error as Error & { code?: string }).code = DOWNLOAD_DIR_UNRESOLVABLE;
+  return error;
+}
+
+export function isDownloadDirUnresolvableError(error: unknown): error is Error {
+  return error instanceof Error
+    && (error as Error & { code?: string }).code === DOWNLOAD_DIR_UNRESOLVABLE;
+}
+
+/**
+ * D-279: both refusals mean "a configured root still carries an unresolved
+ * `%VAR%`". The batch paths only need the code (they build `<code>：<reason>`
+ * rows), so one accessor keeps them from listing the two guards every time.
+ */
+export function dirUnresolvableCode(error: unknown): string | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === PRIVATE_DIR_UNRESOLVABLE || code === DOWNLOAD_DIR_UNRESOLVABLE) {
+    return String(code);
+  }
+  return null;
+}
+
+function dirUnresolvableReason(error: Error, code: string): string {
+  return `${code}：${error.message}`;
 }
 
 function readDefaults(
@@ -229,6 +273,23 @@ function readDefaults(
   const general = config.getDomain('general') as Record<string, unknown>;
   const privateMode = general['privateMode'] === true;
   const expandedPaths = withExpandedPaths(cast<Partial<PathsDomain>>('paths'), expandPath);
+  // D-279: the ordinary roots get the same fail-closed check as the private
+  // one below, but ONLY for values the user actually changed. The shipped
+  // defaults (`%USERVIDEOS%/…`) are resolved by the host contract — the
+  // Electron entry injects `USERVIDEOS` before any request exists (D-117) —
+  // and an environment that does not inject it (unit harnesses, CLI smoke)
+  // must not be turned into "every download is refused", which is exactly what
+  // an unconditional check did. Anything else still carrying a `%NAME%` after
+  // expansion is a typo or an imported config: refuse at intake instead of
+  // spawning a literal relative `-P` whose artifacts the containment gate then
+  // rejects one by one.
+  if (!privateMode) {
+    const shippedDefaults = new Set<string>([DEFAULT_PATH_TOKENS.videoDir, DEFAULT_PATH_TOKENS.audioDir]);
+    for (const root of [expandedPaths.videoDir, expandedPaths.audioDir]) {
+      if (typeof root !== 'string' || root === '' || shippedDefaults.has(root)) continue;
+      if (hasUnresolvedEnvToken(root)) throw downloadDirUnresolvableError();
+    }
+  }
   // D-229 part 2: the private ROOT is resolved HERE, not in the planner. The
   // request is the only place the engine and the artifact-containment gate both
   // look, so writing the expanded directory into `videoDir` / `audioDir` keeps
@@ -566,11 +627,14 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
     try {
       defaults = readDefaults(task.config, options.bundledAria2cPath, options.expandPath);
     } catch (error) {
-      if (!isPrivateDirUnresolvableError(error)) throw error;
+      // D-279: the private root and the ordinary roots share this refusal
+      // shape — both are "a configured root still carries an unresolved %VAR%".
+      const code = dirUnresolvableCode(error);
+      if (code === null) throw error;
       return {
         requested, enqueued: 0, failed: requested, taskIds: [],
         failures: input.selectedIds.map((id) => ({
-          id, reason: privateDirUnresolvableReason(error),
+          id, reason: dirUnresolvableReason(error as Error, code),
         })),
       };
     }
@@ -693,10 +757,12 @@ export async function createM4Host(options: M4HostOptions): Promise<M4Host> {
     try {
       defaults = readDefaults(task.config, options.bundledAria2cPath, options.expandPath);
     } catch (error) {
-      if (!isPrivateDirUnresolvableError(error)) throw error;
+      // D-279: private root OR ordinary root — same whole-batch refusal.
+      const code = dirUnresolvableCode(error);
+      if (code === null) throw error;
       return {
         enqueued: 0, taskIds: [],
-        failures: input.urls.map((url) => ({ url, reason: privateDirUnresolvableReason(error) })),
+        failures: input.urls.map((url) => ({ url, reason: dirUnresolvableReason(error as Error, code) })),
       };
     }
     const choice: SingleEnqueueInput = {

@@ -1104,3 +1104,78 @@ describe('external audit P2 · 畸形 request 不炸 restore / persist', () => {
     expect(last.tasks.some((task) => task.id === 'mg2')).toBe(true);
   });
 });
+
+/**
+ * D-279 · 畸形 `mediaInfo` 不炸投影（与 D-268 的 request 族同一条零抛错契约）。
+ *
+ * `TaskStore.sanitizeRecord()` 只保证 `formats` 是数组、完全不看
+ * `subtitles` / `automatic_captions` 的形状，所以一份被外部改坏或磁盘损坏的
+ * `tasks.json` 可以带着 `formats: [null]`、`subtitles: "x"` 进内存。修复前
+ * `stripCredentialUrls()` 直接 `.map` / `tracks.map`，TypeError 从
+ * `buildPersistProjection()` 抛出——那一步在 `persistSnapshot()` 的 try 之外，
+ * 于是启动 restore 拒绝、之后每次结构写都报「快照写入失败」、`run().finally`
+ * 也不再补槽。这里钉住的是「不抛 + 行还在 + 干净字段不被抹掉」。
+ */
+describe('D-279 · 畸形 mediaInfo 不炸 restore / persist（零抛错投影）', () => {
+  const auditSession = () => {
+    const mem = createInMemoryPorts();
+    const rewrites: string[] = [];
+    const inner = mem.ports.fs.writeTextAtomic.bind(mem.ports.fs);
+    mem.ports.fs.writeTextAtomic = async (path: string, text: string): Promise<void> => {
+      if (path.endsWith('tasks.json')) rewrites.push(text);
+      await inner(path, text);
+    };
+    const queue = new TaskQueue({
+      ports: mem.ports,
+      engine: fakeEngine({ mode: 'jitter', downloadCalls: 0 }),
+      verifier: okVerifier,
+      history: new HistoryStore({ ports: mem.ports }),
+      taskStore: new TaskStore({ ports: mem.ports }),
+      jsRuntimePath: 'C:/runtime/node.exe',
+      persistIntervalMs: 0,
+    });
+    return { mem, queue, rewrites };
+  };
+
+  it('formats:[null] + subtitles 非对象：restore 不抛、记录保留、落盘干净字段仍在', async () => {
+    const { queue, rewrites } = auditSession();
+    const damaged = {
+      ...record('dmg-media'),
+      state: 'Canceled',
+      mediaInfo: {
+        ...mediaInfo(),
+        formats: [null, { format_id: '1', ext: 'mp4', url: SIGNED_MEDIA_URL }],
+        subtitles: 'not-an-object',
+        automatic_captions: { en: 'not-an-array' },
+      } as unknown as MediaInfo,
+    };
+    // Before the fix this rejected with "Cannot read properties of null
+    // (reading 'url')" — from restore's final persist, i.e. the whole boot.
+    await expect(queue.restore(parse(JSON.stringify({ tasks: [damaged] })))).resolves.toBe(1);
+    expect(queue.get('dmg-media')).toBeDefined();
+    expect(rewrites.length).toBeGreaterThanOrEqual(1);
+    const persisted = parse(rewrites[rewrites.length - 1] ?? '{}');
+    const row = persisted.tasks[0] as unknown as { mediaInfo: Record<string, unknown> };
+    // The valid entry keeps its fields, loses only the signed url.
+    const valid = (row.mediaInfo['formats'] as Array<Record<string, unknown>>)[1];
+    expect(valid['format_id']).toBe('1');
+    expect(valid['url']).toBeUndefined();
+    // The malformed values pass through untouched instead of being invented.
+    expect((row.mediaInfo['formats'] as unknown[])[0]).toBeNull();
+    expect(row.mediaInfo['subtitles']).toBe('not-an-object');
+    // No signed link anywhere in the file.
+    expect(rewrites[rewrites.length - 1]).not.toContain(SIGNED_MEDIA_URL);
+  });
+
+  it('mediaInfo 非对象：投影原样透传，不抛错', async () => {
+    const { queue, rewrites } = auditSession();
+    const damaged = {
+      ...record('dmg-shape'),
+      state: 'Canceled',
+      mediaInfo: 'garbage' as unknown as MediaInfo,
+    };
+    await expect(queue.restore(parse(JSON.stringify({ tasks: [damaged] })))).resolves.toBe(1);
+    const persisted = parse(rewrites[rewrites.length - 1] ?? '{}');
+    expect((persisted.tasks[0] as unknown as Record<string, unknown>)['mediaInfo']).toBe('garbage');
+  });
+});

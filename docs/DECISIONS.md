@@ -2950,3 +2950,43 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① 新增 `COPY_SUFFIX_SCAN_MAX_ENTRIES = 10_000` 总条目预算：每个 readdir 结果条目计一次（先于 push、超限即断），超限走既有 `copySuffix.scanTruncated` WARNING（payload append-only 增 `encountered` / `entryLimit` 两字段）；② pending 队列改索引 cursor 出队（去掉 `shift()`，访问次序与 shift 版逐字一致）；③ D-274「只计成功目录」与 D-273 深度上限逐字不动；漏检回落 D-101 旧行为（复用旧文件，不损坏数据）口径不变。 |
 | 验证 | 新增钉点：单目录 10_050 条目 → WARNING `visited=1 / encountered=10000 / collected=10000 / entryLimit=10000`（证明没有逐条 ENOTDIR 尝试、没有越界收集）、任务照常 Completed、界外旧副本如实未收集（模板原样无后缀，D-101 回落）；既有 D-273/D-274 三例（250 junk 模拟目录超 200 目录预算、250 真文件不占预算、反斜杠模板）全部原样绿——新预算在它们的规模下不触发。全量 unit+contract+integration：873 文件 / 3079 项 / 3073 过 + 6 skipped / 0 failed（当日快照，2026-11-22）；`turbo typecheck` 5/5、`check-layering` 0 violations、`frozen-gate` exit 0。 |
 | 未覆盖 | 10_000 是防失控取舍（十万级目录中的旧副本在预算外漏检——回落 D-101 口径）；真实 NTFS 大目录（非 mock）未实测（本机无此环境）；打包版真机未测（铁律 9）。 |
+
+## D-279 · 2026-11-26 · `hidden="false"` 显示契约补全（发布审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 全站用 `setAttribute('hidden', flag ? 'true' : 'false')` 做显隐，各页只写了 `[hidden="true"] { display: none }`。`hidden` 是**布尔属性**：`hidden="false"` 仍命中 UA 的 `[hidden] { display: none }`，元素只有在**作者样式另给了 `display`** 时才回得来。`.cards`（grid）/ `.empty`（flex）/ `.modal-backdrop`（flex）恰好有，所以队列主体正常；没有 `display` 声明的那批永久不可见：队列状态行 `#queue-status`（`notify()` 的唯一文字出口，含入队/删除/私密开关/拒绝原因）、队列页调试行 `#ytvdlt-output`、删除确认弹窗的复选框 `#queue-modal-with-files` 与说明句 `#queue-modal-note`、设置页「打开发布页」按钮 `#settings-app-page`、日志页正文 `.log-lines`、批量页行列表 `#batch-rows`。项目自己在 `queue/index.html:63` 写过这条规则、手册 §9 坑 44 也记录过这个机制，但当时的处置是「逐个补 display / 特例 `removeAttribute`」，没有收口——于是每新增一个裸元素就复发一次。 |
+| 根因 | 显隐契约只完成了「隐藏」方向；「显示」方向依赖每个元素恰好有作者 display，没人系统检查。单测只断言 `getAttribute('hidden') === 'false'`（假 DOM 不算样式），E2E 基线又把缺失画面当成"正确"冻结下来，所以长期无人发现。 |
+| 决策 | 在 `styles/layout.css` 顶部加一条低特异性规则 `[hidden="false"] { display: revert; }`。`revert` 回到 UA 值（p→block、button→inline-block、pre→block、checkbox→inline-block、small→inline），而页面/组件自己的 `display` 规则（同特异性、源码更靠后）照旧胜出，`.cards` 仍是 grid、`.empty` 仍是 flex。**不加 `!important`**（会把这些容器压回 block）；**不改 JS、不改属性契约、不动 45 条既有断言**——它们钉的是实现细节，改掉等于顺手重写测试契约。M3 三个弹窗不引用 layout.css，且不走 `hidden="false"` 路径，保持冻结。 |
+| 验证 | 真实 Chromium（151.0.7922）计算样式实测：`p=block / button=inline-block / small=inline / pre=block / checkbox=inline-block / .cards=grid / .modal-backdrop=flex / hidden="true"=none`。E2E 首轮只有 2 例像素变化且 DOM 全等：`batch-ready`（272 368 px，26.6%）、`log-ready`（673 771 px，65.8%）——正是行列表与日志正文从"永久空白"恢复可见，属预期；按 §7 逐 case `--update-baselines` 重建这两张 PNG（未全量覆盖），重建后全量 31/31 + 反例 5/5。全量 unit+contract 173 文件 / 3084 项 / 3078 过 + 6 skipped / 0 failed。 |
+| 未覆盖 | 其余页面元素未逐个像素复核（依赖全量 E2E 兜底）；M3 弹窗若有未来新增的 `hidden="false"` 元素，需要把 layout.css 引入或自行补 `display`——这条已写进 layout.css 注释。 |
+
+## D-280 · 2026-11-26 · 畸形 `mediaInfo` 零抛错 + `run()` 收尾必定补槽（发布审计 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `stripCredentialUrls()` 直接 `info.formats.map(...)` / `tracks.map(...)`；`TaskStore.sanitizeRecord()` 只保证 `formats` 是数组（不看元素）、完全不碰 `subtitles` / `automatic_captions`。一份被手改/损坏的 `tasks.json` 带 `formats:[null]` 就能让 `buildPersistProjection()` 抛 `TypeError: Cannot read properties of null (reading 'url')`——而这一步在 `persistSnapshot()` 的 try **之外**。后果连锁：启动 `restoreTasks()` reject（宿主创建失败）、之后每次 enqueue/restart/remove 报「快照写入失败」、进度 tick 的 `void persistSnapshot()` 变成未处理拒绝。同一族的第二处：`run().finally` 里 `await persistSnapshot()` 在 `pump()` **之前**，投影一抛错就永久跳过补槽，排队任务停在"排队中"直到用户再动一次队列。D-268 已为 `request` 立过零抛错契约，`mediaInfo` 是漏掉的那一半。 |
+| 根因 | 快照投影的「零抛错」只在一个域落地；`finally` 把「落盘」与「补槽」串成一条依赖链，落盘抛错就吞掉补槽。 |
+| 决策 | ① `snapshot-media.ts` 全部改为形状检查：非对象/非数组**原样透传**（不在投影里发明数据，归一化仍归 load 侧），合法条目只摘 `url`；② `run().finally` 把 `persistSnapshot()` 包进 `try/catch`，异常走新私有 `reportProjectionFailure()`（WARNING `snapshot.projection.failed` + 记 `lastPersistError`），**永不吞掉 `pump()`**。 |
+| 验证 | 直接执行复现：修复前 `formats:[null]` → TypeError；修复后 `queue.restore()` resolves、记录保留、落盘仍摘掉合法条目的签名链接、畸形值原样透传。新增 2 例（`formats:[null]`+`subtitles:"x"`；`mediaInfo:"garbage"`），`task-snapshot-persist` 25→27 全绿；全量 3078 过 / 0 failed。 |
+| 未覆盖 | `pump()` 守卫分支未单独造测试（投影已保证零抛错，构造"投影必抛"的用例只能靠 Proxy 这类人造对象，收益低于维护成本）；`TaskStore` 加载侧仍不做元素级归一化（本轮只保证不炸，不保证洗形）。 |
+
+## D-281 · 2026-11-26 · 普通下载目录展开失败 fail-closed（默认令牌豁免，发布审计 P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | D-254 只给无痕目录加了 `hasUnresolvedEnvToken` 门。普通 `paths.videoDir` / `audioDir` 若残留 `%NAME%`（手改、导入、旧配置），`-P` 会拿到相对字面量路径（spawn 不经 shell，坑 3/43），yt-dlp 建一个叫 `%NAME%` 的目录，产物随后被 D-184/203 封链门逐条判「根外」——用户只看到一句"产物超出输出目录"。 |
+| 根因 | 同 D-254：`expandEnvVars()` 故意保留解析不了的令牌，但没有第二道门阻止它进请求。 |
+| 决策 | `readDefaults()` 在非无痕模式下检查两个下载根：**值等于出厂默认令牌（`%USERVIDEOS%/YTVDLT`、`…/Audio`）时豁免**，其余仍含 `%token%` 一律抛稳定码 `DOWNLOAD_DIR_UNRESOLVABLE`（中文 message + 渲染层 code→i18n 键 `queue.precheck.downloadDir`，中英各一条）。豁免的理由是宿主契约：`electron-entry` 在建任何请求前注入 `USERVIDEOS`（D-117）。**无条件检查被实测否决**——单测/CLI 宿主不注入该令牌，无条件版让 23 条既有用例变红，等于把"环境差异"变成"所有下载被拒"。三条入口（单条 / TXT / 播放列表）共用 `dirUnresolvableCode()`，整批拒绝、逐条带码。 |
+| 验证 | 新增 3 例：自定义 `videoDir` 残留令牌 → `DOWNLOAD_DIR_UNRESOLVABLE` 且队列零新增；默认令牌在未注入 `USERVIDEOS` 的宿主照常入队（不误伤）；TXT 批量逐条 reason 带码。全量 3078 过 / 0 failed。 |
+| 未覆盖 | 路径里含两个 `%` 的正常目录（如 `D:/100%/x%`）会被误判为未解析令牌——与 D-254 同一谓词的已知边界，报错可读且可在设置页改回；`commandDir` / `tempDir` 不在本门范围内（前者只用于模板文件，后者按任务解析且有 D-254 同款展开路径）。 |
+
+## D-282 · 2026-11-26 · 发布门禁修复 + close-lag 探针去抖（发布审计 P0 门禁/P3）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | ① `a37e441`（D-278）把 `pending.shift()` 改成 cursor 后删掉了 `undefined` 守卫，`noUncheckedIndexedAccess` 下 4 处 TS18048 让 `pnpm typecheck` 必红（core 报错，engine-ytdlp / apps/desktop 连带），CI 的 required check 必挂；② D-275 新增的 `tests/integration/offline/categorized-dir-local.test.ts` 未登记 `M3_TEST_FILE_MAP`，`M5-GATE-file-coverage` FAIL → `releaseReady=false`；③ `stream-tail-buffer.test.ts` 的 `closeLagReproducible` 探针从 spawn 起算 1.5 s，满载时进程启动就吃光预算 → 误判"可复现"，随后 test 7 在 close 不滞后的环境里跑，5000 ms 断言实测 270 ms 失败（2026-11-25 全量 1 红，同日两次全量 1 红 2 绿）。 |
+| 根因 | ① 重构时把类型层守卫当成运行时冗余删掉；② 新测试文件漏登记（手册 §7 步骤 8 的既有教训）；③ 探针把"进程启动时间"算进了"close 滞后窗口"。 |
+| 决策 | ① 补回 `if (next === undefined) break;`（不放宽 `noUncheckedIndexedAccess`、不用非空断言）；② `M3_TEST_FILE_MAP` 增 `categorized-dir-local.test.ts: ['A-D275']`，并在 `M5_ASSERTIONS` 增 A-D275 真断言（真实随包 yt-dlp 落地 `<Extractor>/`、无字面量 token 目录、单视频无 NA 层）；③ 探针改为从子进程 `exit` 起算 1.5 s，并加 8 s 外层守卫——子进程根本没退出时判"不可复现"（跳过），绝不判"可复现"。test 7 自身断言一字未改。 |
+| 验证 | `pnpm typecheck` 5/5 successful；`node scripts/acceptance.mjs --milestone M5` 见当次输出（目标 `releaseReady=true`）；全量 unit+contract 3078 过；E2E 31/31 + 反例 5/5。 |
+| 未覆盖 | 探针只在本机（Windows 11 / Chrome for Testing 151）验证；CI 的 windows-latest 负载特征不同，若仍偶发红，下一步是把 test 7 的 8.5 s 上界也改成"相对 exit 计时"而非绝对上限。 |

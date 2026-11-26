@@ -560,3 +560,51 @@ describe('D-254 · 无痕目录展开失败当场拒绝（fail-closed）', () =>
     host.dispose();
   });
 });
+
+/**
+ * D-279 · 普通下载目录的 fail-closed（只针对用户改过的值）。
+ *
+ * 与 D-254 同一根因：`expandEnvVars()` 故意把解析不了的 `%NAME%` 原样留下，
+ * 而这个结果一旦进 `-P`（spawn 不经 shell），yt-dlp 会建一个叫 `%NAME%` 的
+ * 字面量目录，产物随后被封链门逐条判「根外」。区别在于**出厂默认令牌**
+ * （`%USERVIDEOS%/…`）由宿主契约解析（electron-entry 注入 USERVIDEOS，D-117），
+ * 不能因为测试/CLI 宿主没有注入就把所有下载拒掉——所以默认值豁免，只查用户
+ * 真正改过的目录。
+ */
+describe('D-279 · 普通下载目录展开失败当场拒绝（默认令牌豁免）', () => {
+  it('自定义 videoDir 仍带未解析 %变量%：拒绝入队、队列零新增', async () => {
+    const { host } = await setup();
+    await host.task.config.set('paths', 'videoDir', '%YTVDLT_NO_SUCH_VAR%/Videos');
+    const before = host.task.queue.list().length;
+
+    await expect(host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' }))
+      .rejects.toMatchObject({ code: 'DOWNLOAD_DIR_UNRESOLVABLE' });
+    await expect(host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' }))
+      .rejects.toThrow(/下载目录无法展开/);
+    expect(host.task.queue.list().length).toBe(before);
+    host.dispose();
+  });
+
+  it('出厂默认令牌（%USERVIDEOS%/…）不误伤：未注入该变量的宿主照常入队', async () => {
+    const { host } = await setup();
+    // `setup()` deliberately injects no expander — the same shape as a CLI
+    // harness. The default tokens must still be accepted (host contract).
+    const ids = await host.enqueueSingle({ url: 'https://example.org/v', kind: 'video' });
+    expect(ids).toHaveLength(1);
+    host.dispose();
+  });
+
+  it('TXT 批量入口：整批拒绝，逐条 reason 带稳定码', async () => {
+    const { host } = await setup();
+    await host.task.config.set('paths', 'audioDir', '%YTVDLT_NO_SUCH_VAR%/Audio');
+    const result = await host.enqueueTxtBatch({
+      urls: ['https://example.org/t1', 'https://example.org/t2'], kind: 'video',
+    });
+    expect(result.enqueued).toBe(0);
+    expect(result.failures).toHaveLength(2);
+    for (const failure of result.failures) {
+      expect(failure.reason).toContain('DOWNLOAD_DIR_UNRESOLVABLE');
+    }
+    host.dispose();
+  });
+});

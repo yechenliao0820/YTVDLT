@@ -193,14 +193,17 @@
    * the active locale and keeps the raw `reason` only for unknown codes.
    * Mirrors the refusal codes the main process actually answers with:
    *   SITE_UNSUPPORTED / ITEM_UNSUPPORTED / PRECHECK_CANCELLED (pre-check gate)
-   *   PRIVATE_DIR_UNRESOLVABLE (D-254 fail-closed private-dir expansion).
+   *   PRIVATE_DIR_UNRESOLVABLE (D-254 fail-closed private-dir expansion);
+   *   DOWNLOAD_DIR_UNRESOLVABLE (D-279 fail-closed ordinary video/audio root —
+   *   a configured `%VAR%` that no longer expands).
    * Pure: a string in, a string or `null` out — no i18n, no DOM (§3.0).
    */
   var ENQUEUE_REFUSAL_KEYS = {
     SITE_UNSUPPORTED: 'queue.precheck.blocked.site',
     ITEM_UNSUPPORTED: 'queue.precheck.blocked.item',
     PRECHECK_CANCELLED: 'queue.precheck.cancelled',
-    PRIVATE_DIR_UNRESOLVABLE: 'queue.precheck.privateDir'
+    PRIVATE_DIR_UNRESOLVABLE: 'queue.precheck.privateDir',
+    DOWNLOAD_DIR_UNRESOLVABLE: 'queue.precheck.downloadDir'
   };
 
   function enqueueRefusalKey(code) {
