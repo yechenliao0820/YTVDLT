@@ -112,6 +112,40 @@ export interface ThumbnailCacheOptions {
   readonly now?: () => number;
   /** How many successful `ensure()` calls between automatic prune passes. */
   readonly autoPruneEvery?: number;
+  /**
+   * D-288 (append-only, OPTIONAL): a PROXY-AWARE transport for covers, used
+   * only after the pinned `http` fetch was refused because DNS handed back a
+   * local proxy's Fake-IP (198.18.0.0/15 — the exact failure D-214 fixed for
+   * the update channel, left behind here on purpose at the time).
+   *
+   * Why a fallback instead of replacing `http` outright: D-137's DNS pinning
+   * (resolve → validate every hop → pin the socket) stays the default path, so
+   * a plain network keeps the strict SSRF posture byte-for-byte. Only after a
+   * refusal that literally names a Fake-IP do we hand the same https URL to
+   * Chromium's stack, which follows the system proxy / TUN the user actually
+   * runs. The URL still passes `isPublicHttpsUrl` first, and the response still
+   * has to be a real image signature within `maxBytes`.
+   */
+  readonly fetchViaProxy?: (
+    url: string,
+    options: { readonly timeoutMs: number; readonly maxBytes: number },
+  ) => Promise<Uint8Array>;
+}
+
+/**
+ * D-288: `blocked resolved address at hop N: 198.18.x.x (host)` — the pinned
+ * transport refused a Fake-IP. 198.18.0.0/15 is the range Clash/Mihomo uses by
+ * default; a real public address in that range does not exist in practice.
+ * IPv6 Fake-IP (fcc0::/10) is not matched — node's lookup here returns IPv4
+ * first for these CDNs, and a miss simply keeps the old letter-badge path.
+ */
+const FAKE_IP_BLOCK = /blocked resolved address at hop \d+: (\d{1,3}(?:\.\d{1,3}){3})/;
+export function isProxyFakeIpBlock(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = FAKE_IP_BLOCK.exec(message);
+  if (match === null || match[1] === undefined) return false;
+  const [a, b] = match[1].split('.').map(Number);
+  return a === 198 && (b === 18 || b === 19);
 }
 
 /** What the settings page shows; all sizes are bytes on disk. */
@@ -240,6 +274,13 @@ const IMAGE_EXTENSIONS: readonly string[] = ['jpg', 'jpeg', 'png', 'webp', 'gif'
 const CANDIDATE_EXTENSIONS: readonly string[] = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
 const AUTO_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const TOUCH_INTERVAL_MS = 60 * 1000;
+/**
+ * D-288: a failed cover fetch is retried only after this cool-down. The queue
+ * polls every ~500 ms while a task runs, and `ensure()` is called per tick —
+ * without this, one dead CDN produced 11 WARNING lines in five seconds and
+ * re-hit the network for the whole download.
+ */
+const FAILED_RETRY_MS = 5 * 60 * 1000;
 
 interface IndexEntry {
   bytes: number;
@@ -371,6 +412,8 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
   const byTask = new Map<string, string>();
   /** taskId -> in-flight attempt, so a 1.2 s poll cannot fan out requests. */
   const inFlight = new Map<string, Promise<string | null>>();
+  /** D-288: cover URL -> retry-not-before timestamp (see FAILED_RETRY_MS). */
+  const failedUntil = new Map<string, number>();
   /**
    * D-258: task ids whose reference was dropped (`forget()`) while an
    * `ensure()` may still be racing the network. A landing attempt for one of
@@ -701,11 +744,24 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
     // instead of buffering the whole body and checking its length afterwards.
     if (!isPublicHttpsUrl(fetchUrl)) return null;
     try {
-      const bytes = await http.getBytes(fetchUrl, {
-        timeoutMs,
-        maxBytes: maxBytesPerFile,
-        urlPolicy: isPublicHttpsUrl,
-      });
+      // D-288: pinned fetch first (D-137). Only a refusal that names a local
+      // proxy's Fake-IP earns the Chromium retry; a 404 / TLS failure / policy
+      // refusal stays a plain failure and never touches the proxy path.
+      let bytes: Uint8Array;
+      try {
+        bytes = await http.getBytes(fetchUrl, {
+          timeoutMs,
+          maxBytes: maxBytesPerFile,
+          urlPolicy: isPublicHttpsUrl,
+        });
+      } catch (error) {
+        const viaProxy = options.fetchViaProxy;
+        if (viaProxy === undefined || !isProxyFakeIpBlock(error)) throw error;
+        await logger.info('thumbnail', 'pinned cover fetch hit a proxy Fake-IP; retrying through the Chromium stack', {
+          taskId,
+        });
+        bytes = await viaProxy(fetchUrl, { timeoutMs, maxBytes: maxBytesPerFile });
+      }
       // Still checked here: an injected HttpPort (tests, future adapters) is not
       // required to honour the ceiling itself.
       if (bytes.byteLength === 0 || bytes.byteLength > maxBytesPerFile) return null;
@@ -725,9 +781,11 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       const stored = await readFile(target).catch(() => null);
       if (stored === null) return null;
       await attach(name, taskId, bytes.byteLength, true, privateCover); // D-258: this attempt wrote the bytes
+      failedUntil.delete(fetchUrl);
       maybeAutoPrune();
       return target;
     } catch (error) {
+      failedUntil.set(fetchUrl, now() + FAILED_RETRY_MS);
       await logger.warn('thumbnail', 'cover fetch failed; card keeps its letter badge', {
         taskId,
         detail: error instanceof Error ? error.message : String(error),
@@ -1094,6 +1152,9 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       // 一律 null（无封面占位），升级失败的站点自然回落原行为。
       const fetchUrl = upgradeThumbnailUrl(url);
       if (fetchUrl === null) return Promise.resolve(null);
+      // D-288: a URL that just failed is not re-fetched on every queue tick.
+      const retryAt = failedUntil.get(fetchUrl);
+      if (retryAt !== undefined && retryAt > now()) return Promise.resolve(null);
       const pending = inFlight.get(taskId);
       if (pending !== undefined) return pending;
       const attempt = (async () => {

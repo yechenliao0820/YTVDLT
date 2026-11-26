@@ -41,9 +41,23 @@ async function serveStalledInstaller(): Promise<string> {
   return `http://127.0.0.1:${port}/setup`;
 }
 
+/** Completes early while claiming a larger body — a NON-abort failure. */
+async function serveTruncatedInstaller(): Promise<string> {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-length': '1000' });
+    res.write(Buffer.from([0x4d, 0x5a]));
+    res.end();
+  });
+  servers.push(server);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : 0;
+  return `http://127.0.0.1:${port}/setup`;
+}
+
 describe('update download cancellation', () => {
-  it.each([false, true])('stops a stream and reports cleanup failure=%s', async (failCleanup) => {
-    const url = await serveStalledInstaller();
+  const startDownload = async (failCleanup: boolean, url: string) => {
     const dir = await mkdtemp(join(tmpdir(), 'ytvdlt-cancel-'));
     const target = join(dir, 'setup.exe');
     const controller = new AbortController();
@@ -55,14 +69,51 @@ describe('update download cancellation', () => {
     });
     const pending = downloadToFile({ url, targetPath: target,
       signal: controller.signal, trashPartial: trash, onProgress: () => started() });
-    await progress;
-    controller.abort();
-    await expect(pending).rejects.toThrow(failCleanup ? '临时文件清理失败' : /abort/i);
-    expect(trash).toHaveBeenCalledOnce();
-    const files = await readdir(dir);
+    return { dir, controller, progress, trash, pending };
+  };
+
+  it('recycles the .part file on cancel and keeps the cancel outcome', async () => {
+    const url = await serveStalledInstaller();
+    const h = await startDownload(false, url);
+    await h.progress;
+    h.controller.abort();
+    await expect(h.pending).rejects.toThrow(/abort/i);
+    expect(h.trash).toHaveBeenCalledOnce();
+    const files = await readdir(h.dir);
     expect(files).toHaveLength(1);
-    expect(files[0]).toMatch(failCleanup ? /\.part$/ : /\.part\.recycled$/);
+    expect(files[0]).toMatch(/\.part\.recycled$/);
     expect(files).not.toContain('setup.exe');
+  });
+
+  /**
+   * D-285 · the exact report from the field: cancel + a failing recycle-bin
+   * move used to reject with 「临时文件清理失败，文件保留在 …」, so the settings
+   * page showed a cleanup failure for a cancel that had worked. A cancel must
+   * stay a cancel; the leftover `.part` is ours, uniquely named and never
+   * reused, so the fallback deletes it directly and stays quiet.
+   */
+  it('a failing recycle-bin move never hides a cancel (D-285)', async () => {
+    const url = await serveStalledInstaller();
+    const h = await startDownload(true, url);
+    await h.progress;
+    h.controller.abort();
+    await expect(h.pending).rejects.toThrow(/abort/i);
+    const reason = await h.pending.catch((error: unknown) => error as Error);
+    expect(reason.message).not.toContain('临时文件清理失败');
+    expect(h.trash).toHaveBeenCalledOnce();
+    // The direct-delete fallback removed the partial: nothing left behind.
+    expect(await readdir(h.dir)).toEqual([]);
+  });
+
+  it('still reports a failed cleanup after a REAL failure (not a cancel)', async () => {
+    const url = await serveTruncatedInstaller();
+    const h = await startDownload(true, url);
+    await expect(h.pending).rejects.toThrow(/临时文件清理失败/);
+    expect(h.trash).toHaveBeenCalledOnce();
+    // A real failure keeps the bytes for support inspection, as before.
+    const files = await readdir(h.dir);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/\.part$/);
   });
 
   it('does not create or remove files for a pre-aborted request', async () => {

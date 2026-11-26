@@ -90,6 +90,11 @@
   .check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
   .check input { accent-color: var(--accent); }
   #settings-app-state[data-update-state="error"] { color: var(--danger); }
+  /* D-287: bundled "what's new" panel — inline, repeatable, offline. */
+  .release-notes { margin: 6px 0 2px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--accent-soft); }
+  .release-notes-head { font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
+  .release-notes-body { margin: 0; max-height: min(320px, 42vh); overflow-y: auto; overflow-x: hidden; white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 12.5px; line-height: 1.65; color: var(--ink); }
+  html[data-theme="dark"] .release-notes { background: #101c29; }
   #settings-app-state[data-update-state="available"] { color: var(--accent); font-weight: 700; }
   #settings-components[data-component-state="failed"] { color: var(--danger); }
   #settings-components[data-component-state="available"] { color: var(--accent); font-weight: 700; }
@@ -221,6 +226,15 @@
             <span class="spacer"></span>
             <button type="button" id="settings-app-update" data-action="app-update" data-i18n="settings.app.check" data-fit="" disabled="">Check for updates</button>
             <button type="button" id="settings-app-page" class="primary" data-i18n="settings.app.page" data-fit="" hidden="true">Open release page</button>
+          </div>
+          <div class="update-row">
+            <label class="check"><input type="checkbox" id="settings-update-cleanup"><span data-i18n="settings.app.cleanup" data-fit="">Delete the installer after updating</span></label>
+            <span class="spacer"></span>
+            <button type="button" id="settings-app-whatsnew" aria-expanded="false" aria-controls="settings-release-notes" data-i18n="settings.app.whatsnew" data-fit="">What's new in this version</button>
+          </div>
+          <div class="release-notes" id="settings-release-notes" hidden="true">
+            <div class="release-notes-head" id="settings-release-notes-head">—</div>
+            <pre class="release-notes-body" id="settings-release-notes-body"></pre>
           </div>
           <p class="note" id="settings-app-state" data-update-state="idle">Offline: main process not connected</p>
         </div>
@@ -456,6 +470,7 @@ use, modify or replace those components under their own licenses.</pre>
 <script src="../../app-shell.js"></script>
 <script src="../../shell/app-nav.js"></script>
 <script src="../../shell/app-version.js"></script>
+<script src="./release-notes.js"></script>
 <script src="./settings.js"></script>
 <script src="../../about/about.js"></script>
 

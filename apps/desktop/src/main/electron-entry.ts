@@ -18,6 +18,7 @@ import {
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import type { CorePorts, EngineUpdateSource } from '@ytvdlt/shared';
 import {
   ArtifactVerifier, ErrorMapper, Logger, expandEnvVars, purgePrivateRecords,
@@ -487,6 +488,15 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       dir: join(dataDir.dataDir, 'thumbs'),
       ...(ports.http === undefined ? {} : { http: ports.http }),
       logger,
+      // D-288: when the pinned cover fetch is refused because the system proxy
+      // handed back a Fake-IP (198.18.0.0/15), retry the same https URL through
+      // Chromium's stack — the transport D-214 already gave the update channel.
+      // Its default policy is `isPublicHttpsUrl`; the bytes still have to pass
+      // the image-signature + size checks in the cache.
+      fetchViaProxy: (url, limits) => updateNetwork.httpPort.getBytes(url, {
+        timeoutMs: limits.timeoutMs,
+        maxBytes: limits.maxBytes,
+      }),
       liveTaskIds: () => (hostRef?.m4.task.queue.list().map((item) => item.id) ?? []),
       policy: () => ({
         enabled: configRef?.get('advanced', 'autoCleanThumbnailCache') !== false,
@@ -655,6 +665,8 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       updatesDir: join(dataDir.dataDir, 'updates'),
       openExternal: async (url: string) => { await shell.openExternal(url); },
       openPath: async (path: string) => shell.openPath(path),
+      // D-284: quit first, install after — the NSIS guard no longer races us.
+      launchAfterExit: (installerPath: string) => scheduleInstallerAfterExit(installerPath),
       trashPartial: async (path: string) => shell.trashItem(path),
       quit: () => { app.quit(); },
     });
@@ -767,7 +779,13 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
       return hash.digest('hex');
     });
-    void cleanupCompletedUpdate(cleanupFiles, join(appDataDir, 'updates'), appVersion);
+    // `configRef` is assigned inside `createHost()`, which this closure cannot
+    // see, so TS narrows it to `null` here. Re-assert the declared union.
+    const cleanupConfig = configRef as IConfigStore | null;
+    void cleanupCompletedUpdate(cleanupFiles, join(appDataDir, 'updates'), appVersion, {
+      // D-286: Settings → App update → "自动清理安装包" (default ON).
+      enabled: cleanupConfig === null ? true : cleanupConfig.get('advanced', 'autoCleanUpdateInstaller') !== false,
+    });
   }
   return handle;
 }
@@ -785,6 +803,57 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
  * Without the variable there is no source, and `selfUpdate()` reports
  * "nothing changed" instead of pretending.
  */
+/**
+ * D-284: start the verified installer ONLY after this process is gone.
+ *
+ * The installer is an electron-builder NSIS package. At `.onInit` it runs
+ * `_CHECK_APP_RUNNING`, which (a) shows a 确定/取消 "app is running" box when
+ * the app is still alive — **取消 quits the installer** — and (b) kills
+ * processes by `$INSTDIR` path prefix, so a lingering helper or the old
+ * uninstaller keeps the "cannot be closed / Retry" loop alive. Launching the
+ * installer 800 ms before `app.quit()` therefore raced that guard on every
+ * in-app update; the user saw the prompt, cancelled it, and the install died.
+ *
+ * This helper hands the installer to a detached PowerShell waiter that polls
+ * our PID (200 ms), waits at most 45 s, then `Start-Process`es the installer
+ * with `--updated` — the exact parameter electron-builder reads via
+ * `StdUtils.TestParameter "updated"` to skip every dialog and take over
+ * silently. The app's own quit path (cancel tasks within the 5 s budget,
+ * flush the snapshot) finishes first, so a download is cancelled cleanly
+ * instead of being hard-killed mid-write.
+ *
+ * Returns false when the waiter cannot even be spawned (PowerShell missing /
+ * blocked); the caller then falls back to the old `openPath` behaviour rather
+ * than leaving the user without an install path.
+ */
+function scheduleInstallerAfterExit(installerPath: string): Promise<boolean> {
+  // The path travels through the environment, never interpolated into the
+  // command text: a quoting mistake there would be a command-injection seam.
+  const script = [
+    '$deadline = (Get-Date).AddSeconds(45)',
+    `while ((Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 200 }`,
+    "Start-Process -FilePath $env:YTVDLT_INSTALLER -ArgumentList '--updated'",
+  ].join('; ');
+  return new Promise<boolean>((resolve) => {
+    try {
+      const child = spawn(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', script],
+        {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+          env: { ...process.env, YTVDLT_INSTALLER: installerPath },
+        },
+      );
+      child.once('error', () => { resolve(false); });
+      child.once('spawn', () => { child.unref(); resolve(true); });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
 function resolveEngineUpdateSource(ports: CorePorts, _runtimeDir: string): EngineUpdateSource | null {
   const dir = (process.env['YTVDLT_ENGINE_SOURCE_DIR'] ?? '').trim();
   if (dir === '') return null;

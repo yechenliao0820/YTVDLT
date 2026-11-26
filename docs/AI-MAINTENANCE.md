@@ -538,6 +538,8 @@ remote: - Required status check "typecheck · tests · gates (windows-latest)" i
 
 46. **`-P` 不展开 yt-dlp 输出模板字段，`-o` 才展开**（D-275，master 源码核对）：引擎的 `get_output_path()`（`-P` 背后的处理）对路径值只做 `expand_path()`（环境变量 / tilde）+ `sanitize_path()`；`%(field)s` 的字段替换只发生在 `prepare_outtmpl → evaluate_outtmpl`（即 `-o` 的链路）。把 `%(extractor_key)s` / `%(playlist)s` 之类模板 token 放进 `-P`，落盘的就是**字面量名字的目录**——分类目录功能（D-275 修复前）正是这样错的，而且预览链与 argv 同链，预览显示的也是字面量，「一致但一致地错」。红线：**`-P` 只接受根目录（已展开、无 `%VAR%` 也无 `%(…)`），任何动态目录层一律进 `-o` 模板前缀**（`categorizedTemplatePrefix`）；`chapter:` 选择器必须保持为 `-o` 值的首 token，前缀插在它之后。缺字段的目录层用默认值语法（`%(playlist|)s`）塌缩，别让引擎的 `NA` 占位符变成目录名。
 
+47. **应用内安装绝不能「先开安装包、800 ms 后再退出」**（D-284，业主实测 P1）：electron-builder 的 NSIS 在 `.onInit` 跑 `_CHECK_APP_RUNNING`。应用仍活着就会弹「正在运行，点击确定关闭」，而该框**取消 = 安装器直接 `Quit`**（用户看到的是"点了确定，安装包自己没了"）；检查失败两次再弹「无法关闭，请手动关闭后重试」，取消同样退出。更隐蔽的是它的 `FIND_PROCESS` / `KILL_PROCESS` 在 PowerShell 分支**忽略 exe 名**，按 `$_.Path.StartsWith('$INSTDIR')` 前缀枚举并 `Stop-Process`——安装目录下的 helper、旧卸载器都会命中，所以窗口关掉后仍可能死循环。正确顺序：**先退出**（走完取消任务与快照预算，最多 5 s），再由**分离的等待器**在进程真正消失后用 `--updated` 启动安装器（`isUpdated` 来自 `StdUtils.TestParameter "updated"`，走静默分支、不弹任何框）。安装包路径经环境变量传给等待器，**绝不拼进命令文本**。回退路径必须保留（等待器 spawn 失败时退回 `openPath`），否则等于切断安装入口。
+
 分诊顺序与这些坑的对应关系见 §4；**§4 给顺序，本节给原理，不重复叙述事故经过**。
 
 
@@ -639,6 +641,11 @@ node scripts/check-layering.mjs                     # 有没有偷偷 import nod
 
 本机**没有 `gh` CLI**（`gh: command not found`），发布走 GitHub REST API，凭据复用
 Git Credential Manager 里那份（`git credential fill` 取 `password`，只在 shell 变量里用，不要打印）。
+
+**打包前先补本版说明（D-287）**：把这一版的用户可见变更写进
+`packages/ui/src/pages/settings/release-notes.js`——同一版本一条，`zh` / `en` 各一段（结尾附验证结论），
+版本号写纯 semver。设置页「应用本体 → 本版更新内容」直接读它，离线可看、可反复打开；
+不补的话该面板只会显示「此版本没有附带更新说明」。Release body 与它应当同源，改一处记得改另一处。
 
 ```bash
 CREDS=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill)

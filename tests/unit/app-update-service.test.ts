@@ -57,6 +57,8 @@ function harness(options: {
   updatesDir?: string;
   /** Real streaming hash for tests whose `install()` re-verifies real bytes. */
   hash?: HashPort;
+  /** D-284 deferred-install seam (absent = legacy openPath path). */
+  launchAfterExit?: AppUpdateServiceDeps['launchAfterExit'];
 } = {}): Harness {
   const base = createInMemoryPorts();
   const single = options.response ?? (async () => releaseJson());
@@ -95,6 +97,9 @@ function harness(options: {
     ...(options.downloadInstaller === undefined
       ? {}
       : { downloadInstaller: options.downloadInstaller }),
+    ...(options.launchAfterExit === undefined
+      ? {}
+      : { launchAfterExit: options.launchAfterExit }),
   };
   return { service: createAppUpdateService(deps), config, values, opened, quitCount: () => quits };
 }
@@ -341,7 +346,9 @@ describe('app update service · install baseline (D-219: the sidecar is never a 
   };
 
   /** Offline fresh-download run that reaches `ready` (published digest required). */
-  const downloadReady = (digest: string | null) => {
+  const downloadReady = (digest: string | null, extra: {
+    launchAfterExit?: AppUpdateServiceDeps['launchAfterExit'];
+  } = {}) => {
     const dir = mkdtempSync(join(tmpdir(), 'ytvdlt-baseline-'));
     const h = harness({
       response: async () => releaseJson({
@@ -354,6 +361,7 @@ describe('app update service · install baseline (D-219: the sidecar is never a 
       }),
       updatesDir: dir,
       hash: REAL_HASH,
+      ...(extra.launchAfterExit === undefined ? {} : { launchAfterExit: extra.launchAfterExit }),
       downloadInstaller: async (request) => {
         writeFileSync(request.targetPath, INSTALLER);
         return { path: request.targetPath, bytes: INSTALLER.length, sha256: GOOD_HASH };
@@ -422,6 +430,53 @@ describe('app update service · install baseline (D-219: the sidecar is never a 
     expect(existsSync(`${h.target}.sha256`)).toBe(true);
     const attempt = await h.service.install();
     expect(attempt.ok).toBe(true);
+    expect(h.opened).toHaveLength(1);
+    expect(h.opened[0]).toContain(ASSET_NAME);
+  });
+
+  /**
+   * D-284 · the installer must start AFTER this process exits, with
+   * `--updated`.
+   *
+   * The old order opened the installer immediately and quit 800 ms later, so
+   * the NSIS `_CHECK_APP_RUNNING` guard (electron-builder's `.onInit`) always
+   * found a live app: it showed the 确定/取消 box, and 取消 quits the installer
+   * — "I clicked OK and the installer vanished". The deferred path removes the
+   * race and the dialog in one move; `openPath` must NOT be used when the
+   * waiter was scheduled.
+   */
+  it('D-284: schedules the installer after exit and does not openPath', async () => {
+    const scheduled: string[] = [];
+    const h = downloadReady(GOOD_HASH, {
+      launchAfterExit: async (path: string) => { scheduled.push(path); return true; },
+    });
+    await h.service.check({ manual: true });
+    expect((await h.service.download()).phase).toBe('ready');
+
+    const attempt = await h.service.install();
+    expect(attempt.ok).toBe(true);
+    expect(attempt.message).toContain('退出后');
+    // Exactly one scheduling call, aimed at the verified installer.
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]).toContain(ASSET_NAME);
+    // The legacy immediate launch is skipped entirely.
+    expect(h.opened).toEqual([]);
+
+    // The quit follows the IPC answer (300 ms), never precedes it.
+    expect(h.quitCount()).toBe(0);
+    await new Promise((resolve) => { setTimeout(resolve, 380); });
+    expect(h.quitCount()).toBe(1);
+  });
+
+  it('D-284: falls back to openPath when the deferred waiter cannot be spawned', async () => {
+    const h = downloadReady(GOOD_HASH, { launchAfterExit: async () => false });
+    await h.service.check({ manual: true });
+    expect((await h.service.download()).phase).toBe('ready');
+
+    const attempt = await h.service.install();
+    expect(attempt.ok).toBe(true);
+    // Fallback keeps a usable install path on machines where the waiter is
+    // unavailable (PowerShell missing / blocked): the old behaviour, unchanged.
     expect(h.opened).toHaveLength(1);
     expect(h.opened[0]).toContain(ASSET_NAME);
   });

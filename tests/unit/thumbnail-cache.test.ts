@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, exists
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { createThumbnailCache, type ThumbnailCacheOptions } from '../../apps/desktop/src/main/thumbnail-cache.js';
+import { createThumbnailCache, isProxyFakeIpBlock, type ThumbnailCacheOptions } from '../../apps/desktop/src/main/thumbnail-cache.js';
 import type { ILogger } from '@ytvdlt/core';
 import type { HttpPort } from '@ytvdlt/shared';
 
@@ -952,5 +952,67 @@ describe('D-276 · 读错误阻断写入（D-246 同款），可读后自动解�
     const raw = JSON.parse(readFileSync(join(h.dir, 'index.json'), 'utf8')) as { version: number; entries: Record<string, unknown> };
     expect(raw.version).toBe(1);
     expect(Object.keys(raw.entries).some((n) => n.startsWith(hash('https://cdn.example/after-recovery.png')))).toBe(true);
+  });
+});
+
+/**
+ * D-288 · cover fetching under a system proxy / TUN (Fake-IP).
+ *
+ * The pinned transport (D-137) refuses `198.18.x.x`, which is exactly what
+ * Clash/Mihomo hands back for `i.ytimg.com`. The fix mirrors D-214: retry the
+ * same https URL through Chromium's stack — but ONLY for that specific refusal,
+ * so a 404 or a policy rejection never widens the network surface.
+ */
+describe('D-288 · proxy Fake-IP cover fallback', () => {
+  it('recognises only the fake-IP refusal, not private addresses or 404s', () => {
+    expect(isProxyFakeIpBlock(new Error('blocked resolved address at hop 0: 198.18.0.22 (i.ytimg.com)'))).toBe(true);
+    expect(isProxyFakeIpBlock(new Error('blocked resolved address at hop 1: 198.19.4.4 (x.test)'))).toBe(true);
+    expect(isProxyFakeIpBlock(new Error('blocked resolved address at hop 0: 10.1.2.3 (intranet)'))).toBe(false);
+    expect(isProxyFakeIpBlock(new Error('HTTP 404 for https://x.test/a.jpg'))).toBe(false);
+    expect(isProxyFakeIpBlock('blocked resolved address at hop 0: 198.18.0.22')).toBe(true);
+    expect(isProxyFakeIpBlock(new Error('connect ECONNREFUSED'))).toBe(false);
+    expect(isProxyFakeIpBlock(undefined)).toBe(false);
+  });
+
+  it('retries through the Chromium stack and stores the image', async () => {
+    const h = harness({
+      httpBytes: async () => {
+        throw new Error('blocked resolved address at hop 0: 198.18.0.22 (i.ytimg.com)');
+      },
+    });
+    const seen: string[] = [];
+    const cache = h.create({
+      fetchViaProxy: async (url) => { seen.push(url); return PNG; },
+    });
+    const path = await cache.ensure('t1', 'https://i.ytimg.com/vi/x/hqdefault.jpg');
+    expect(path).not.toBeNull();
+    expect(seen).toEqual(['https://i.ytimg.com/vi/x/hqdefault.jpg']);
+    expect(existsSync(path as string)).toBe(true);
+  });
+
+  it('keeps the proxy path out of ordinary failures', async () => {
+    const h = harness({ httpBytes: async () => { throw new Error('HTTP 404 for https://x.test/a.jpg'); } });
+    let proxied = 0;
+    const cache = h.create({
+      fetchViaProxy: async () => { proxied += 1; return PNG; },
+    });
+    expect(await cache.ensure('t1', 'https://x.test/a.jpg')).toBeNull();
+    expect(proxied).toBe(0);
+  });
+
+  it('cools the URL down instead of refetching on every queue tick', async () => {
+    let calls = 0;
+    let clock = 1_000;
+    const h = harness({
+      now: () => clock,
+      httpBytes: async () => { calls += 1; throw new Error('HTTP 500'); },
+    });
+    const cache = h.create();
+    expect(await cache.ensure('t1', 'https://x.test/a.jpg')).toBeNull();
+    expect(await cache.ensure('t2', 'https://x.test/a.jpg')).toBeNull();
+    expect(calls).toBe(1);
+    clock += 5 * 60 * 1000 + 1;
+    expect(await cache.ensure('t3', 'https://x.test/a.jpg')).toBeNull();
+    expect(calls).toBe(2);
   });
 });

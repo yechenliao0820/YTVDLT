@@ -2990,3 +2990,53 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① 补回 `if (next === undefined) break;`（不放宽 `noUncheckedIndexedAccess`、不用非空断言）；② `M3_TEST_FILE_MAP` 增 `categorized-dir-local.test.ts: ['A-D275']`，并在 `M5_ASSERTIONS` 增 A-D275 真断言（真实随包 yt-dlp 落地 `<Extractor>/`、无字面量 token 目录、单视频无 NA 层）；③ 探针改为从子进程 `exit` 起算 1.5 s，并加 8 s 外层守卫——子进程根本没退出时判"不可复现"（跳过），绝不判"可复现"。test 7 自身断言一字未改。 |
 | 验证 | `pnpm typecheck` 5/5 successful；`node scripts/acceptance.mjs --milestone M5` 见当次输出（目标 `releaseReady=true`）；全量 unit+contract 3078 过；E2E 31/31 + 反例 5/5。 |
 | 未覆盖 | 探针只在本机（Windows 11 / Chrome for Testing 151）验证；CI 的 windows-latest 负载特征不同，若仍偶发红，下一步是把 test 7 的 8.5 s 上界也改成"相对 exit 计时"而非绝对上限。 |
+
+## D-284 · 2026-11-26 · 应用内安装改为「先退出、后安装 + `--updated`」（业主实测 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 0.3.3 刚发布即被业主实测打回：① 应用内点「下载并安装」→ 安装包弹「YTVDLT 正在运行。点击"确定"关闭」→ 点确定后**安装包自己消失**；② 先手动关掉应用再运行安装包 → 一直弹「YTVDLT 无法关闭。请手动关闭它，然后点击重试继续」；③ 同一个安装包在应用外（本地打包目录）运行完全正常。业主判断「它检测到自己被自己占用了」。 |
+| 根因 | 三条叠加。**(a) 时序**：`install()` 先 `shell.openPath(installer)`，800 ms 后才 `app.quit()`，而退出要走 D-255 的清理闸门（取消在跑任务，**总预算 5 s**）→ 安装器 `_CHECK_APP_RUNNING`（electron-builder 模板，在 `.onInit`）检查时应用必然还活着。**(b) 对话框语义**：不带 `--updated` 时该检查弹 `MB_OKCANCEL` 的 `appRunning`（zh_CN 原文「YTVDLT 正在运行. 点击"确定"关闭.」），**取消即 `Quit`——安装器直接退出**；再检查失败弹 `MB_RETRYCANCEL` 的 `appCannotBeClosed`（「…无法关闭。请手动关闭它，然后点击重试继续」），取消同样退出。**(c) 匹配方式**：`FIND_PROCESS` / `KILL_PROCESS` 在 PowerShell 分支**忽略 exe 名**，按 `$_.Path.StartsWith('$INSTDIR')` 路径前缀枚举并 `Stop-Process` —— 安装目录下的 helper、旧卸载器都会命中，所以窗口关掉后仍可能被判「占用」形成重试死循环；若安装器自身路径落在该前缀内，它会把自己也 `Stop-Process` 掉，与业主观察到的「安装包自己没了」一致。模板证据：`app-builder-lib/templates/nsis/include/allowOnlyOneInstallerInstance.nsh:105-160`；`isUpdated` 由 `StdUtils.TestParameter "updated"` 决定（构建产物 `builder-debug.yml` 可见）。 |
+| 决策 | 新增可选端口 `launchAfterExit(installerPath): Promise<boolean>`，生产实现 `scheduleInstallerAfterExit()`：用**分离的等待器进程**轮询本进程 PID（200 ms，上限 45 s），进程消失后 `Start-Process <installer> --updated`；路径经环境变量 `YTVDLT_INSTALLER` 传递，**绝不拼进命令文本**（避免注入）。`install()` 优先走该端口，成功后 300 ms 再 `deps.quit()`（先让 IPC 回包到达渲染层）；端口缺失或等待器 spawn 失败（脚本宿主被策略禁用等）**自动回退**到旧的 `openPath` + 800 ms 路径，不切断用户的安装入口。带 `--updated` 后安装器走静默分支（`Sleep 300/1000` → 无任何对话框），且此时应用已真正退出，不再触发占用检测。 |
+| 验证 | 新增 2 例：调度成功 → `launchAfterExit` 收到已验证安装包路径、`openPath` **零调用**、`quit()` 在回包之后（0 → 380 ms 后 1 次）；等待器返回 false → 回退 `openPath` 一次。`app-update-service` 22→24 全绿，`pnpm typecheck` 5/5。**未在真机复现「应用内升级」闭环**（需要下一个版本才可完整验证）。 |
+| 未覆盖 | 真机升级闭环（0.3.3 → 0.3.4）未实测，属下一版发版前必测项；等待器在组策略禁用脚本宿主的环境下退化为旧行为（仍有对话框，但不会更差）；未给「有任务在下载时点安装」加二次确认——退出路径本身会取消任务并落盘，暂按现状。 |
+
+## D-285 · 2026-11-26 · 取消更新包下载不再谎报「临时文件清理失败」（业主实测 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主在 0.3.3 上取消应用更新包的下载，设置页显示「临时文件清理失败，文件保留在 …」。取消本身已经生效，但文案让人以为取消失败、甚至担心文件损坏。业主问「0.3.3 修了没有」。 |
+| 根因 | `downloadToFile()` 的 catch 不分场景：abort 后先 `trashPartial(part)`，只要回收站移动失败就抛 `PartialCleanupError('临时文件清理失败，文件保留在 …')`——把原本正常的取消覆盖成失败。`app-update-service.cancelDownload()` 只把「aborted 且不是 PartialCleanupError」当作已取消，于是这条错误被当成行动结果返回、直接显示在设置页。**版本判定**：`git log v0.3.2..HEAD -- apps/desktop/src/main/adapters/http-download.ts` **零提交**——0.3.3 没有修过这条，它从 0.3.1 起就在。Windows 上回收站移动失败的现实原因：文件刚关闭仍被杀软/索引器短暂占用、或 `%APPDATA%` 下的暂存路径让 Shell 无法完成移动。 |
+| 决策 | 取消语义优先：`controller.signal.aborted` 为真时，回收站失败**不再抛**，改为 `unlink` 直接删除该 `.part`（文件名含新 UUID、永不被后续下载复用，属应用自有临时文件），删除再失败也保持静默；**非取消**的真实失败（网络中断、大小不符等）仍抛 `PartialCleanupError` 并保留文件，行为与文案一字未改。 |
+| 验证 | `app-update-cancel` 2→4 例：取消 + 回收站正常 → `.part.recycled`；取消 + 回收站失败 → 仍以 abort 结束且**不含**「临时文件清理失败」、目录为空（unlink 兜底生效）；非取消失败 + 回收站失败 → 仍抛「临时文件清理失败」且 `.part` 保留；预先 abort 不变。全量 3081 过 / 6 skipped；`typecheck` 5/5。 |
+| 未覆盖 | 未在真实 Windows 回收站失败场景复现（用会抛错的 `trashPartial` 替身模拟）；若 `unlink` 也失败（文件仍被占用），`.part` 会静默残留——唯一命名、不参与缓存复用，只占磁盘，不会误装。 |
+
+## D-286 · 2026-11-26 · 安装包自动清理开关（默认开启，可关闭）（业主提出）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主提问：安装完成后若检测到版本更新，会不会自动清理安装包？担心每次升级留下一个 ~216 MiB 的包。要求默认自动开启、允许用户手动关闭。 |
+| 现状（0.3.3 已有，非本轮新增） | 机制本来就在，只是没有开关：安装前 `rememberPendingUpdate()` 把 `{fromVersion,targetVersion,fileName,sha256}` 写入 `<dataDir>/updates/pending-update-cleanup.json`；**下次以新版本启动**时 `cleanupCompletedUpdate()` 校验「当前版本 == targetVersion 且新于 fromVersion」+ 文件名白名单 + **SHA-256 逐字节复核**，才删除那一个安装包并清空标记。失败一律静默、不阻塞启动。`.rejected-*` / `.replaced-*` 隔离副本按 D-233/D-104 **有意保留**（排查用），不在清理范围。 |
+| 决策 | 新增 `advanced.autoCleanUpdateInstaller`（append-only，默认 `true`）：进入 `SETTINGS_SET` 白名单，设置页「应用本体」卡片加一行复选框（中英各一条 `settings.app.cleanup`），`cleanupCompletedUpdate()` 增可选 `{ enabled }`，`electron-entry` 启动时按配置传入。关闭时**保留安装包并保留 pending 标记**——之后重新打开开关，下一次启动仍会清理那一个包（不会累积成"永远不清"）。`configRef` 在该闭包被 TS 收窄为 `null`，显式回写声明联合类型后读取。 |
+| 验证 | `app-update-cleanup` 6→7 例（`{enabled:false}` 不删且保留标记；随后默认调用清理一次且只一次）；`settings-autostart-repaint` 4→6 例（快照 `false` 能回填、无该键保持默认 ON）；全量 **3084 过 / 6 skipped / 0 failed**；`typecheck` 5/5。E2E：仅 `settings-appearance` / `settings-en-dark` 因新增一行控件同时 DOM+像素变化，按 §7 逐 case 重建两张基线与两份 DOM 快照，重建后 31/31 + 反例 5/5。 |
+| 未覆盖 | 未真机点选验证开关持久化（随 0.3.4 真机回归一起验）；崩溃残留的 `.download` / `.part` 不在此开关范围（D-285 已让取消路径自清，异常退出仍可能留一两个暂存文件）；用户「关闭」后安装包永久保留，需要手动删——按业主口径这是显式选择。 |
+
+## D-287 · 2026-11-26 · 设置页「本版更新内容」：随包、双语、可反复打开（业主提出）
+
+| 项 | 内容 |
+|---|---|
+| 需求 | 业主希望在 设置 → 更新 里能随时查看「这个版本更新了什么」，内容与下载安装时看到的说明一致；**不是只能看一次**，也不必再去 GitHub Releases 翻。 |
+| 约束 | 设置页是沙箱化的 `file://` 文档：没有 fs、`fetch` 本机 JSON 在 CSP 下不可靠；GitHub API 属国际出口（N3），离线时读不到；而且在应用内直接拉 release body 只有英文，页面却是双语的。因此**不能**靠实时请求，必须随包带一份说明。 |
+| 决策 | ① 新增 `packages/ui/src/pages/settings/release-notes.js`：`YTVDLTReleaseNotes.forVersion(version)`，按纯 semver 查表（自动去掉 `v` 前缀），每条含 `version` / `date` / `zh` / `en`，随前端目录一起被 `build-desktop` 打进包；② 设置页「应用本体」卡片在清理开关同一行加按钮「本版更新内容 / What's new in this version」，点击展开内联面板（`hidden` 属性切换，D-279 已保证可显示），再点收起——**反复打开不消耗**；③ 版本取 `YTVDLTAppVersion.label()` 去前缀，语言取当前 `THEME_STATE.locale`；④ 正文用 `textContent`（纯文本 `pre-wrap`，不做 markdown/HTML，杜绝注入）；⑤ 查不到本版条目时如实显示「此版本没有附带更新说明」。0.3.3 的条目已按当时的 GitHub 说明写出中英两版。 |
+| 验证 | 新增 `settings-release-notes` 5 例：数据层（`0.3.3` 与 `v0.3.3` 等价、旧版本/空串返回 null、每条中英均非空且有日期）+ 页面层（打开→关闭→再打开仍显示原文、英文 locale 取 `en`、无条目时显示 `notesEmpty`）。全量 **3089 过 / 6 skipped / 0 failed**（174 文件）；`typecheck` 5/5；E2E 仅两个设置页 case 因新增按钮变化，按 §7 逐 case 重建 DOM+PNG，重建后 31/31 + 反例 5/5。 |
+| 未覆盖 | 面板只渲染纯文本，不还原 markdown 的加粗/列表符号（安全优先，视觉上靠 `·` 与空行分段）；0.3.4 的说明需在打包前补进同一文件（已写进手册 §11 发版步骤）；未真机点选（随 0.3.4 真机回归一起验）。 |
+
+## D-288 · 2026-11-26 · 封面抓取兼容系统代理 / TUN / Fake-IP（D-214 的同款修法补到封面）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主实测：B 站封面正常，YouTube 源（BBC News 中文）卡片只有字母占位。应用日志逐条给出原因：`{"scope":"thumbnail","event":"cover fetch failed; card keeps its letter badge","detail":"blocked resolved address at hop 0: 198.18.0.22 (i.ytimg.com)"}`，且 5 秒内重复 11 条。 |
+| 根因 | 封面走 D-137/D-143 的「解析全部地址 → 逐个校验 → 钉住 socket」直连通道；Clash/Mihomo 的 TUN + Fake-IP 把 `i.ytimg.com` 解析成 `198.18.0.0/15`（benchmark 段，非公网），`allowResolvedAddress` 按规则 fail-closed。B 站 CDN 解析到真实公网 IP，所以只有境外站点阵亡。**这正是 D-214 在 0.3.1 修过的同一个问题**——但当时明确把范围限定在更新链路，`electron-update-network.ts` 头部原文写着「Thumbnails … still go through … DNS pinning fully intact」，封面从未被修过，不是回退也不是写死。 |
+| 决策 | 照 D-214 的修法补一个**只在必要时启用**的旁路：① `ThumbnailCacheOptions` 新增可选 `fetchViaProxy`；② 直连抓取失败时，只有错误文本命中 `blocked resolved address at hop N: 198.18|198.19.x.x`（导出 `isProxyFakeIpBlock()` 判定）才用 Chromium 栈重试同一 https URL；③ 生产端直接复用 `updateNetwork.httpPort`（`mode:'system'` → 走系统代理/TUN；用户显式配置的 `network.proxy` 同样生效），URL 仍先过 `isPublicHttpsUrl`，响应仍要过图片签名 + `maxBytes` + 超时；④ 404 / TLS / 策略拒绝**不**触发代理旁路，直连路径与 D-137 钉扎一字未改；⑤ 顺带加 5 分钟失败冷却（`FAILED_RETRY_MS`），同一 URL 失败后不再每个队列 tick 重试。 |
+| 验证 | 新增 5 例：`isProxyFakeIpBlock` 只认 198.18/198.19（私网 10.x、404、undefined 均 false）；fake-IP 拒绝 → 代理回退成功并把图片入库；普通 404 不调用代理旁路；同一 URL 第二次 ensure 在冷却期内零请求、超过 5 分钟后才重试。全量 **3093 过 / 6 skipped / 0 failed**；`typecheck` 5/5；`build-desktop` 后 `main.cjs` 命中新符号。 |
+| 未覆盖 | **真实网络端到端未验**：本机沙箱到 `i.ytimg.com` 的 TLS 被拦（`curl` 同样 0 字节），无法在这里证明 Chromium 经 TUN 能取到图；需业主在真机重下一条 YouTube 视频复验封面。IPv6 Fake-IP（`fcc0::/10`）不在判定内（node 对这类 CDN 先返回 IPv4，漏判只回落旧行为）。其它代理形态（PAC/WPAD/固定 SOCKS）的端到端仍依赖用户环境，D-214 的未覆盖项同样适用。 |
