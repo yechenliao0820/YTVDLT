@@ -2990,3 +2990,13 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① 补回 `if (next === undefined) break;`（不放宽 `noUncheckedIndexedAccess`、不用非空断言）；② `M3_TEST_FILE_MAP` 增 `categorized-dir-local.test.ts: ['A-D275']`，并在 `M5_ASSERTIONS` 增 A-D275 真断言（真实随包 yt-dlp 落地 `<Extractor>/`、无字面量 token 目录、单视频无 NA 层）；③ 探针改为从子进程 `exit` 起算 1.5 s，并加 8 s 外层守卫——子进程根本没退出时判"不可复现"（跳过），绝不判"可复现"。test 7 自身断言一字未改。 |
 | 验证 | `pnpm typecheck` 5/5 successful；`node scripts/acceptance.mjs --milestone M5` 见当次输出（目标 `releaseReady=true`）；全量 unit+contract 3078 过；E2E 31/31 + 反例 5/5。 |
 | 未覆盖 | 探针只在本机（Windows 11 / Chrome for Testing 151）验证；CI 的 windows-latest 负载特征不同，若仍偶发红，下一步是把 test 7 的 8.5 s 上界也改成"相对 exit 计时"而非绝对上限。 |
+
+## D-284 · 2026-11-26 · 应用内安装改为「先退出、后安装 + `--updated`」（业主实测 P1）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 0.3.3 刚发布即被业主实测打回：① 应用内点「下载并安装」→ 安装包弹「YTVDLT 正在运行。点击"确定"关闭」→ 点确定后**安装包自己消失**；② 先手动关掉应用再运行安装包 → 一直弹「YTVDLT 无法关闭。请手动关闭它，然后点击重试继续」；③ 同一个安装包在应用外（本地打包目录）运行完全正常。业主判断「它检测到自己被自己占用了」。 |
+| 根因 | 三条叠加。**(a) 时序**：`install()` 先 `shell.openPath(installer)`，800 ms 后才 `app.quit()`，而退出要走 D-255 的清理闸门（取消在跑任务，**总预算 5 s**）→ 安装器 `_CHECK_APP_RUNNING`（electron-builder 模板，在 `.onInit`）检查时应用必然还活着。**(b) 对话框语义**：不带 `--updated` 时该检查弹 `MB_OKCANCEL` 的 `appRunning`（zh_CN 原文「YTVDLT 正在运行. 点击"确定"关闭.」），**取消即 `Quit`——安装器直接退出**；再检查失败弹 `MB_RETRYCANCEL` 的 `appCannotBeClosed`（「…无法关闭。请手动关闭它，然后点击重试继续」），取消同样退出。**(c) 匹配方式**：`FIND_PROCESS` / `KILL_PROCESS` 在 PowerShell 分支**忽略 exe 名**，按 `$_.Path.StartsWith('$INSTDIR')` 路径前缀枚举并 `Stop-Process` —— 安装目录下的 helper、旧卸载器都会命中，所以窗口关掉后仍可能被判「占用」形成重试死循环；若安装器自身路径落在该前缀内，它会把自己也 `Stop-Process` 掉，与业主观察到的「安装包自己没了」一致。模板证据：`app-builder-lib/templates/nsis/include/allowOnlyOneInstallerInstance.nsh:105-160`；`isUpdated` 由 `StdUtils.TestParameter "updated"` 决定（构建产物 `builder-debug.yml` 可见）。 |
+| 决策 | 新增可选端口 `launchAfterExit(installerPath): Promise<boolean>`，生产实现 `scheduleInstallerAfterExit()`：用**分离的等待器进程**轮询本进程 PID（200 ms，上限 45 s），进程消失后 `Start-Process <installer> --updated`；路径经环境变量 `YTVDLT_INSTALLER` 传递，**绝不拼进命令文本**（避免注入）。`install()` 优先走该端口，成功后 300 ms 再 `deps.quit()`（先让 IPC 回包到达渲染层）；端口缺失或等待器 spawn 失败（脚本宿主被策略禁用等）**自动回退**到旧的 `openPath` + 800 ms 路径，不切断用户的安装入口。带 `--updated` 后安装器走静默分支（`Sleep 300/1000` → 无任何对话框），且此时应用已真正退出，不再触发占用检测。 |
+| 验证 | 新增 2 例：调度成功 → `launchAfterExit` 收到已验证安装包路径、`openPath` **零调用**、`quit()` 在回包之后（0 → 380 ms 后 1 次）；等待器返回 false → 回退 `openPath` 一次。`app-update-service` 22→24 全绿，`pnpm typecheck` 5/5。**未在真机复现「应用内升级」闭环**（需要下一个版本才可完整验证）。 |
+| 未覆盖 | 真机升级闭环（0.3.3 → 0.3.4）未实测，属下一版发版前必测项；等待器在组策略禁用脚本宿主的环境下退化为旧行为（仍有对话框，但不会更差）；未给「有任务在下载时点安装」加二次确认——退出路径本身会取消任务并落盘，暂按现状。 |

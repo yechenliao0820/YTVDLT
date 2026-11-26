@@ -107,6 +107,26 @@ export interface AppUpdateServiceDeps {
    * real filesystem refuse a same-volume rename.
    */
   readonly renameFile?: (from: string, to: string) => Promise<void>;
+  /**
+   * D-284 (append-only, OPTIONAL): schedule the installer to start AFTER this
+   * process has exited, and report whether the scheduling itself succeeded.
+   *
+   * Why a port instead of calling `spawn` here: this module must stay Electron-
+   * and child-process-free so the whole install decision stays unit-testable
+   * offline (the same reason `openPath` is injected).
+   *
+   * Why it exists at all: the old order — `openPath(installer)` now, `quit()`
+   * 800 ms later — guarantees a window in which the NSIS installer's own
+   * "app is running" guard (`_CHECK_APP_RUNNING`, inserted by
+   * electron-builder into `.onInit`) sees a live app. That guard's dialog is
+   * 确定/取消 where **取消 quits the installer**, and its kill step matches by
+   * `$INSTDIR` path prefix, so a helper or the old uninstaller can keep the
+   * "cannot be closed" retry loop alive even after the window is gone. Launching
+   * with `--updated` (the parameter `StdUtils.TestParameter "updated"` reads)
+   * removes every dialog from that path; waiting for our PID first removes the
+   * race entirely.
+   */
+  readonly launchAfterExit?: (installerPath: string) => Promise<boolean>;
 }
 
 export interface AppUpdateService {
@@ -690,6 +710,27 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
         ).catch(async (error: unknown) => {
           await logger.warn('app-update', 'could not record installer cleanup', { detail: messageOf(error) });
         });
+      }
+      // D-284: preferred order — schedule the installer for AFTER this process
+      // is gone, then quit. The old order (open now, quit 800 ms later) let the
+      // NSIS "app is running" guard fire on every in-app install; see the
+      // `launchAfterExit` port comment for the full failure chain.
+      if (deps.launchAfterExit !== undefined) {
+        const scheduled = await deps.launchAfterExit(executable).catch(async (error: unknown) => {
+          await logger.warn('app-update', 'deferred installer launch failed', { detail: messageOf(error) });
+          return false;
+        });
+        if (scheduled) {
+          await logger.info('app-update', 'installer scheduled after exit', { path: executable });
+          // The IPC answer must reach the renderer before the window closes.
+          // The waiter independently waits for THIS pid, so this delay only
+          // decides how soon the cleanup starts, never whether the install runs.
+          setTimeout(() => {
+            try { deps.quit(); } catch { /* already quitting */ }
+          }, 300);
+          return result(true, 'install', '应用即将退出，退出后自动开始安装');
+        }
+        await logger.warn('app-update', 'deferred launch unavailable; falling back to openPath', {});
       }
       const error = await deps.openPath(executable);
       if (typeof error === 'string' && error !== '') {
