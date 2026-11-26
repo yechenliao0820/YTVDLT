@@ -111,3 +111,23 @@
 | 清单修正 | 上传前把 `latest.yml` 的 `url` / `path` 由 `YTVDLT Setup 0.3.2.exe` 改写成 `YTVDLT.Setup.0.3.2.exe`（§9 坑 18）；0.3.1 那次没改，清单对 electron-updater 是死链，本版修掉 |
 | 发布后校验 | ① `releases/latest` = `v0.3.2` 且三个资产 `digest` 非空；② 本地 `sha256` 与 exe 资产 `digest` 逐字符一致；③ `git rev-list -n1 v0.3.2` == `git rev-parse HEAD` == `e3e9c8a`。三项全过 |
 | 踩坑（这次真实发生） | 发布脚本先建**草稿**、三个资产齐了再转正——首轮 exe 上传进行到约 40% 时执行环境中断，上传进程随之被杀，草稿里只剩 `latest.yml` + `.blockmap`，`releases/latest` 仍显示 0.3.1。**现象是「发布没生效」，原因是资产未齐、Release 始终是 draft**。重传耗时约 9 分钟（本机上行到 GitHub 约 0.4 MiB/s，226 MB 不可能秒传）。**结论：不要以为上传卡死；用带进度的独立脚本、盯日志，传完再 PATCH `draft:false`** |
+
+## 0.3.3 构建（2026-11-26）
+
+| 项 | 值 |
+|---|---|
+| 触发 | 业主 2026-11-26 说「接下来打包」（铁律 9 的点名项） |
+| 版本号 | `0.3.2` → `0.3.3`（十进制进位）。沿用 0.3.2 起的约定：**版本提升永久入库**——两处 `package.json` 的 `version` 随发版提交，打包后**不还原**（发版基准自此为 `0.3.3`）；builder 对根 `package.json` 的改写已按备份还原 |
+| 目标 | **只打 NSIS 安装版**（`--win nsis`）；未打便携版；`--publish never`，上传由随后的发布步骤单独执行 |
+| 命令 | `node scripts/build-desktop.mjs` → `node node_modules/electron-builder/cli.js --config apps/desktop/electron-builder.yml --config.directories.output=dist-0.3.3 --win nsis --publish never`。图标与 NSIS 脚本走配置里的显式路径（`apps/desktop/build/icon.ico` / `installer.nsh`），**无需再传 `buildResources`**；Electron 45.2.2 本地已缓存，未设镜像变量 |
+| 产物 | `dist-0.3.3/YTVDLT Setup 0.3.3.exe` — **226,344,798 B** |
+| SHA-256 | `51a73c0f4dab1d40fa3bfd8b77fc5507de1b5fd8f61b5a09705b838bba2d1344` |
+| blockmap | `YTVDLT Setup 0.3.3.exe.blockmap` — 237,768 B，SHA-256 `aceaadcb0b01899bbd8ccb3f230064a7262f14cb0c7a1c9cda1c332c1f9e8657` |
+| latest.yml | `version: 0.3.3`，sha512 `FqMWs/kr3TzGGcYjhALKyaUiWNMDoGrvGF0MMxWyTQvhfu4C6xglVboaLlvELkOzy01yyg5r1ZAz9ahEidu+CQ==`，`releaseDate` 2026-11-26T00:04:54.371Z；**未上传**。`url` / `path` 仍是带空格的本地文件名，上传前必须改写成 GitHub 规范化后的点号资产名（§9 坑 18） |
+| 版本资源 | `win-unpacked/YTVDLT.exe` FileVersion **0.3.3** / ProductVersion **0.3.3.0**；Setup 文件版本 0.3.3 |
+| asar | `win-unpacked/resources/app.asar` — 1,585,080 B；grep 命中本轮新增的 `[hidden="false"] { display: revert; }`（1）、`queue.precheck.downloadDir`（3）、`DOWNLOAD_DIR_UNRESOLVABLE`（7），确认 D-279…D-282 的代码真的进了包 |
+| 图标 | 按 §9 坑 9 方法核对：`build/icon.ico` 的 16 / 32 / 48 / 256 四档载荷在 `YTVDLT.exe` 内**全部命中**，`win.icon` 生效 |
+| 运行时 | `resources/runtime/` 含 `aria2c.exe` / `ffmpeg/` / `node.exe` / `runtime-manifest.json` / `SHA2-256SUMS` |
+| 签名 | 未签名（无证书），SmartScreen 首次运行会提示 |
+| 未做 | **没有启动真机窗口点选**（安装包已产出但未运行安装流程）；未打便携版；**未创建 Release、未上传任何资产** |
+| 发布 | 待业主授权 |
