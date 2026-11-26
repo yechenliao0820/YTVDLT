@@ -10,7 +10,7 @@
  * This file is allowed to use `node:*`: it is a main-process adapter, not Core.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, rename, stat } from 'node:fs/promises';
+import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
   MAX_HTTP_REDIRECTS, allowAnyHttpUrl, fetchFollowingRedirects, type RedirectPolicy,
@@ -196,11 +196,24 @@ export async function downloadToFile(request: DownloadRequest): Promise<Download
   } catch (error) {
     if (handle !== null) await handle.close().catch(() => undefined);
     if (created) {
+      const aborted = controller.signal.aborted;
       try {
         if (request.trashPartial === undefined) throw new Error('回收站不可用');
         await request.trashPartial(partPath);
       } catch (cleanupError) {
-        throw new PartialCleanupError(`临时文件清理失败，文件保留在 ${partPath}：${String(cleanupError)}`);
+        // D-285: a CANCEL must stay a cancel. The `.part` name carries a fresh
+        // UUID and is never reused by a later attempt, so a failed recycle-bin
+        // move leaves nothing dangerous — but it used to replace the honest
+        // "cancelled" outcome with "临时文件清理失败，文件保留在 …", which reads
+        // like data loss and made the user think the cancel had failed. Try a
+        // direct delete instead, and stay silent when that also fails.
+        if (aborted) {
+          await unlink(partPath).catch(() => undefined);
+        } else {
+          // A REAL failure (network error, size mismatch, …): the leftover
+          // bytes are worth reporting, exactly as before.
+          throw new PartialCleanupError(`临时文件清理失败，文件保留在 ${partPath}：${String(cleanupError)}`);
+        }
       }
     }
     throw error;

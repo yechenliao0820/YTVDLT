@@ -3000,3 +3000,13 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 新增可选端口 `launchAfterExit(installerPath): Promise<boolean>`，生产实现 `scheduleInstallerAfterExit()`：用**分离的等待器进程**轮询本进程 PID（200 ms，上限 45 s），进程消失后 `Start-Process <installer> --updated`；路径经环境变量 `YTVDLT_INSTALLER` 传递，**绝不拼进命令文本**（避免注入）。`install()` 优先走该端口，成功后 300 ms 再 `deps.quit()`（先让 IPC 回包到达渲染层）；端口缺失或等待器 spawn 失败（脚本宿主被策略禁用等）**自动回退**到旧的 `openPath` + 800 ms 路径，不切断用户的安装入口。带 `--updated` 后安装器走静默分支（`Sleep 300/1000` → 无任何对话框），且此时应用已真正退出，不再触发占用检测。 |
 | 验证 | 新增 2 例：调度成功 → `launchAfterExit` 收到已验证安装包路径、`openPath` **零调用**、`quit()` 在回包之后（0 → 380 ms 后 1 次）；等待器返回 false → 回退 `openPath` 一次。`app-update-service` 22→24 全绿，`pnpm typecheck` 5/5。**未在真机复现「应用内升级」闭环**（需要下一个版本才可完整验证）。 |
 | 未覆盖 | 真机升级闭环（0.3.3 → 0.3.4）未实测，属下一版发版前必测项；等待器在组策略禁用脚本宿主的环境下退化为旧行为（仍有对话框，但不会更差）；未给「有任务在下载时点安装」加二次确认——退出路径本身会取消任务并落盘，暂按现状。 |
+
+## D-285 · 2026-11-26 · 取消更新包下载不再谎报「临时文件清理失败」（业主实测 P2）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主在 0.3.3 上取消应用更新包的下载，设置页显示「临时文件清理失败，文件保留在 …」。取消本身已经生效，但文案让人以为取消失败、甚至担心文件损坏。业主问「0.3.3 修了没有」。 |
+| 根因 | `downloadToFile()` 的 catch 不分场景：abort 后先 `trashPartial(part)`，只要回收站移动失败就抛 `PartialCleanupError('临时文件清理失败，文件保留在 …')`——把原本正常的取消覆盖成失败。`app-update-service.cancelDownload()` 只把「aborted 且不是 PartialCleanupError」当作已取消，于是这条错误被当成行动结果返回、直接显示在设置页。**版本判定**：`git log v0.3.2..HEAD -- apps/desktop/src/main/adapters/http-download.ts` **零提交**——0.3.3 没有修过这条，它从 0.3.1 起就在。Windows 上回收站移动失败的现实原因：文件刚关闭仍被杀软/索引器短暂占用、或 `%APPDATA%` 下的暂存路径让 Shell 无法完成移动。 |
+| 决策 | 取消语义优先：`controller.signal.aborted` 为真时，回收站失败**不再抛**，改为 `unlink` 直接删除该 `.part`（文件名含新 UUID、永不被后续下载复用，属应用自有临时文件），删除再失败也保持静默；**非取消**的真实失败（网络中断、大小不符等）仍抛 `PartialCleanupError` 并保留文件，行为与文案一字未改。 |
+| 验证 | `app-update-cancel` 2→4 例：取消 + 回收站正常 → `.part.recycled`；取消 + 回收站失败 → 仍以 abort 结束且**不含**「临时文件清理失败」、目录为空（unlink 兜底生效）；非取消失败 + 回收站失败 → 仍抛「临时文件清理失败」且 `.part` 保留；预先 abort 不变。全量 3081 过 / 6 skipped；`typecheck` 5/5。 |
+| 未覆盖 | 未在真实 Windows 回收站失败场景复现（用会抛错的 `trashPartial` 替身模拟）；若 `unlink` 也失败（文件仍被占用），`.part` 会静默残留——唯一命名、不参与缓存复用，只占磁盘，不会误装。 |
