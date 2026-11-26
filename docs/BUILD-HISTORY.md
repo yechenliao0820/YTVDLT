@@ -131,3 +131,16 @@
 | 签名 | 未签名（无证书），SmartScreen 首次运行会提示 |
 | 未做 | **没有启动真机窗口点选**（安装包已产出但未运行安装流程）；未打便携版；**未创建 Release、未上传任何资产** |
 | 发布 | 待业主授权 |
+
+## 0.3.3 发布（2026-11-26）
+
+| 项 | 值 |
+|---|---|
+| Release | **v0.3.3**，id `458786832`，`published_at` 2026-11-26T00:09:50Z，<https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.3> |
+| 指向的提交 | `7e73118`（`dev` 头，含 0.3.3 版本提升与发版文档）。**注意：`main` 此刻还没有这个提交**（PR 由业主创建并合并）；tag 指向实际被打包的那一份代码 |
+| 资产 | `YTVDLT.Setup.0.3.3.exe` 226,344,798 B `sha256:51a73c0f…1344`（完整 `51a73c0f4dab1d40fa3bfd8b77fc5507de1b5fd8f61b5a09705b838bba2d1344`）；`YTVDLT.Setup.0.3.3.exe.blockmap` 237,768 B `sha256:aceaadcb…8657`；`latest.yml` 341 B `sha256:3390377b…31c5`。三个资产的 GitHub `digest` 字段**均非空**，且与本机实算逐字符一致 |
+| 说明语言 | 英文（铁律 14）。分四节：What changes for you（4 条用户可见）/ Reliability, privacy, security（D-244…D-282）/ Verification / Assets |
+| latest.yml | 上传前已按 §9 坑 18 把 `url` / `path` 改写成 GitHub 规范化后的点号资产名 `YTVDLT.Setup.0.3.3.exe`；发布后从 Release 下载回来与本地**逐字节相同**（341 B） |
+| 发布后校验 | ① `releases/latest` 返回 `v0.3.3`、`draft=false`；② 三条 `browser_download_url` 跟随跳转均取到字节（302 → 206/200）；③ 线上 `latest.yml` 的 `version` / `size` / `sha512` 与安装包一致；④ 本机 SHA-256 与资产 `digest` 相同 |
+| 上传方式 | 手册 §11 固定路径：`git credential fill` 取凭据 → `POST /releases`（先 draft）→ `POST uploads.github.com/.../assets?name=<点号名>`（顺序 latest.yml → blockmap → exe）→ `PATCH {"draft":false}`。本轮第一次创建时因脚本内的路径写法取不到 release id，草稿（id 458786832）已建但无资产；随后用同一 id 补传并发布，**未产生第二个 Release、未留下悬空 tag** |
+| 未做 | **未做安装 / 升级 / 卸载真机验证**（安装包已发布但未在本机运行）；未打便携版；`main` 尚未合并本提交，PR 由业主创建 |
