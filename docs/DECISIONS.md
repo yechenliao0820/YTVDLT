@@ -3030,3 +3030,13 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | ① 新增 `packages/ui/src/pages/settings/release-notes.js`：`YTVDLTReleaseNotes.forVersion(version)`，按纯 semver 查表（自动去掉 `v` 前缀），每条含 `version` / `date` / `zh` / `en`，随前端目录一起被 `build-desktop` 打进包；② 设置页「应用本体」卡片在清理开关同一行加按钮「本版更新内容 / What's new in this version」，点击展开内联面板（`hidden` 属性切换，D-279 已保证可显示），再点收起——**反复打开不消耗**；③ 版本取 `YTVDLTAppVersion.label()` 去前缀，语言取当前 `THEME_STATE.locale`；④ 正文用 `textContent`（纯文本 `pre-wrap`，不做 markdown/HTML，杜绝注入）；⑤ 查不到本版条目时如实显示「此版本没有附带更新说明」。0.3.3 的条目已按当时的 GitHub 说明写出中英两版。 |
 | 验证 | 新增 `settings-release-notes` 5 例：数据层（`0.3.3` 与 `v0.3.3` 等价、旧版本/空串返回 null、每条中英均非空且有日期）+ 页面层（打开→关闭→再打开仍显示原文、英文 locale 取 `en`、无条目时显示 `notesEmpty`）。全量 **3089 过 / 6 skipped / 0 failed**（174 文件）；`typecheck` 5/5；E2E 仅两个设置页 case 因新增按钮变化，按 §7 逐 case 重建 DOM+PNG，重建后 31/31 + 反例 5/5。 |
 | 未覆盖 | 面板只渲染纯文本，不还原 markdown 的加粗/列表符号（安全优先，视觉上靠 `·` 与空行分段）；0.3.4 的说明需在打包前补进同一文件（已写进手册 §11 发版步骤）；未真机点选（随 0.3.4 真机回归一起验）。 |
+
+## D-288 · 2026-11-26 · 封面抓取兼容系统代理 / TUN / Fake-IP（D-214 的同款修法补到封面）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 业主实测：B 站封面正常，YouTube 源（BBC News 中文）卡片只有字母占位。应用日志逐条给出原因：`{"scope":"thumbnail","event":"cover fetch failed; card keeps its letter badge","detail":"blocked resolved address at hop 0: 198.18.0.22 (i.ytimg.com)"}`，且 5 秒内重复 11 条。 |
+| 根因 | 封面走 D-137/D-143 的「解析全部地址 → 逐个校验 → 钉住 socket」直连通道；Clash/Mihomo 的 TUN + Fake-IP 把 `i.ytimg.com` 解析成 `198.18.0.0/15`（benchmark 段，非公网），`allowResolvedAddress` 按规则 fail-closed。B 站 CDN 解析到真实公网 IP，所以只有境外站点阵亡。**这正是 D-214 在 0.3.1 修过的同一个问题**——但当时明确把范围限定在更新链路，`electron-update-network.ts` 头部原文写着「Thumbnails … still go through … DNS pinning fully intact」，封面从未被修过，不是回退也不是写死。 |
+| 决策 | 照 D-214 的修法补一个**只在必要时启用**的旁路：① `ThumbnailCacheOptions` 新增可选 `fetchViaProxy`；② 直连抓取失败时，只有错误文本命中 `blocked resolved address at hop N: 198.18|198.19.x.x`（导出 `isProxyFakeIpBlock()` 判定）才用 Chromium 栈重试同一 https URL；③ 生产端直接复用 `updateNetwork.httpPort`（`mode:'system'` → 走系统代理/TUN；用户显式配置的 `network.proxy` 同样生效），URL 仍先过 `isPublicHttpsUrl`，响应仍要过图片签名 + `maxBytes` + 超时；④ 404 / TLS / 策略拒绝**不**触发代理旁路，直连路径与 D-137 钉扎一字未改；⑤ 顺带加 5 分钟失败冷却（`FAILED_RETRY_MS`），同一 URL 失败后不再每个队列 tick 重试。 |
+| 验证 | 新增 5 例：`isProxyFakeIpBlock` 只认 198.18/198.19（私网 10.x、404、undefined 均 false）；fake-IP 拒绝 → 代理回退成功并把图片入库；普通 404 不调用代理旁路；同一 URL 第二次 ensure 在冷却期内零请求、超过 5 分钟后才重试。全量 **3093 过 / 6 skipped / 0 failed**；`typecheck` 5/5；`build-desktop` 后 `main.cjs` 命中新符号。 |
+| 未覆盖 | **真实网络端到端未验**：本机沙箱到 `i.ytimg.com` 的 TLS 被拦（`curl` 同样 0 字节），无法在这里证明 Chromium 经 TUN 能取到图；需业主在真机重下一条 YouTube 视频复验封面。IPv6 Fake-IP（`fcc0::/10`）不在判定内（node 对这类 CDN 先返回 IPv4，漏判只回落旧行为）。其它代理形态（PAC/WPAD/固定 SOCKS）的端到端仍依赖用户环境，D-214 的未覆盖项同样适用。 |

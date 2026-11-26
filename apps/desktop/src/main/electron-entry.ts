@@ -488,6 +488,15 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       dir: join(dataDir.dataDir, 'thumbs'),
       ...(ports.http === undefined ? {} : { http: ports.http }),
       logger,
+      // D-288: when the pinned cover fetch is refused because the system proxy
+      // handed back a Fake-IP (198.18.0.0/15), retry the same https URL through
+      // Chromium's stack — the transport D-214 already gave the update channel.
+      // Its default policy is `isPublicHttpsUrl`; the bytes still have to pass
+      // the image-signature + size checks in the cache.
+      fetchViaProxy: (url, limits) => updateNetwork.httpPort.getBytes(url, {
+        timeoutMs: limits.timeoutMs,
+        maxBytes: limits.maxBytes,
+      }),
       liveTaskIds: () => (hostRef?.m4.task.queue.list().map((item) => item.id) ?? []),
       policy: () => ({
         enabled: configRef?.get('advanced', 'autoCleanThumbnailCache') !== false,
