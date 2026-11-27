@@ -199,6 +199,8 @@ function hangingFixture(initial: Record<string, StatOutcome> = {}) {
     },
     now: () => clock,
     cacheTtlMs: 1000,
+    // D-248 tests drive the release themselves; D-291's deadline is off here.
+    statTimeoutMs: 0,
   });
   return {
     probe: (tasks: readonly { id: string; state: string; artifacts: readonly string[] }[], force?: boolean) =>
@@ -305,5 +307,85 @@ describe('D-248 · single flight and bounded concurrency', () => {
     f.releaseAll(); // lands the batch dir stat, round completes
     await round;
     expect(f.statCalls()).toBe(4); // 2 (batch) + 2 (probeTask), never re-batched
+  });
+});
+
+/**
+ * D-291 · a single stat is deadline-bound, and a dead path is quarantined.
+ *
+ * `TASK_LIST` awaits the batch probe: without a deadline one artifact on a
+ * disconnected share held the queue page in its loading state for the OS SMB
+ * timeout. The deadline keeps the answer bounded; the quarantine keeps the next
+ * poll round from feeding the thread pool a fresh batch of hung syscalls.
+ */
+function deadShareFixture(options: { readonly hangForever?: boolean } = {}) {
+  let clock = 1_000;
+  let calls = 0;
+  const hangForever = options.hangForever !== false;
+  const probe = createLocalFileStatusProbe({
+    stat: (path: string) => {
+      calls += 1;
+      // A dead share never answers; a healthy path answers immediately.
+      if (hangForever && path.startsWith('//nas')) return new Promise<StatOutcome>(() => {});
+      return Promise.resolve<StatOutcome>(path.includes('.') ? { kind: 'file' } : { kind: 'dir' });
+    },
+    now: () => clock,
+    cacheTtlMs: 1000,
+    statTimeoutMs: 25,
+    hungRetryMs: 60_000,
+  });
+  return {
+    probe: (tasks: readonly { id: string; state: string; artifacts: readonly string[] }[], force?: boolean) =>
+      probe.probe(tasks, force),
+    probeTask: (task: { id: string; state: string; artifacts: readonly string[] }) => probe.probeTask(task),
+    statCalls: () => calls,
+    advance: (ms: number) => { clock += ms; },
+  };
+}
+
+const remote = (id: string) => completed(id, ['//nas/share/clip.mp4']);
+
+describe('D-291 · per-stat deadline + quarantine', () => {
+  it('answers within the deadline with `unavailable` instead of hanging on the OS timeout', async () => {
+    const f = deadShareFixture();
+    const started = Date.now();
+    const result = await f.probe([remote('t1')]);
+    expect(result['t1']).toEqual({ status: 'unavailable', dirStatus: 'unavailable' });
+    // 25 ms budget per stat × 2 sequential stats — far below the 5 s test
+    // timeout and below any real SMB timeout.
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(f.statCalls()).toBe(2);
+  });
+
+  it('does not re-stat a hung path in the next non-forced round (quarantine)', async () => {
+    const f = deadShareFixture();
+    await f.probe([remote('t1')]);
+    expect(f.statCalls()).toBe(2);
+    f.advance(1001); // cache TTL expired: without quarantine this would stat again
+    const result = await f.probe([remote('t1')]);
+    expect(result['t1']).toEqual({ status: 'unavailable', dirStatus: 'unavailable' });
+    expect(f.statCalls()).toBe(2); // zero new hung syscalls
+  });
+
+  it('a forced refresh (user action) ignores the quarantine and stats for real', async () => {
+    const f = deadShareFixture();
+    await f.probe([remote('t1')]);
+    await f.probe([remote('t1')]);
+    expect(f.statCalls()).toBe(2);
+    await f.probe([remote('t1')], true);
+    expect(f.statCalls()).toBe(4); // forced round issued both stats again
+  });
+
+  it('probeTask (open file/folder) ignores the quarantine too', async () => {
+    const f = deadShareFixture();
+    await f.probe([remote('t1')]);
+    await f.probeTask(remote('t1'));
+    expect(f.statCalls()).toBe(4);
+  });
+
+  it('a healthy local path is unaffected by the deadline', async () => {
+    const f = deadShareFixture();
+    const local = completed('t2', ['C:/Videos/clip.mp4']);
+    expect((await f.probe([local]))['t2']).toEqual({ status: 'present', dirStatus: 'present' });
   });
 });

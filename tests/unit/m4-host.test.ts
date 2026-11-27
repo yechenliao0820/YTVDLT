@@ -305,6 +305,24 @@ describe('M4 host · per-task temp dir (D-118)', () => {
     host.dispose();
   });
 
+  it('D-291 · private mode parks partials INSIDE the private tree, never in the shared work dir', async () => {
+    const { host } = await setup({
+      expandPath: expandTo('C:/Users/leo/Videos'),
+      internalWorkDir: 'C:/Users/leo/AppData/Roaming/YTVDLT/work',
+    });
+    await host.task.config.set('general', 'privateMode', true);
+    const ids = await host.enqueueSingle({ url: 'https://example.org/private', kind: 'video' });
+    const request = host.task.queue.get(ids[0])?.request;
+    // The video title ends up in the partial file name, so a shared work dir
+    // would leak the title outside the private directory.
+    expect(request?.paths.tempDir).toBe(
+      `C:/Users/leo/AppData/Local/YTVDLT/private/work/${ids[0]}`,
+    );
+    expect(request?.paths.tempDir?.startsWith('C:/Users/leo/AppData/Roaming/YTVDLT/work'))
+      .toBe(false);
+    host.dispose();
+  });
+
   it('two tasks never share a temp dir', async () => {
     const { host } = await setup({
       expandPath: expandTo('C:/Users/leo/Videos'),

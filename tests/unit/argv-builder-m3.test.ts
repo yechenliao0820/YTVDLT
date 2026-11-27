@@ -225,8 +225,8 @@ const EXPECTED_DIRS: readonly string[] = [
 const EXPECTED_TEMPLATES: readonly string[] = [
   '%(title)s.%(ext)s',
   '%(extractor_key)s/%(title)s.%(ext)s',
-  '%(playlist|)s/%(title)s.%(ext)s',
-  '%(extractor_key)s/%(playlist|)s/%(title)s.%(ext)s',
+  '%(playlist|.)s/%(title)s.%(ext)s',
+  '%(extractor_key)s/%(playlist|.)s/%(title)s.%(ext)s',
 ];
 
 function combinationRequest(index: number): DownloadRequest {

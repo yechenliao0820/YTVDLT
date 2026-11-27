@@ -21,6 +21,7 @@ import {
 } from './m5-channels.js';
 import type { IpcGateway, IpcHandler } from './ipc-gateway.js';
 import type { LocalFileStatusPort } from './local-file-status.js';
+import type { TempDirIo } from './task-temp-cleanup.js';
 import type { ISystemStartupPort } from '@ytvdlt/shared';
 import { IPC_CHANNELS } from '@ytvdlt/shared';
 import { assertHttpUrl } from '@ytvdlt/engine-ytdlp';
@@ -57,6 +58,8 @@ export interface M5HostOptions extends M4HostOptions {
   readonly trashFiles?: TrashFilesPort;
   /** D-120: local artifact state probe; absent keeps the old (no field) DTO. */
   readonly fileStatus?: LocalFileStatusPort;
+  /** D-291: temp-dir cleanup primitives; absent = cleanup skipped (tests). */
+  readonly tempDirIo?: TempDirIo;
   /** Subtitle preview (stage 2): live probe + ticket store; absent = disabled. */
   readonly subtitlePreview?: SubtitlePreviewPortLike;
   /**
@@ -321,6 +324,7 @@ export async function createM5Host(options: M5HostOptions): Promise<M5Host> {
     ...(options.pathPicker === undefined ? {} : { pathPicker: options.pathPicker }),
     ...(options.trashFiles === undefined ? {} : { trashFiles: options.trashFiles }),
     ...(options.fileStatus === undefined ? {} : { fileStatus: options.fileStatus }),
+    ...(options.tempDirIo === undefined ? {} : { tempDirIo: options.tempDirIo }),
     ...(options.subtitlePreview === undefined ? {} : { subtitlePreview: options.subtitlePreview }),
     // D-114: the authoritative build identity. Sourced from the same
     // `app.getVersion()` the package metadata carries, never from a literal.

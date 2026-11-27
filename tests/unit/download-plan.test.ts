@@ -385,14 +385,18 @@ describe('B1 · network / advanced / path derivation', () => {
     expect(plan({ subdirByExtractor: true }).outputDir).toBe('C:/V');
     expect(plan({ subdirByExtractor: true }).outputTemplate)
       .toBe('%(extractor_key)s/%(title)s.%(ext)s');
-    // 01 — playlist layer with the EMPTY default (a single video skips it).
+    // 01 — playlist layer with the RELATIVE `.` default (D-290): a single video
+    // skips the layer AND the template stays relative. An empty default made
+    // the template start with `/`, which yt-dlp reads as an ABSOLUTE path and
+    // the media landed in the drive root.
     expect(plan({ subdirByPlaylist: true }).outputDir).toBe('C:/V');
     expect(plan({ subdirByPlaylist: true }).outputTemplate)
-      .toBe('%(playlist|)s/%(title)s.%(ext)s');
+      .toBe('%(playlist|.)s/%(title)s.%(ext)s');
+    expect(plan({ subdirByPlaylist: true }).outputTemplate.startsWith('/')).toBe(false);
     // 11 — both layers, extractor first.
     expect(plan({ subdirByExtractor: true, subdirByPlaylist: true }).outputDir).toBe('C:/V');
     expect(plan({ subdirByExtractor: true, subdirByPlaylist: true }).outputTemplate)
-      .toBe('%(extractor_key)s/%(playlist|)s/%(title)s.%(ext)s');
+      .toBe('%(extractor_key)s/%(playlist|.)s/%(title)s.%(ext)s');
     expect(plan({ subdirByExtractor: true, subdirByPlaylist: true }).outputDir).not.toContain('%(');
   });
 
@@ -402,9 +406,9 @@ describe('B1 · network / advanced / path derivation', () => {
       advanced: advanced({ splitChapters: true }),
     }));
     expect(plan.chapterPrefix).toBe('chapter:');
-    // `-o chapter:%(extractor_key)s/%(playlist|)s/%(title)s.%(ext)s` — inserting
+    // `-o chapter:%(extractor_key)s/%(playlist|.)s/%(title)s.%(ext)s` — inserting
     // the prefix BEFORE the selector would turn it into literal filename text.
-    expect(plan.outputTemplate).toBe('chapter:%(extractor_key)s/%(playlist|)s/%(title)s.%(ext)s');
+    expect(plan.outputTemplate).toBe('chapter:%(extractor_key)s/%(playlist|.)s/%(title)s.%(ext)s');
     expect(plan.outputTemplate.startsWith('chapter:')).toBe(true);
     expect(plan.outputDir).toBe('C:/V');
   });

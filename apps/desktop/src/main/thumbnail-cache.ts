@@ -418,6 +418,23 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
   /** D-288: cover URL -> retry-not-before timestamp (see FAILED_RETRY_MS). */
   const failedUntil = new Map<string, number>();
   /**
+   * D-291: hard ceiling for `failedUntil`. The map is keyed by URL and an
+   * entry is only deleted on a later success, so a long session full of dead
+   * CDN links grew it without bound. 256 distinct failing covers is far above
+   * what one queue shows at once; beyond that the OLDEST entry is dropped
+   * (insertion order = age), which at worst costs one extra retry.
+   */
+  const MAX_FAILED_ENTRIES = 256;
+
+  function rememberCoverFailure(fetchUrl: string): void {
+    failedUntil.set(fetchUrl, now() + FAILED_RETRY_MS);
+    if (failedUntil.size <= MAX_FAILED_ENTRIES) return;
+    for (const [key, expiry] of failedUntil) {
+      if (failedUntil.size <= MAX_FAILED_ENTRIES) break;
+      if (expiry <= now() || failedUntil.size > MAX_FAILED_ENTRIES) failedUntil.delete(key);
+    }
+  }
+  /**
    * D-258: task ids whose reference was dropped (`forget()`) while an
    * `ensure()` may still be racing the network. A landing attempt for one of
    * these must not resurrect the reference or wipe a purge-pending marker.
@@ -794,7 +811,7 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       maybeAutoPrune();
       return target;
     } catch (error) {
-      failedUntil.set(fetchUrl, now() + FAILED_RETRY_MS);
+      rememberCoverFailure(fetchUrl);
       await logger.warn('thumbnail', 'cover fetch failed; card keeps its letter badge', {
         taskId,
         detail: error instanceof Error ? error.message : String(error),
@@ -1162,8 +1179,12 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       const fetchUrl = upgradeThumbnailUrl(url);
       if (fetchUrl === null) return Promise.resolve(null);
       // D-288: a URL that just failed is not re-fetched on every queue tick.
+      // D-291: an expired entry is dropped instead of lingering forever.
       const retryAt = failedUntil.get(fetchUrl);
-      if (retryAt !== undefined && retryAt > now()) return Promise.resolve(null);
+      if (retryAt !== undefined) {
+        if (retryAt > now()) return Promise.resolve(null);
+        failedUntil.delete(fetchUrl);
+      }
       const pending = inFlight.get(taskId);
       if (pending !== undefined) return pending;
       const attempt = (async () => {

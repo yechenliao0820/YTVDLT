@@ -207,19 +207,31 @@ export function buildOutputDir(
  * D-275: the categorized subdirectory layers as an OUTPUT TEMPLATE prefix
  * (they belong in `-o`, never in `-P` — see {@link buildOutputDir}). Returns
  * `''` when both switches are off; otherwise
- * `%(extractor_key)s` / `%(playlist|)s` / both joined with `/`.
+ * `%(extractor_key)s` / `%(playlist|.)s` / both joined with `/`.
  *
- * The `|` in `%(playlist|)s` is yt-dlp's default-value syntax: a single video
+ * The `|` in `%(playlist|.)s` is yt-dlp's default-value syntax: a single video
  * has no playlist (the field is None) and without a default the engine would
- * render its NA placeholder — a literal `NA` directory. With the empty default
- * the playlist layer collapses and the file lands directly under the extractor
- * directory (owner decision, 2026-11-22: 置空跳过该层). {@link renderTemplate}
- * understands the same syntax so the preview and the argv stay on one chain.
+ * render its NA placeholder — a literal `NA` directory.
+ *
+ * D-290: the default is `.`, NOT the empty string. With `|` empty the rendered
+ * template STARTS with a separator (`/%(title)s…`) whenever the playlist layer
+ * is the FIRST segment — i.e. `subdirByPlaylist` on and `subdirByExtractor`
+ * off — and yt-dlp treats a template that starts with a separator as an
+ * ABSOLUTE path: `-P <videoDir>` is bypassed and the media lands in the DRIVE
+ * ROOT (`C:\Title.mp4`). The artifact is then rejected by the containment gate
+ * (`artifact.outsideRoots`) and the task fails after a full download. A `.`
+ * default renders a RELATIVE `./name` for the same case, which yt-dlp
+ * normalises back into the output dir, and the playlist title is untouched
+ * when the field exists. Verified against the bundled yt-dlp: single video →
+ * `<out>/name`, playlist page → `<out>/<playlist>/name`.
+ *
+ * {@link renderTemplate} understands the same syntax and the preview drops
+ * `.` segments, so the preview and the argv stay on one chain (D-270).
  */
 export function categorizedTemplatePrefix(paths: PathsDomain): string {
   const segments: string[] = [];
   if (paths.subdirByExtractor === true) segments.push('%(extractor_key)s');
-  if (paths.subdirByPlaylist === true) segments.push('%(playlist|)s');
+  if (paths.subdirByPlaylist === true) segments.push('%(playlist|.)s');
   return segments.join('/');
 }
 
@@ -305,7 +317,10 @@ export function resolveOutputPath(paths: PathsDomain, vars: TemplateVars): Outpu
   const prefixRendered = renderTemplate(categorizedTemplatePrefix(paths), vars);
   const prefix = prefixRendered
     .split('/')
-    .filter((segment) => segment !== '')
+    // D-290: `.` is the playlist layer's relative no-op default — it keeps the
+    // argv template relative for a single video. The preview must not turn it
+    // into a `_` directory (sanitizeFileName would strip the dot).
+    .filter((segment) => segment !== '' && segment !== '.' && segment !== '..')
     .map((segment) => sanitizeFileName(segment))
     .join('/');
   const full = prefix === '' ? `${dir}/${sanitized}` : `${dir}/${prefix}/${sanitized}`;

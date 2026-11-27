@@ -6,7 +6,7 @@
  * injected `stat` so it stays L0-testable and has no `node:*` / `electron`
  * import. The real `stat` lives in `adapters/local-file-status-port.ts`.
  *
- * Four rules that must not be relaxed:
+ * Five rules that must not be relaxed:
  *  1. Only `ENOENT` / `ENOTDIR` mean "gone". Permission, locked files, an
  *     unavailable volume and unknown errno are NOT "deleted" — misreporting
  *     a transient error as a missing file is how a user loses their history.
@@ -23,6 +23,13 @@
  *     in flight (non-forced callers share it), a forced caller waits it out and
  *     then runs its own fresh round, and a round keeps at most
  *     `MAX_PROBE_WORKERS` stat calls pending.
+ *  5. D-291: a single stat is DEADLINE-BOUND. Bounding the batch is not enough —
+ *     `TASK_LIST` awaits the probe, so one artifact on a dead share kept the
+ *     queue page loading for the whole SMB timeout. A stat that misses
+ *     `statTimeoutMs` is reported as `unavailable` and the path is quarantined
+ *     for `hungRetryMs`, so the poll loop stops feeding the thread pool new
+ *     hung syscalls. A user-triggered probe (open file/folder) ignores the
+ *     quarantine and stats for real.
  */
 import type { TaskRecord } from '@ytvdlt/shared';
 import { primaryMediaArtifact } from '@ytvdlt/core';
@@ -72,6 +79,21 @@ export interface LocalFileStatusOptions {
   readonly now?: () => number;
   /** Short TTL only. A long cache would keep showing a deleted file as present. */
   readonly cacheTtlMs?: number;
+  /**
+   * D-291: per-stat ceiling. `TASK_LIST` awaits the batch probe, so one
+   * artifact on a disconnected network share used to hold the WHOLE queue page
+   * in its loading state until the OS SMB timeout (tens of seconds). A stat
+   * that does not answer within this budget is reported as `unavailable`
+   * (honest: "cannot prove the file is gone") and the path is quarantined.
+   */
+  readonly statTimeoutMs?: number;
+  /**
+   * D-291: how long a timed-out path is skipped WITHOUT issuing another stat.
+   * Re-probing a dead share on every poll is what turned one hung syscall into
+   * a permanent stall (each round queues up to `MAX_PROBE_WORKERS` new hung
+   * stats). A forced refresh (user action) always re-stats.
+   */
+  readonly hungRetryMs?: number;
 }
 
 /** `ENOENT` means gone; everything else is an honest, distinct failure. */
@@ -121,10 +143,87 @@ const MAX_PROBE_WORKERS = 4;
 /** The derived directory of a bare root does not exist — there is no parent. */
 const NO_PARENT: StatOutcome = { kind: 'error', code: 'ENOENT' };
 
+/** D-291: a stat that missed its deadline is reported as this bounded outcome. */
+const TIMED_OUT: StatOutcome = { kind: 'error', code: 'ETIMEDOUT' };
+
 export function createLocalFileStatusProbe(options: LocalFileStatusOptions): LocalFileStatusPort {
   const now = options.now ?? ((): number => Date.now());
   const ttl = options.cacheTtlMs ?? 1500;
+  // D-291: 1200 ms is long enough for a healthy local/NAS stat and short enough
+  // that the queue page never feels frozen; a dead share answers far later.
+  const statTimeoutMs = options.statTimeoutMs ?? 1200;
+  const hungRetryMs = options.hungRetryMs ?? 5 * 60 * 1000;
+  /** path -> epoch ms until which a non-forced round must not re-stat it. */
+  const hungUntil = new Map<string, number>();
+  const MAX_HUNG_ENTRIES = 256;
   const cache = new Map<string, { readonly key: string; readonly value: LocalFileState; readonly at: number }>();
+
+  /**
+   * D-291: bound a single `stat` by a deadline. The underlying `fs.stat` keeps
+   * its libuv thread until the OS answers — that part is unavoidable from JS —
+   * but the caller must not wait for it, and the quarantine below stops the
+   * poll loop from feeding the pool a new hung syscall every round.
+   */
+  async function withinDeadline(path: string): Promise<StatOutcome> {
+    let pending: Promise<StatOutcome>;
+    try {
+      pending = options.stat(path);
+    } catch {
+      return { kind: 'error', code: 'UNKNOWN' };
+    }
+    if (statTimeoutMs <= 0) return pending;
+    return new Promise<StatOutcome>((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(TIMED_OUT);
+      }, statTimeoutMs);
+      // A hung stat must never keep the process alive after `before-quit`.
+      (timer as unknown as { unref?: () => void }).unref?.();
+      pending.then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        },
+        () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve({ kind: 'error', code: 'UNKNOWN' });
+        },
+      );
+    });
+  }
+
+  function rememberHung(path: string): void {
+    hungUntil.set(path, now() + hungRetryMs);
+    if (hungUntil.size <= MAX_HUNG_ENTRIES) return;
+    // Insertion order is the eviction order; an expired entry always goes first.
+    for (const [key, expiry] of hungUntil) {
+      if (hungUntil.size <= MAX_HUNG_ENTRIES) break;
+      if (expiry <= now() || hungUntil.size > MAX_HUNG_ENTRIES) hungUntil.delete(key);
+    }
+  }
+
+  /**
+   * `allowQuarantine` is false for user-triggered probes (open-file/folder): a
+   * reconnected share must answer on the next click, not five minutes later.
+   */
+  async function statBounded(path: string, allowQuarantine: boolean): Promise<StatOutcome> {
+    if (allowQuarantine) {
+      const until = hungUntil.get(path);
+      if (until !== undefined) {
+        if (until > now()) return TIMED_OUT;
+        hungUntil.delete(path);
+      }
+    }
+    const outcome = await withinDeadline(path);
+    if (outcome.kind === 'error' && outcome.code === 'ETIMEDOUT') rememberHung(path);
+    return outcome;
+  }
 
   const keyOf = (task: FileStateInput): string => `${task.state}|${task.artifacts.join('|')}`;
 
@@ -155,8 +254,8 @@ export function createLocalFileStatusProbe(options: LocalFileStatusOptions): Loc
     const pair = splitArtifact(task);
     if (pair === null) return INVALID_STATE;
     const [fileStat, dirStat] = await Promise.all([
-      options.stat(pair.primary),
-      pair.dir === '' ? Promise.resolve<StatOutcome>(NO_PARENT) : options.stat(pair.dir),
+      statBounded(pair.primary, false),
+      pair.dir === '' ? Promise.resolve<StatOutcome>(NO_PARENT) : statBounded(pair.dir, false),
     ]);
     return stateOf(pair, fileStat, dirStat);
   }
@@ -166,11 +265,11 @@ export function createLocalFileStatusProbe(options: LocalFileStatusOptions): Loc
    * pairs would leave `2 × workers` stats pending at once, so the sequential
    * pair pins the whole round's pending-stat peak at exactly the pool size.
    */
-  async function measureSequentially(task: FileStateInput): Promise<LocalFileState> {
+  async function measureSequentially(task: FileStateInput, allowQuarantine: boolean): Promise<LocalFileState> {
     const pair = splitArtifact(task);
     if (pair === null) return INVALID_STATE;
-    const fileStat = await options.stat(pair.primary);
-    const dirStat = pair.dir === '' ? NO_PARENT : await options.stat(pair.dir);
+    const fileStat = await statBounded(pair.primary, allowQuarantine);
+    const dirStat = pair.dir === '' ? NO_PARENT : await statBounded(pair.dir, allowQuarantine);
     return stateOf(pair, fileStat, dirStat);
   }
 
@@ -227,7 +326,7 @@ export function createLocalFileStatusProbe(options: LocalFileStatusOptions): Loc
         if (task === undefined) return;
         cursor += 1;
         try {
-          result[task.id] = remember(task, await measureSequentially(task));
+          result[task.id] = remember(task, await measureSequentially(task, !force));
         } catch (error) {
           // One failed stat must not turn sibling workers into unhandled
           // rejections; the round still reports the FIRST failure.
