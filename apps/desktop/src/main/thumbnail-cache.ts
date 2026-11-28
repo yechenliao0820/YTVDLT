@@ -148,6 +148,9 @@ export function isProxyFakeIpBlock(error: unknown): boolean {
   return a === 198 && (b === 18 || b === 19);
 }
 
+/** D-289: a response that arrived but cannot be used as a cover. */
+class UnusableCoverError extends Error {}
+
 /** What the settings page shows; all sizes are bytes on disk. */
 export interface ThumbnailCacheStatus {
   readonly files: number;
@@ -414,6 +417,23 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
   const inFlight = new Map<string, Promise<string | null>>();
   /** D-288: cover URL -> retry-not-before timestamp (see FAILED_RETRY_MS). */
   const failedUntil = new Map<string, number>();
+  /**
+   * D-291: hard ceiling for `failedUntil`. The map is keyed by URL and an
+   * entry is only deleted on a later success, so a long session full of dead
+   * CDN links grew it without bound. 256 distinct failing covers is far above
+   * what one queue shows at once; beyond that the OLDEST entry is dropped
+   * (insertion order = age), which at worst costs one extra retry.
+   */
+  const MAX_FAILED_ENTRIES = 256;
+
+  function rememberCoverFailure(fetchUrl: string): void {
+    failedUntil.set(fetchUrl, now() + FAILED_RETRY_MS);
+    if (failedUntil.size <= MAX_FAILED_ENTRIES) return;
+    for (const [key, expiry] of failedUntil) {
+      if (failedUntil.size <= MAX_FAILED_ENTRIES) break;
+      if (expiry <= now() || failedUntil.size > MAX_FAILED_ENTRIES) failedUntil.delete(key);
+    }
+  }
   /**
    * D-258: task ids whose reference was dropped (`forget()`) while an
    * `ensure()` may still be racing the network. A landing attempt for one of
@@ -764,9 +784,15 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       }
       // Still checked here: an injected HttpPort (tests, future adapters) is not
       // required to honour the ceiling itself.
-      if (bytes.byteLength === 0 || bytes.byteLength > maxBytesPerFile) return null;
+      // D-289: these used to `return null` INSIDE the try, which skipped the
+      // cool-down below — a CDN answering with an empty body / HTML error page
+      // was re-requested on every progress tick. They now throw a labelled
+      // error so the single catch handles cooling, logging and the null result.
+      if (bytes.byteLength === 0 || bytes.byteLength > maxBytesPerFile) {
+        throw new UnusableCoverError('cover rejected: empty or oversized response');
+      }
       const ext = signatureOf(bytes);
-      if (ext === null) return null;
+      if (ext === null) throw new UnusableCoverError('cover rejected: response is not a supported image');
 
       const name = `${createHash('sha1').update(fetchUrl).digest('hex')}.${ext}`;
       const target = join(dir, name);
@@ -779,13 +805,13 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       }
       // Confirm the bytes really are on disk before advertising the path.
       const stored = await readFile(target).catch(() => null);
-      if (stored === null) return null;
+      if (stored === null) throw new UnusableCoverError('cover rejected: stored file could not be read back');
       await attach(name, taskId, bytes.byteLength, true, privateCover); // D-258: this attempt wrote the bytes
       failedUntil.delete(fetchUrl);
       maybeAutoPrune();
       return target;
     } catch (error) {
-      failedUntil.set(fetchUrl, now() + FAILED_RETRY_MS);
+      rememberCoverFailure(fetchUrl);
       await logger.warn('thumbnail', 'cover fetch failed; card keeps its letter badge', {
         taskId,
         detail: error instanceof Error ? error.message : String(error),
@@ -1153,8 +1179,12 @@ export function createThumbnailCache(options: ThumbnailCacheOptions): ThumbnailC
       const fetchUrl = upgradeThumbnailUrl(url);
       if (fetchUrl === null) return Promise.resolve(null);
       // D-288: a URL that just failed is not re-fetched on every queue tick.
+      // D-291: an expired entry is dropped instead of lingering forever.
       const retryAt = failedUntil.get(fetchUrl);
-      if (retryAt !== undefined && retryAt > now()) return Promise.resolve(null);
+      if (retryAt !== undefined) {
+        if (retryAt > now()) return Promise.resolve(null);
+        failedUntil.delete(fetchUrl);
+      }
       const pending = inFlight.get(taskId);
       if (pending !== undefined) return pending;
       const attempt = (async () => {

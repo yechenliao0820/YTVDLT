@@ -118,9 +118,19 @@ export interface PrivatePurgeReport {
 }
 
 /**
- * Remove every settled private record. Files are never touched — the media the
- * user downloaded belongs to them (D-88's "cleanup never touches the
+ * Remove every settled private record. User media is never touched — the media
+ * the user downloaded belongs to them (D-88's "cleanup never touches the
  * filesystem" rule is unchanged); only the queue row and its snapshot entry go.
+ *
+ * D-292: the optional `onRemoved` callback fires after a record has actually
+ * been removed (`remove()` returned true), so the host can discard APP-OWNED
+ * state that is only reachable through that record — the per-task temp dir
+ * (`<private>/work/<taskId>`), guarded by the desktop layer's
+ * `discardTaskTempDir` (managed shape + sanitized-id match + no symlink +
+ * realpath still a direct child). The callback sees the record BEFORE any
+ * snapshot pruning loses it. Its failures propagate like any caller error:
+ * the production wiring catches them, because a temp-dir hiccup must never
+ * stop the remaining rows from being purged.
  *
  * A `remove()` rejection propagates: the snapshot write failed, so the row is
  * still on disk and pretending otherwise would hide a failed privacy cleanup.
@@ -128,6 +138,7 @@ export interface PrivatePurgeReport {
 export async function purgePrivateRecords(
   queue: PrivateCleanupQueue,
   forgetCover?: (taskId: string) => void,
+  onRemoved?: (record: TaskRecord) => Promise<void> | void,
 ): Promise<PrivatePurgeReport> {
   const removed: string[] = [];
   const keptRunning: string[] = [];
@@ -140,6 +151,7 @@ export async function purgePrivateRecords(
     if (await queue.remove(record.id)) {
       removed.push(record.id);
       forgetCover?.(record.id);
+      await onRemoved?.(record);
     }
   }
   return { removed, keptRunning };

@@ -564,6 +564,45 @@ describe('m5 ipc · removing a task together with its local files (D-87)', () =>
     expect(result.ok).toBe(true);
   });
 
+  it('D-291 · a removed record discards its managed per-task temp dir', async () => {
+    const removed: string[] = [];
+    const records = [record('t1', {
+      state: 'Canceled',
+      artifacts: [],
+      request: { ...REQUEST, paths: { ...REQUEST.paths, tempDir: 'C:/Data/work/t1' } },
+    })];
+    const { handlers } = await harness(records, {
+      tempDirIo: {
+        lstat: async () => ({ isSymbolicLink: () => false, isDirectory: () => true }),
+        realpath: async (path) => path,
+        readdir: async () => [],
+        rmdir: async () => {},
+        rm: async (path) => { removed.push(path); },
+      },
+    });
+    const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({ taskId: 't1', action: 'remove' });
+    expect(result).toMatchObject({ ok: true });
+    expect(removed).toEqual(['C:/Data/work/t1']);
+  });
+
+  it('D-291 · a non-managed temp dir (user choice) is never touched', async () => {
+    const removed: string[] = [];
+    const records = [record('t1', { state: 'Canceled', artifacts: [] })];
+    const { handlers } = await harness(records, {
+      tempDirIo: {
+        lstat: async () => ({ isSymbolicLink: () => false, isDirectory: () => true }),
+        realpath: async (path) => path,
+        readdir: async () => [],
+        rmdir: async () => {},
+        rm: async (path) => { removed.push(path); },
+      },
+    });
+    const result = await handlers.get(IPC_CHANNELS.TASK_ACTION)?.({ taskId: 't1', action: 'remove' });
+    expect(result).toMatchObject({ ok: true });
+    // REQUEST.paths.tempDir = 'C:/temp/t1' — the user's own folder, not ours.
+    expect(removed).toEqual([]);
+  });
+
   it('keeps the record when the recycle bin handled only part of the files', async () => {
     const records = [record('t1', { state: 'Completed', artifacts: ['C:/V/a.mp4', 'C:/V/b.vtt'], request: REQUEST })];
     const { handlers, calls } = await harness(records, {

@@ -392,13 +392,25 @@ function resolveTempDirFor(
   const paths = request.paths;
   // Private mode writes into %LOCALAPPDATA%; comparing volumes against the
   // user's Videos folder would be wrong there.
-  const outputDir = paths.privateMode === true
-    ? expand(PRIVATE_OUTPUT_DIR)
+  const privateDir = paths.privateMode === true ? expand(PRIVATE_OUTPUT_DIR) : '';
+  const outputDir = privateDir !== ''
+    ? privateDir
     : (request.format.extractAudio ? paths.audioDir : paths.videoDir);
+  /**
+   * D-291: a private-mode task must NOT park its `.part` files in the shared
+   * `<dataDir>/work` tree. Partial names are derived from the video title, so
+   * a cancelled private download left a title-bearing file OUTSIDE the private
+   * directory — exactly the residue private mode exists to avoid. Routing the
+   * work root under the private directory keeps it on the same volume (the
+   * final move stays a rename) and inside the tree the private close purges.
+   */
+  const internalWork = privateDir !== ''
+    ? `${privateDir.replace(/[\\/]+$/, '')}/work`
+    : (internalWorkDir ?? '');
   const resolved = resolveDownloadTempDir({
     outputDir,
     configuredTempDir: typeof paths.tempDir === 'string' ? paths.tempDir : '',
-    internalWorkDir: internalWorkDir ?? '',
+    internalWorkDir: internalWork,
     taskId,
   });
   return resolved ?? '';

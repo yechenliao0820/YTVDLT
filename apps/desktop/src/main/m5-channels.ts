@@ -25,6 +25,7 @@ import type {
 } from '@ytvdlt/core';
 import type { ThumbnailCacheStatus, ThumbnailPruneReport, ThumbnailCoverPurgeReport } from './thumbnail-cache.js';
 import type { LocalFileStatusPort } from './local-file-status.js';
+import type { TempDirIo } from './task-temp-cleanup.js';
 import type { TxtImportServicePort } from './txt-import-service.js';
 import type { PlaylistPreviewPortLike } from './playlist-preview-service.js';
 import type { PlaylistBatchReport, PlaylistEnqueueInput } from './m4-host.js';
@@ -307,6 +308,13 @@ export interface M5ChannelDeps {
    * actions go straight to core). Production always injects this.
    */
   readonly fileStatus?: LocalFileStatusPort;
+  /**
+   * D-291: filesystem primitives used to discard a removed record's per-task
+   * temp directory (`<work>/<taskId>`). Absent = the cleanup is skipped, which
+   * keeps every legacy fake byte-for-byte unchanged; production injects the
+   * real `node:fs` implementation.
+   */
+  readonly tempDirIo?: TempDirIo;
   /** D-93: absent = the settings page shows "此构建不含更新器". */
   readonly appUpdate?: AppUpdatePortLike;
   /** D-96: absent = every card falls back to the letter badge. */

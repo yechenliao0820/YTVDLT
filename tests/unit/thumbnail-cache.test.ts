@@ -1000,6 +1000,21 @@ describe('D-288 · proxy Fake-IP cover fallback', () => {
     expect(proxied).toBe(0);
   });
 
+  it('cools down an unusable response too (not just thrown errors)', async () => {
+    // D-289: an HTML error page / empty body used to `return null` inside the
+    // try and skip the cool-down, so the next progress tick asked again.
+    let calls = 0;
+    let clock = 1_000;
+    const h = harness({
+      now: () => clock,
+      httpBytes: async () => { calls += 1; return new Uint8Array([1, 2, 3, 4]); },
+    });
+    const cache = h.create();
+    expect(await cache.ensure('t1', 'https://x.test/a.jpg')).toBeNull();
+    expect(await cache.ensure('t2', 'https://x.test/a.jpg')).toBeNull();
+    expect(calls).toBe(1);
+  });
+
   it('cools the URL down instead of refetching on every queue tick', async () => {
     let calls = 0;
     let clock = 1_000;
@@ -1014,5 +1029,30 @@ describe('D-288 · proxy Fake-IP cover fallback', () => {
     clock += 5 * 60 * 1000 + 1;
     expect(await cache.ensure('t3', 'https://x.test/a.jpg')).toBeNull();
     expect(calls).toBe(2);
+  });
+
+  it('D-291 · the cool-down map is bounded: the oldest entry is evicted, not accumulated forever', async () => {
+    let clock = 1_000;
+    const h = harness({
+      now: () => clock,
+      httpBytes: async () => { throw new Error('HTTP 500'); },
+    });
+    const cache = h.create();
+    const countOf = (url: string): number => h.requests.filter((entry) => entry === url).length;
+    // 300 distinct failing covers: more than the 256-entry ceiling.
+    for (let index = 0; index < 300; index += 1) {
+      await cache.ensure(`t${index}`, `https://x.test/${index}.jpg`);
+    }
+    const first = 'https://x.test/0.jpg';
+    const last = 'https://x.test/299.jpg';
+    expect(countOf(first)).toBe(1);
+    expect(countOf(last)).toBe(1);
+    // Still cooling: the newest entry is not refetched.
+    await cache.ensure('again-last', last);
+    expect(countOf(last)).toBe(1);
+    // EVICTED: the oldest entry is retried once instead of being remembered
+    // for the whole session (the unbounded-growth bug).
+    await cache.ensure('again-first', first);
+    expect(countOf(first)).toBe(2);
   });
 });

@@ -18,10 +18,10 @@ import {
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
 import type { CorePorts, EngineUpdateSource } from '@ytvdlt/shared';
 import {
-  ArtifactVerifier, ErrorMapper, Logger, expandEnvVars, purgePrivateRecords,
+  ArtifactVerifier, ErrorMapper, Logger, expandEnvVars, hasUnresolvedEnvToken,
+  purgePrivateRecords, PRIVATE_OUTPUT_DIR,
   type IConfigStore,
 } from '@ytvdlt/core';
 import { createEngine } from '@ytvdlt/engine-ytdlp';
@@ -32,6 +32,9 @@ import {
 import { createElectronShellPort } from './adapters/electron-shell-port.js';
 import { createPathPicker } from './adapters/path-picker.js';
 import { createLocalFileStatusPort, createTrashFilesPort } from './adapters/local-file-status-port.js';
+import { createTempDirIo } from './adapters/temp-dir-io.js';
+import { realInstallerWaiter } from './installer-waiter.js';
+import { discardTaskTempDir, sweepEmptyTempDirs, tempDirOf } from './task-temp-cleanup.js';
 import { createWinStartup } from './adapters/win-startup.js';
 import { resolveFixtureDir, resolveRuntimeDir } from './runtime-paths.js';
 import {
@@ -215,6 +218,7 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     const host = hostRef;
     if (host === null) return;
     try {
+      const tempDirIo = createTempDirIo();
       const report = await purgePrivateRecords(
         {
           list: () => host.m4.task.queue.list(),
@@ -224,6 +228,15 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
         // right below (D-252) — exclusivity-proven covers go to the recycle
         // bin, everything else waits for a prune pass as before.
         (taskId) => thumbnailsRef?.forget(taskId),
+        // D-292: the record is gone, so its per-task temp dir can never be
+        // resumed — without this hook a cancelled private download left a
+        // title-bearing `.part` under `<private>/work/<taskId>/` forever (the
+        // boot sweep only removes EMPTY managed dirs). Same guarded path the
+        // manual-delete wiring uses; best effort, a temp-dir hiccup must never
+        // stop the remaining rows from being purged.
+        (record) => {
+          void discardTaskTempDir(tempDirIo, tempDirOf(record), record.id).catch(() => undefined);
+        },
       );
       if (report.removed.length > 0) await thumbnailsRef?.purgeCovers(report.removed);
     } catch {
@@ -583,6 +596,9 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       // D-120: on-demand `stat` of recorded artifact paths only. No directory
       // scan, no renderer filesystem access; short TTL + forced re-checks.
       fileStatus: createLocalFileStatusPort(),
+      // D-291: a removed record's per-task temp dir (`<work>/<taskId>`) is
+      // discarded through the guarded path in `task-temp-cleanup.ts`.
+      tempDirIo: createTempDirIo(),
       // Subtitle preview (stage 2): live probe behind an opaque, short-lived,
       // single-use ticket bound to the target URL.
       subtitlePreview,
@@ -707,6 +723,24 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
       await thumbnails.prune();
     }).catch(() => undefined);
 
+    // D-291: empty per-task temp dirs are pure residue (yt-dlp only removes
+    // them on a clean success, D-118). The sweep is `rmdir`-only, so a folder
+    // holding a resumable `.part` is kept by the filesystem itself. Never
+    // awaited: housekeeping must not delay the first frame.
+    // D-291: private-mode tasks park their partials under the private tree;
+    // those records are never persisted (D-240), so the only way to find their
+    // orphaned folders after a crash is to scan that root too.
+    const privateRoot = expandEnvVars(PRIVATE_OUTPUT_DIR, process.env);
+    const privateWorkRoot = hasUnresolvedEnvToken(privateRoot)
+      ? []
+      : [`${privateRoot.replace(/[\\/]+$/, '')}/work`];
+    void sweepEmptyTempDirs(createTempDirIo(), {
+      recordTempDirs: host.m4.task.queue.list().map((record) => tempDirOf(record)),
+      workRoots: [join(dataDir.dataDir, 'work'), ...privateWorkRoot],
+    }).then(async (removed) => {
+      if (removed > 0) await logger.info('task-temp', 'empty temp dirs removed', { removed });
+    }).catch(() => undefined);
+
     // Never awaited: a slow network must not delay the first frame.
     if (appUpdater.shouldAutoCheck()) void appUpdater.check();
     await logger.info('data-dir', 'resolved', {
@@ -804,54 +838,13 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
  * "nothing changed" instead of pretending.
  */
 /**
- * D-284: start the verified installer ONLY after this process is gone.
- *
- * The installer is an electron-builder NSIS package. At `.onInit` it runs
- * `_CHECK_APP_RUNNING`, which (a) shows a 确定/取消 "app is running" box when
- * the app is still alive — **取消 quits the installer** — and (b) kills
- * processes by `$INSTDIR` path prefix, so a lingering helper or the old
- * uninstaller keeps the "cannot be closed / Retry" loop alive. Launching the
- * installer 800 ms before `app.quit()` therefore raced that guard on every
- * in-app update; the user saw the prompt, cancelled it, and the install died.
- *
- * This helper hands the installer to a detached PowerShell waiter that polls
- * our PID (200 ms), waits at most 45 s, then `Start-Process`es the installer
- * with `--updated` — the exact parameter electron-builder reads via
- * `StdUtils.TestParameter "updated"` to skip every dialog and take over
- * silently. The app's own quit path (cancel tasks within the 5 s budget,
- * flush the snapshot) finishes first, so a download is cancelled cleanly
- * instead of being hard-killed mid-write.
- *
- * Returns false when the waiter cannot even be spawned (PowerShell missing /
- * blocked); the caller then falls back to the old `openPath` behaviour rather
- * than leaving the user without an install path.
+ * D-284 / D-289 / D-291: start the verified installer ONLY after this process
+ * is gone. The waiter (PID poll + `--updated` + ACK handshake + retry log)
+ * lives in `installer-waiter.ts` so it stays unit-testable without importing
+ * Electron; see that file for the full failure chain it closes.
  */
 function scheduleInstallerAfterExit(installerPath: string): Promise<boolean> {
-  // The path travels through the environment, never interpolated into the
-  // command text: a quoting mistake there would be a command-injection seam.
-  const script = [
-    '$deadline = (Get-Date).AddSeconds(45)',
-    `while ((Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 200 }`,
-    "Start-Process -FilePath $env:YTVDLT_INSTALLER -ArgumentList '--updated'",
-  ].join('; ');
-  return new Promise<boolean>((resolve) => {
-    try {
-      const child = spawn(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', script],
-        {
-          detached: true,
-          stdio: 'ignore',
-          windowsHide: true,
-          env: { ...process.env, YTVDLT_INSTALLER: installerPath },
-        },
-      );
-      child.once('error', () => { resolve(false); });
-      child.once('spawn', () => { child.unref(); resolve(true); });
-    } catch {
-      resolve(false);
-    }
-  });
+  return realInstallerWaiter(installerPath);
 }
 
 function resolveEngineUpdateSource(ports: CorePorts, _runtimeDir: string): EngineUpdateSource | null {

@@ -10,6 +10,7 @@
  * unchanged; see `m5-contracts.ts` for the whitelist they validate against.
  */
 import { IPC_CHANNELS } from '@ytvdlt/shared';
+import type { TaskRecord } from '@ytvdlt/shared';
 import type { CommandTemplateInput, TaskDetailAction, TaskTab } from '@ytvdlt/core';
 import { buildTaskListSnapshot, isPathInsideRoots, trustedArtifactRoots } from '@ytvdlt/core';
 import {
@@ -17,6 +18,7 @@ import {
 } from './m5-contracts.js';
 import type { M5HandlerContext, M5Handler, M5HandlerMap } from './m5-channels.js';
 import type { LocalFileState } from './local-file-status.js';
+import { discardTaskTempDir, tempDirOf } from './task-temp-cleanup.js';
 
 const TASK_ACTIONS: readonly TaskDetailAction[] = [
   'open-file', 'open-folder', 'copy-url', 'copy-error-report', 'cancel', 'remove', 'retry',
@@ -81,6 +83,18 @@ function assertTemplateInput(record: Record<string, unknown>): CommandTemplateIn
 export function createTaskHandlers(ctx: M5HandlerContext): M5HandlerMap {
   const handlers = new Map<string, M5Handler>();
   const deps = ctx.deps;
+
+  /**
+   * D-291: the record is gone, so its `.part` files can never be resumed —
+   * discard the per-task temp directory. Best effort: a cleanup failure must
+   * never turn a successful record removal into an error, and the guards live
+   * in `discardTaskTempDir` (managed shape + id match + no symlink + realpath
+   * still a direct child).
+   */
+  async function discardTempDirOf(record: TaskRecord | undefined): Promise<void> {
+    if (deps.tempDirIo === undefined || record === undefined) return;
+    await discardTaskTempDir(deps.tempDirIo, tempDirOf(record), record.id).catch(() => undefined);
+  }
 
 
     handlers.set(IPC_CHANNELS.TASK_LIST, async (payload) => {
@@ -305,6 +319,8 @@ export function createTaskHandlers(ctx: M5HandlerContext): M5HandlerMap {
       const removal = await deps.taskDetail.perform(taskId, 'remove');
       if (removal.ok === true) {
         deps.thumbnails?.forget?.(taskId);
+        // D-291: the record is gone, so its `.part` files are orphans.
+        await discardTempDirOf(target);
         // external online audit P2: a single-removed private-mode record must
         // not leave its cover waiting for a switch-gated prune pass — recycle
         // it now through the SAME guarded purgeCovers path the window-close
@@ -328,6 +344,9 @@ export function createTaskHandlers(ctx: M5HandlerContext): M5HandlerMap {
       if (result.ok === true) {
         deps.thumbnails?.forget?.(taskId);
         deps.fileStatus?.forget(taskId);
+        // D-291: same rule as the withFiles branch — a removed record can no
+        // longer be retried, so its per-task temp dir is pure residue.
+        await discardTempDirOf(removalTarget);
         // external online audit P2: a single-removed private-mode record
         // recycles its exclusively owned cover NOW (same guarded purgeCovers
         // path as the close-time purge; stale historical ids no longer block,

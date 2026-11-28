@@ -197,19 +197,25 @@ export async function downloadToFile(request: DownloadRequest): Promise<Download
     if (handle !== null) await handle.close().catch(() => undefined);
     if (created) {
       const aborted = controller.signal.aborted;
-      try {
-        if (request.trashPartial === undefined) throw new Error('回收站不可用');
-        await request.trashPartial(partPath);
-      } catch (cleanupError) {
-        // D-285: a CANCEL must stay a cancel. The `.part` name carries a fresh
-        // UUID and is never reused by a later attempt, so a failed recycle-bin
-        // move leaves nothing dangerous — but it used to replace the honest
-        // "cancelled" outcome with "临时文件清理失败，文件保留在 …", which reads
-        // like data loss and made the user think the cancel had failed. Try a
-        // direct delete instead, and stay silent when that also fails.
-        if (aborted) {
-          await unlink(partPath).catch(() => undefined);
-        } else {
+      if (aborted) {
+        // D-289: a CANCELLED download leaves app-owned temp with a one-shot
+        // UUID. Recycling it kept the bytes on disk until the user emptied the
+        // bin (226 MB for an installer) — the exact "wasted space" the user
+        // complained about. Delete it now; the recycle bin stays as the
+        // fallback when the file is still locked by AV / the indexer, and a
+        // failing cleanup never masks the cancel (D-285).
+        try {
+          await unlink(partPath);
+        } catch {
+          if (request.trashPartial !== undefined) {
+            await request.trashPartial(partPath).catch(() => undefined);
+          }
+        }
+      } else {
+        try {
+          if (request.trashPartial === undefined) throw new Error('回收站不可用');
+          await request.trashPartial(partPath);
+        } catch (cleanupError) {
           // A REAL failure (network error, size mismatch, …): the leftover
           // bytes are worth reporting, exactly as before.
           throw new PartialCleanupError(`临时文件清理失败，文件保留在 ${partPath}：${String(cleanupError)}`);

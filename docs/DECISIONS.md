@@ -3040,3 +3040,51 @@ D-159 / D-160 / D-161 三条的「未覆盖」末句都写着「按业主指令*
 | 决策 | 照 D-214 的修法补一个**只在必要时启用**的旁路：① `ThumbnailCacheOptions` 新增可选 `fetchViaProxy`；② 直连抓取失败时，只有错误文本命中 `blocked resolved address at hop N: 198.18|198.19.x.x`（导出 `isProxyFakeIpBlock()` 判定）才用 Chromium 栈重试同一 https URL；③ 生产端直接复用 `updateNetwork.httpPort`（`mode:'system'` → 走系统代理/TUN；用户显式配置的 `network.proxy` 同样生效），URL 仍先过 `isPublicHttpsUrl`，响应仍要过图片签名 + `maxBytes` + 超时；④ 404 / TLS / 策略拒绝**不**触发代理旁路，直连路径与 D-137 钉扎一字未改；⑤ 顺带加 5 分钟失败冷却（`FAILED_RETRY_MS`），同一 URL 失败后不再每个队列 tick 重试。 |
 | 验证 | 新增 5 例：`isProxyFakeIpBlock` 只认 198.18/198.19（私网 10.x、404、undefined 均 false）；fake-IP 拒绝 → 代理回退成功并把图片入库；普通 404 不调用代理旁路；同一 URL 第二次 ensure 在冷却期内零请求、超过 5 分钟后才重试。全量 **3093 过 / 6 skipped / 0 failed**；`typecheck` 5/5；`build-desktop` 后 `main.cjs` 命中新符号。 |
 | 未覆盖 | **真实网络端到端未验**：本机沙箱到 `i.ytimg.com` 的 TLS 被拦（`curl` 同样 0 字节），无法在这里证明 Chromium 经 TUN 能取到图；需业主在真机重下一条 YouTube 视频复验封面。IPv6 Fake-IP（`fcc0::/10`）不在判定内（node 对这类 CDN 先返回 IPv4，漏判只回落旧行为）。其它代理形态（PAC/WPAD/固定 SOCKS）的端到端仍依赖用户环境，D-214 的未覆盖项同样适用。 |
+
+## D-289 · 2026-11-26 · 复核 D-284…D-288：清理标记从未生效 + 冷却漏路径 + 取消不释放磁盘
+
+| 项 | 内容 |
+|---|---|
+| 来源 | 业主转来第三方审计，指 D-286 为「伪修复」、D-288 为「部分修复」、D-285/284 各有缺口。逐条核对后：**D-286 成立且是重大缺陷，D-288 成立，D-285 成立（轻微），D-284 成立（边界）**；D-287 的「0.3.3 里没有」属事实但非缺陷（该功能本就面向 0.3.4）。 |
+| 缺陷 1（重大，D-286 连带更早） | `app-update-cleanup.ts::validPending` 的文件名白名单写死 `/^YTVDLT-Setup-[…]\.exe$/i`（连字符），只匹配 0.2.x 的资产名；0.3.0 起 GitHub 资产是 `YTVDLT.Setup.0.3.0.exe`（点号），而 `safeFileName()` 只替换 Windows 非法字符、**不会把点号改回连字符**。于是 `validPending()` 恒 false → `rememberPendingUpdate()` 在写标记前静默 return → 标记文件从未存在 → `cleanupCompletedUpdate()` 永远读不到东西。**结论：自 0.3.0 起安装包清理从未生效；D-286 的开关只是开关**。单测用 `YTVDLT-Setup-0.3.0.exe` 假名，正好绕过该 bug。 |
+| 缺陷 2（D-288 漏路径） | `fetchAndStore` 里对「空响应 / 超上限 / 非图片 / 读回失败」用 `return null` 早退，绕过了 `failedUntil` 冷却——CDN 返回 HTML 错误页时仍按 progress 事件频率反复请求。 |
+| 缺陷 3（D-285 遗留） | 取消时走回收站：`.part` 的 226 MB 只是进了回收站，磁盘没释放，与「不必要占用」的诉求相反。 |
+| 缺陷 4（D-284 边界） | 等待器只报 spawn 成功，`Start-Process` 失败（杀软隔离、组策略、安装包被移走）无人观测，表现为「应用退了、安装器没起」。 |
+| 决策 | ① 白名单改为 `/^YTVDLT[ .-]Setup(?:[ .-][A-Za-z0-9._-]+)?\.exe$/i`，覆盖点号资产名 / 空格本地名 / 0.2.x 连字符名 / fallback 名，尾部不含路径分隔符，`join()` 无法越界；② `rememberPendingUpdate` 改为返回 `boolean`，`install()` 在 false 时写 WARNING（`installer cleanup marker not written`），同类回归不再静默；③ 封面校验失败改为抛 `UnusableCoverError`，统一走 catch 的冷却 + 日志；④ 取消路径**先 `unlink`**（应用自有、一次性 UUID 的 `.part`），失败才回退回收站；非取消的真实失败仍抛 `PartialCleanupError` 并保留文件；⑤ 等待器 `Start-Process` 重试 3 次，全失败时向 `<updates>/installer-launch.log` 追加一行，供下次启动排查；⑥ 顺手把 **0.3.4 的说明**写进 `release-notes.js`（D-287 面板按版本取，打包即带上）。 |
+| 验证 | `app-update-cleanup` 7→11 例：**真实点号名**能写标记并清理、空格本地名同样、`setup.exe` / `….exe.bak` / `..\evil.exe` / `YTVDLTXSetup…` 一律拒绝且不写文件、同版本不记录；`thumbnail-cache` 46→47 例：非图片响应第二次 ensure 零请求；`app-update-cancel` 4 例改写：取消后目录为空且**回收站零调用**、回收站不可用也不影响取消；`settings-release-notes` 5 例含 0.3.4 条目。全量 **3098 过 / 6 skipped / 0 failed**；`typecheck` 5/5。 |
+| 未覆盖 | 0.3.3 已发布，不重打——上述修复随 0.3.4 生效；等待器的失败日志没有 UI 入口（只能看文件）；杀软/组策略拦截仍可能让安装不启动，只是不再静默；真实网络下的 YouTube 封面仍需真机复验（同 D-288）。 |
+
+## D-290 · 2026-11-27 · 播放列表层空默认让单视频模板以 `/` 开头，产物落到盘根（在线审计 P1，实测确认）
+
+| 项 | 内容 |
+|---|---|
+| 来源 | 业主转来第三方在线审计第 2 项（中等）。审计原文只保留了片段（`%(playlist)s`、`playlistItems:null`、`--no-playlist`、`DECISIONS.md:2922 自认未做集成实测`），按代码路径复原后**成立，且比审计估的严重**：不是「目录层不生效」，是产物跑出输出目录。 |
+| 现象 | `subdirByPlaylist:true` + `subdirByExtractor:false` + 单视频（直链 mp4 或只有一个 `<video><source>` 的页面，playlist 字段为 None）→ 文件落在**盘根**（实测 `C:\clip [clip].mp4`、`C:\One Clip (1) [single-1].mp4`）。随后 `task-queue::acceptContainedArtifacts()` 按 D-182 判「超出任务输出目录」→ 记录转 `Error`，**整条下载白跑**。本机非管理员时 `C:\` 不可写，表现为 yt-dlp 三次重试后失败。 |
+| 根因 | D-275 把分类层放进 `-o` 模板前缀，播放列表层用 `%(playlist|)s`（空默认）。空默认渲染成空串后，模板**首段**变成空：`/%(title)s…`。yt-dlp 把以分隔符开头的输出模板视为**绝对路径**（它支持模板里写绝对路径），`-P <videoDir>` 被完全绕过。D-275 的唯一 L2 用例把两个开关全开，首段是 `%(extractor_key)s`（恒非空），空层落在中间变成 `//`，被引擎归一成单个分隔符——所以用例绿、真实场景红。 |
+| 决策 | `categorizedTemplatePrefix()` 的播放列表默认值从空串改成 `.`：`%(playlist|.)s`。字段有值时行为不变（`<playlist>/name`）；字段缺失时渲染成 `./name`，相对路径，落回 `-P` 目录（`os.path.normpath` 吃掉 `.`，不会创建名为 `.` 的目录）。预览链 `resolveOutputPath()` 同步丢弃 `.` / `..` 段，避免 `sanitizeFileName('.')` 把预览显示成 `_`。**不放宽产物封链门**（D-182 保持 fail-closed），修的是模板本身。 |
+| 验证 | 随包 yt-dlp 直接实测 4 组合：单视频 + 仅播放列表层（旧写法 → `C:\…`，新写法 → `<out>/…`）、播放列表 + 仅播放列表层（`<out>/<playlist>/…`，两种写法一致）、单视频 + 双开关（`<out>/Generic/…`）。新增 L2 `categorized-dir-local` 第二例（真实引擎 + 127.0.0.1 fixture，单视频 + 仅播放列表层）：产物必须在 `outDir` 直下；**红灯实测**：把前缀回退成空默认后该例 98 s 超时等不到 `Completed`。单测同步：path-resolver（前缀 4 组合 + 渲染 + 预览塌缩 2 例）、download-plan（4 组合 + chapter 次序）、argv-builder-m3（64 组合逐条）。 |
+| 未覆盖 | 真实站点（YouTube 播放列表）的 playlist 层落盘仍未在集成层实测（fixture 只有本地页面；D-275 的同一项未覆盖延续）；POSIX 下 `.` 段的行为未实测（本机仅 Windows，引擎恒定随包版本）；已有用户的旧任务不受影响——修复只作用于新请求。 |
+
+## D-291 · 2026-11-27 · 复核在线审计：网络盘 stat 无超时 + 临时目录残留 + 冷却表无上限 + 安装器「spawn ≠ 已调度」
+
+| 项 | 内容 |
+|---|---|
+| 来源 | 同一份在线审计的第 3/4/5/6/7 项。逐条核对：**第 5 项主症状（冷却漏路径）与第 7 项（取消进回收站）已在 D-289 修复，本轮不复改**；第 1 项（安装包白名单）同样已由 D-289 修好并用 node 复验（`YTVDLT.Setup.0.3.3.exe` 命中、旧正则不命中）。真正成立的残余是下面四项。 |
+| 缺陷 1 | `TASK_LIST` **await** `fileStatus.probe()`；D-248 只把批次变成单飞 + 4 worker，单次 `stat` 仍无上限。断开的网络盘/SMB 会让 `fs.stat` 卡到 OS 超时（几十秒），队列页首帧/强制刷新全程转圈。 |
+| 缺陷 2 | `isManagedTempDir()` 自 D-118 起只有单测引用、**生产零调用**：`<work>/<taskId>` 只在成功后「空目录才删」，取消/失败/删除记录都不回收，永久累积；私有任务的 `.part` 还落在非私有的 `%APPDATA%/YTVDLT/work`（文件名含标题）。 |
+| 缺陷 3 | 封面失败冷却表 `failedUntil` 只增不减（成功才 delete），长会话里死链一多就无界增长。 |
+| 缺陷 4 | `scheduleInstallerAfterExit()` 在 `spawn` 事件就 `resolve(true)`——只证明等待器进程起来了。脚本被 AV/组策略杀掉时应用照样 300 ms 后退出，安装器没起、也不走 `openPath` 回退（D-289 只补了日志与重试，没有证明）。 |
+| 决策 | ① `createLocalFileStatusProbe` 增 `statTimeoutMs`（默认 1200 ms）与 `hungRetryMs`（默认 5 min）：超时按 `unavailable` 报（诚实：证明不了已删除），并把该路径隔离，非强制轮次不再发新 stat；`probeTask`（打开文件/文件夹）与 `force` 刷新不受隔离限制。② 新增 `task-temp-cleanup.ts`：`discardTaskTempDir()` 在**记录被删除成功后**清理（记录还在 = 可续传，绝不动）；四道守卫：`isManagedTempDir` 形状 + 末段必须等于该记录的 `sanitizeTaskSegment(id)` + `lstat` 必须是真目录（链接跳过）+ `realpath` 必须仍是同一父目录的直接子项；启动时 `sweepEmptyTempDirs()` 只 `rmdir` **空**目录（带 `.part` 的目录由文件系统自己保住），扫描面同时覆盖 `<dataDir>/work` 与 `<private>/work`（无痕记录不进快照，崩溃后的孤儿只能靠扫描发现）。私有任务的 work 根改到 `<private>/work`（同卷，仍是一次 rename）。③ 冷却表加 256 条上限（插入序淘汰最旧），过期的条目在 `ensure()` 命中时删除。④ 安装器等待器抽到 `installer-waiter.ts`：脚本第一句写 ACK 文件，主进程等 ACK 最多 3 s 才算「已调度」；无 ACK 就 `taskkill` 掉等待器（否则它 45 s 后会在应用还活着时启动安装器，复现 D-284 的竞态并叠加重复安装）并回退 `openPath`。 |
+| 验证 | local-file-status 18→23 例（超时返回 `unavailable` 且 <1 s、隔离后下一轮零 stat、强制刷新/`probeTask` 绕过隔离、健康本地路径不受影响）；task-temp-cleanup 新增 13 例（两种受管形状、用户自选目录跳过、id 不符跳过、链接跳过、realpath 逃逸保留、已消失不算错、空目录清扫/带 `.part` 保留/非受管不动/工作根不存在）；m5-channels 79 例（删除记录触发清理、用户目录不动）；m4-host 27 例（私有任务 temp 落在 `<private>/work`、不再落 Roaming）；thumbnail-cache 47→48 例（300 条失败后最旧被淘汰、最新仍在冷却）；installer-waiter 新增 5 例（ACK 后 true、无 ACK false 且 kill、spawn 抛错 false、提前 exit/error false）。全量 unit **3073 过 / 6 skipped / 0 failed**、contract 53/53、`typecheck` 5/5、`check-layering` 0 violations。 |
+| 未覆盖 | 挂死的 `fs.stat` 仍会占用 libuv 线程直到 OS 返回（JS 层无法取消系统调用）——本修复保证界面与轮询不再等它、也不再喂新请求，但线程池占用只能等操作系统超时；真实断网 SMB / 睡眠外置盘未在真机复测；启动清扫只处理空目录，崩溃留下的非空孤儿仍保留（删除记录时会清，孤儿记录外的需人工处理）；打包版真机未实测（铁律 9）。 |
+
+## D-292 · 2026-11-27 · 私有关窗/退出的记录清理接入任务临时目录回收（复核 D-291 的 P2 残余）
+
+| 项 | 内容 |
+|---|---|
+| 来源 | 对 D-289…D-291 修复的独立复核审计（三个并行深审）确认：更新链路、封面冷却、盘根逃逸（D-290）、stat 超时全部为真修复；但 D-291 缺陷 2 的清理接线只覆盖了**手动删除**路径，漏掉私有记录最主要的删除路径——关窗/退出。 |
+| 现象 | 私有任务被取消或失败后关窗：`clearPrivateHistory` → `purgePrivateRecords` 只删队列记录（`queue.remove`）与封面引用，**从不触碰临时目录**；而私有记录不进 `tasks.json`（D-240），重启后既无记录、`discardTaskTempDir` 的手动删除接线也永远不会再被触发。启动清扫只 `rmdir` **空**目录，非空的 `<private>/work/<taskId>/` 连同带视频标题的 `.part` / `.ytdl` **永久残留**——每退出一次（D-247 的真退出会先取消在跑任务，取消后即满足清理条件）就产生一条隐私残留，与私有模式的承诺（D-232 / D-240 / 坑 50）直接相悖。`m4-host.ts` 的注释「inside the tree the private close purges」与事实不符。 |
+| 根因 | D-291 给 `discardTaskTempDir` 建了守卫与模块，但唯一接线点放在 `m5-task-handlers.ts::TASK_ACTION remove`；core 的 `purgePrivateRecords` 没有任何「记录被移除」的回调面，宿主层无法在关窗路径上复用同一守卫。 |
+| 决策 | ① `purgePrivateRecords` 增可选第三参 `onRemoved(record)`（append-only，与既有 `forgetCover` 同款注入模式，core 仍不碰文件系统）：在 `queue.remove()` 返回 true 之后、对**确实被移除**的记录逐条触发，把完整 record 交给宿主；`Running` / `FetchingInfo`（keptRunning）、普通记录、`remove()` 拒绝（false）都不触发；回调异常按普通错误传播（宿主负责吞掉，避免一个 temp 目录故障阻断其余行的清理）。② 生产接线在 `electron-entry.ts::clearPrivateHistory`：回调调 `discardTaskTempDir(createTempDirIo(), tempDirOf(record), record.id).catch(() => undefined)`——与手动删除完全同一条守卫链（受管形状 + `sanitizeTaskSegment(id)` 末段匹配 + 非 symlink + realpath 仍是同父直接子项，四道守卫逐条生效），best-effort，不阻塞关窗 3 s 预算内的其余清理。普通（非私有）任务的临时目录回收路径不变（仍只有记录删除时触发）。③ `m4-host.ts` 的注释至此成为事实，不改。 |
+| 验证 | `task-queue.test.ts` 新增 D-292 三例：onRemoved 恰好对每个实际移除的记录触发且携带完整 record（含 `request.paths.tempDir`）；keptRunning / 普通记录 / remove 拒绝三种情形零触发；回调 reject 传播并中断清理循环（钉住契约，生产接线在其外层 catch）。定向 task-queue 67 / task-temp-cleanup 13 / m5-channels 79 全绿；`typecheck` 5/5；全量 unit 与 `check-layering` 见 handoff-check 当日输出。 |
+| 未覆盖 | 守卫与 fs 实现复用 D-291 已测模块，未新增 fs 层用例；「关窗时正在下载的私有任务」先被 D-247 取消（置 Canceled）再被本回调清理，时序依赖 D-247 已有的取消结算，未单独加真机验证；私有任务跨卷分支（`<outputDir>/.ytvdlt-incomplete/<taskId>`）同样被本回调覆盖（守卫含该形状），但真实跨卷仍未实测（延续 D-291 未覆盖）；`.ytvdlt-incomplete` 根的历史孤儿（无记录可循）不在本决策范围。 |

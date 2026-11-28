@@ -165,18 +165,40 @@ describe('B2 PathResolver · categorizedTemplatePrefix (D-275: layers ride the -
   it('00 / 10 / 01 / 11', () => {
     expect(categorizedTemplatePrefix(paths())).toBe('');
     expect(categorizedTemplatePrefix(paths({ subdirByExtractor: true }))).toBe('%(extractor_key)s');
-    expect(categorizedTemplatePrefix(paths({ subdirByPlaylist: true }))).toBe('%(playlist|)s');
+    // D-290: the playlist default is `.` (relative no-op), never '' — an empty
+    // first segment made the `-o` template start with `/`, i.e. an absolute
+    // path, and yt-dlp wrote the media into the DRIVE ROOT.
+    expect(categorizedTemplatePrefix(paths({ subdirByPlaylist: true }))).toBe('%(playlist|.)s');
     expect(categorizedTemplatePrefix(paths({ subdirByExtractor: true, subdirByPlaylist: true })))
-      .toBe('%(extractor_key)s/%(playlist|)s');
+      .toBe('%(extractor_key)s/%(playlist|.)s');
   });
 
-  it('the playlist layer carries the empty default: a single video skips it (no NA directory)', () => {
+  it('the playlist layer carries the RELATIVE default: a single video skips it (no NA, no leading /)', () => {
     // yt-dlp renders a missing field as its NA placeholder unless the template
-    // carries `|default`. The empty default collapses the layer entirely.
+    // carries `|default`. D-290: the default is `.`, so the layer collapses to
+    // a relative no-op instead of producing a leading separator.
     expect(renderTemplate(categorizedTemplatePrefix(paths({ subdirByExtractor: true, subdirByPlaylist: true })), vars()))
       .toBe('YouTube/MyList');
     expect(renderTemplate(categorizedTemplatePrefix(paths({ subdirByExtractor: true, subdirByPlaylist: true })), vars({ playlist: '' })))
-      .toBe('YouTube/');
+      .toBe('YouTube/.');
+    // The playlist-only prefix must never resolve to something that starts with
+    // a separator when the field is absent.
+    expect(renderTemplate(categorizedTemplatePrefix(paths({ subdirByPlaylist: true })), vars({ playlist: '' })))
+      .not.toMatch(/^\//);
+  });
+
+  it('D-290 · preview drops the `.` no-op layer instead of turning it into a `_` directory', () => {
+    const single = resolveOutputPath(
+      paths({ subdirByPlaylist: true, outputTemplate: '%(title)s.%(ext)s' }),
+      vars({ playlist: '' }),
+    );
+    expect(single.preview.replace(/\\/g, '/')).toBe('C:/V/My Video.mp4');
+    expect(single.preview).not.toContain('/_/');
+    const playlist = resolveOutputPath(
+      paths({ subdirByPlaylist: true, outputTemplate: '%(title)s.%(ext)s' }),
+      vars({ playlist: 'MyList' }),
+    );
+    expect(playlist.preview.replace(/\\/g, '/')).toBe('C:/V/MyList/My Video.mp4');
   });
 });
 
