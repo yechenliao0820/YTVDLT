@@ -304,8 +304,28 @@ export function resolveOutputPath(paths: PathsDomain, vars: TemplateVars): Outpu
   // Same function, same point in the chain as download-plan.ts (`sanitizeToken`
   // on the raw template, before any rendering) — keep them literally identical.
   const safeTemplate = sanitizeToken(paths.outputTemplate);
-  const rendered = renderTemplate(safeTemplate, vars);
-  const sanitized = sanitizeFileName(rendered);
+  // D-270 (playlist-title batch layer): the template may now carry LITERAL
+  // directory layers — the batch planner bakes `<playlist title>/` in front of
+  // the user template (`playlist/title-layer.ts`), and a hand-edited
+  // `Sub/%(title)s…` config template always could. Rendering and sanitizing
+  // per TEMPLATE segment keeps those layers as real directories in the preview
+  // instead of flattening them into the filename: yt-dlp treats template
+  // separators as directories and sanitizes each FIELD value individually, so
+  // a `/` that came from rendered metadata stays INSIDE its segment and is
+  // rewritten to `_` here exactly like the engine does. A flat template is one
+  // segment — byte-identical to the previous whole-string behaviour. Empty
+  // segments (a token that rendered to nothing, a `//` run) collapse the way
+  // the filesystem collapses them; `.`/`..`-like values are NOT dropped here —
+  // unlike the prefix's `.` no-op default (D-290) they are metadata text, and
+  // sanitizeFileName maps them to a visible `_`.
+  const renderedSegments = safeTemplate
+    .split(/[\\/]/)
+    .map((segment) => renderTemplate(segment, vars));
+  const rendered = renderedSegments.join('/');
+  const sanitized = renderedSegments
+    .filter((segment) => segment !== '')
+    .map((segment) => sanitizeFileName(segment))
+    .join('/');
   const sanitizationApplied = sanitized !== rendered;
   const dir = buildOutputDir(paths);
   // D-275: the categorized layers are part of the TEMPLATE the engine really

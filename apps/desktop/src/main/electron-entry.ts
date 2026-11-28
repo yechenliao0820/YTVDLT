@@ -44,7 +44,7 @@ import { createNodeProbePort, resolveDataDir } from './data-dir.js';
 import { createQueueIntakeGate } from './adapters/queue-intake-gate.js';
 import { LocalDirUpdateSource } from './adapters/local-dir-update-source.js';
 import { createAppUpdateService, type AppUpdateService } from './app-update-service.js';
-import { cleanupCompletedUpdate, createUpdateCleanupFiles } from './app-update-cleanup.js';
+import { cleanupCompletedUpdate, createUpdateCleanupFiles, sweepLegacyInstallers } from './app-update-cleanup.js';
 import { createThumbnailCache, type ThumbnailCache } from './thumbnail-cache.js';
 import {
   createComponentUpdater, allowedComponentFeed, type ComponentUpdatePort,
@@ -816,9 +816,39 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     // `configRef` is assigned inside `createHost()`, which this closure cannot
     // see, so TS narrows it to `null` here. Re-assert the declared union.
     const cleanupConfig = configRef as IConfigStore | null;
+    // D-286: Settings → App update → "自动清理安装包" (default ON). Both
+    // housekeeping passes below honor the same switch.
+    const cleanupEnabled = cleanupConfig === null
+      ? true : cleanupConfig.get('advanced', 'autoCleanUpdateInstaller') !== false;
+    // Two cleanups on the SAME updates dir, with a strict boundary:
+    //   1. `cleanupCompletedUpdate` — the pending marker names the ONE installer
+    //      the running version was just upgraded from; removed only after a
+    //      SHA-256 re-verification (its version EQUALS the running one).
+    //   2. `sweepLegacyInstallers` — version-based one-shot for the pre-D-289
+    //      era (0.3.0–0.3.3 wrote no markers at all, so those installers are
+    //      orphans the marker can never name): removes whitelisted names
+    //      STRICTLY OLDER than the running version, so it can never
+    //      double-handle the file the marker flow owns.
+    // Never awaited: housekeeping must not delay start-up (same style as the
+    // task-temp sweep in createHost above). A partial sweep failure is WARN,
+    // never a crash.
     void cleanupCompletedUpdate(cleanupFiles, join(appDataDir, 'updates'), appVersion, {
-      // D-286: Settings → App update → "自动清理安装包" (default ON).
-      enabled: cleanupConfig === null ? true : cleanupConfig.get('advanced', 'autoCleanUpdateInstaller') !== false,
+      enabled: cleanupEnabled,
+    });
+    void sweepLegacyInstallers(cleanupFiles, join(appDataDir, 'updates'), appVersion, {
+      enabled: cleanupEnabled,
+    }).then((report) => {
+      if (report.failed.length > 0) {
+        forwardLog('warn', 'app-update', 'legacy installer sweep finished with failures', {
+          removed: [...report.removed], kept: report.kept.length, failed: [...report.failed],
+        });
+      } else if (report.removed.length > 0) {
+        forwardLog('info', 'app-update', 'legacy installers removed', { removed: [...report.removed] });
+      }
+    }).catch((cause: unknown) => {
+      forwardLog('warn', 'app-update', 'legacy installer sweep skipped', {
+        reason: cause instanceof Error ? cause.message : String(cause),
+      });
     });
   }
   return handle;

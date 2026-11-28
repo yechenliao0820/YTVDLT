@@ -754,6 +754,21 @@ describe('external online audit P3 · 模板子目录：副本扫描跟随模板
     expect(queue.get('t1')?.state).toBe('Completed');
   });
 
+  it('P2 fix · 烘焙的播放列表字面量层（My_List/…）走树扫描拿到 (1)，层不被破坏', async () => {
+    const { mem, queue, engineState } = setup('completed');
+    // buildPlaylistBatchRecordsByUrl bakes `My_List/` in front of the user
+    // template when subdirByPlaylist is on. The template then CONTAINS a
+    // separator, so the D-273 separator dispatch descends into the tree it
+    // will actually write into — and the ` (n)` insertion must land before the
+    // LAST `%(ext)s` only, leaving the layer byte-identical.
+    mem.state.files.set('C:/out/My_List/Title [fixture].mp4', 'old-bytes');
+    await queue.enqueue(recordWithTemplate('t1', 'My_List/%(title)s [%(id)s].%(ext)s'));
+    await tick();
+    expect(engineState.lastRequest?.paths.outputTemplate)
+      .toBe('My_List/%(title)s [%(id)s]_(1).%(ext)s');
+    expect(queue.get('t1')?.state).toBe('Completed');
+  });
+
   it('递归边界：深度 3 层内的旧文件（a/b/c/）纳入候选', async () => {
     const { mem, queue, engineState } = setup('completed');
     mem.state.files.set('C:/out/a/b/c/Title [fixture].mp4', 'old-bytes');

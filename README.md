@@ -19,38 +19,34 @@ dialog on first launch.
 - Download engine: bundled `yt-dlp`, verified and replaceable at runtime
 - Maintainability: a one-way layering rule keeps all queue logic offline-testable
 
-## Latest release — 0.3.2
+## Latest release — 0.3.3
 
 | | |
 |---|---|
-| Released | 2026-11-17 |
-| Artifact | `YTVDLT.Setup.0.3.2.exe` — NSIS installer, Windows x64, 226,414,142 B |
-| SHA-256 | `48db9a7cd535874b55582ba6e468d353fe294d6c4aec4ed1e38462624cc8d028` |
-| Tag / release baseline | `v0.3.2` |
-| Downloads | [Release 0.3.2](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.2) · [all releases](https://github.com/yechenliao0820/YTVDLT/releases) |
+| Released | 2026-11-26 |
+| Artifact | `YTVDLT.Setup.0.3.3.exe` — NSIS installer, Windows x64, 226,344,798 B |
+| SHA-256 | `51a73c0f4dab1d40fa3bfd8b77fc5507de1b5fd8f61b5a09705b838bba2d1344` |
+| Tag / release baseline | `v0.3.3` |
+| Downloads | [Release 0.3.3](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.3) · [all releases](https://github.com/yechenliao0820/YTVDLT/releases) |
 
-**What changed in 0.3.2** — a privacy-and-durability release built out of two
-audit rounds (D-234…D-243). Private mode finally means what it says: the toolbar
-switch only reports "on" after the main process confirms the write and reverts
-with the real reason if it fails, the three paths that create a task wait for
-that write instead of reading the previous value, and a private task is no
-longer written to the queue snapshot at all — a crash or a kill can no longer
-resurrect the record on the next launch. Queue durability got equally honest:
-every enqueue is persisted before it returns (including a task that starts
-immediately, whose probe phase used to be unpersisted), and a failed snapshot
-write is reported instead of being swallowed — a removal that never reached the
-disk no longer looks like a success. `history.json` is read directly instead of
-trusting an existence probe that mapped every stat error to "missing", so a
-transient permission or sharing error can no longer overwrite a history this
-process never saw. The updater no longer hands a `.download` staging file to
-Windows: an installer that cannot be published under its release name is a
-failed update, not an install that may launch something else. The earlier audit
-fixes ride along: signed-URL parameters are redacted from verbose stderr, a
-streaming download settles from exit evidence when `close` never arrives, the
-proxy password is scrubbed from `tasks.json` and re-injected from the current
-config on restore, concurrent duplicate downloads reserve their ` (n)` copy
-names, and the unused permanent-unlink capability behind `history.remove` is
-gone.
+**What changed in 0.3.3** — the close-out of two online-audit rounds on top of
+0.3.2 (D-244…D-282); no new feature surface. Categorized downloads land in real
+folders: with *subfolder by extractor / playlist* enabled, files go to
+`<output>/<Extractor>/<Playlist>/` instead of a literal `%(extractor_key)s`
+directory. Restored UI feedback: the queue status line, the delete dialog's
+"also delete local files" checkbox and its explanation, the Settings "open
+release page" button, the task-log body and the batch row list are visible
+again. A damaged `tasks.json` no longer bricks startup — restore, enqueue,
+retry and delete keep working and the queue refills a freed slot. A configured
+download folder that still contains an unresolved `%VARIABLE%` is refused up
+front instead of creating a literal directory. Under the hood: config, command
+templates and history imports are persist-first with per-element validation;
+the thumbnail index is byte-backed up before repair; covers only load over
+https and a credentials-carrying SOCKS update proxy is refused; the quit path
+cancels in-flight downloads inside a bounded budget that a second quit can no
+longer cut short; and every yt-dlp spawn starts with `--ignore-config
+--no-plugin-dirs` so stray user configs and plugin directories cannot bypass
+the argv allowlist.
 
 The installer is **not code-signed**; SmartScreen will warn once on first run.
 
@@ -121,6 +117,11 @@ filesystem. `scripts/check-layering.mjs` enforces the boundary.
   playlist is probed live, previewed and selected by default, then confirmed
   once into N independent tasks — each with its own cancel / retry.
   (D-129, D-130)
+- **Optional folder classification.** Turn on *subfolder by extractor* /
+  *subfolder by playlist* and downloads land under
+  `<output>/<Extractor>/<Playlist>/` instead of one flat folder — the layers
+  are part of the engine's output template, so the on-disk tree matches what
+  was configured. (D-275)
 - **Supported sites, read from your own engine.** The panel lists what the
   bundled `yt-dlp` actually reports (`--list-extractors`) — site count,
   sub-extractors, engine version — with search, sort, refresh and paging. There
@@ -280,19 +281,14 @@ Stated plainly rather than glossed over:
   on the packaged installer — startup & version truth, the app update check
   (with live release-notes aggregation), component status, a real download
   into the Videos library, open-folder, delete-with-files (recycle bin),
-  mid-download cancel, and the second-instance deep-link prefill. One known
-  issue is disclosed in the release notes: in the packaged build, closing the
-  window quits the app instead of hiding to the tray — a legacy behaviour
-  shared by every released version, already fixed in code (D-220 / D-224) and
-  awaiting the next build's re-verification. YouTube and similar sites require
-  reachable network access (direct or via your own proxy).
-- 0.3.2 **contains** the close-to-tray fix (D-220 / D-224), but this build has
-  not been through the real-machine click-through yet: this round was validated
-  by the automated gates (typecheck, the full unit/contract suite, the
-  screenshot E2E with its negative controls) and the packaged installer was
-  built and inspected (version resources, asar contents, SHA-256) — it was not
-  installed and clicked through. Treat the tray behaviour as fixed-in-code,
-  pending field confirmation.
+  mid-download cancel, and the second-instance deep-link prefill. 0.3.2 and
+  0.3.3 were validated by the automated gates (typecheck, the full suite with
+  coverage, the screenshot E2E with its negative controls) plus packaging
+  inspection (version resources, asar contents, icon payloads, SHA-256) — they
+  were not installed and clicked through. The close-to-tray fix (D-220 / D-224,
+  shipped since 0.3.2) is therefore fixed-in-code, pending field confirmation.
+  YouTube and similar sites require reachable network access (direct or via
+  your own proxy).
 - App updates download the whole installer (no delta), and the portable build
   does not participate in self-update.
 - No real-device, all-sites coverage is claimed; the verification numbers in
@@ -300,12 +296,12 @@ Stated plainly rather than glossed over:
 
 Full list: [`docs/AI-MAINTENANCE.md`](docs/AI-MAINTENANCE.md) §10.
 
-## Release history — 0.2.2 → 0.3.2
+## Release history — 0.2.2 → 0.3.3
 
-Eleven releases in ten days. The trajectory moved from UI polish, through
+Twelve releases in eighteen days. The trajectory moved from UI polish, through
 download-core correctness, to edge cases that only appear after a file has been
 moved or deleted outside the app — and then into a broad security, privacy and
-real-machine-verification pass, followed by an audit round that made private
+real-machine-verification pass, followed by audit rounds that made private
 mode and queue persistence mean exactly what they claim.
 
 | Version | Date | Focus | Decisions | Release |
@@ -319,31 +315,31 @@ mode and queue persistence mean exactly what they claim.
 | 0.2.8 | 2026-11-10 | Idempotent deletion; on-demand local file state detection; layered licence pane with the full English licence | D-120 / D-121 | [v0.2.8](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.8) |
 | 0.2.9 | 2026-11-10 | Native right-click edit menu in editable fields; settings placeholder shows `—` instead of a made-up path | D-122 / D-123 | [v0.2.9](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.2.9) |
 | 0.3.0 | 2026-11-12 | Subtitle pipeline; TXT / playlist batch import; bounded engine output; dynamic supported-sites list and the six-state URL pre-check; HTTP / IPC / process-termination hardening; command templates | D-124…D-139 | [v0.3.0](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.0) |
-| **0.3.2** | **2026-11-17** | Private mode confirmed by the host before the UI claims it, and never persisted — a crash cannot resurrect the record; enqueue / retry / removal report a failed snapshot write instead of swallowing it; history reads no longer trust an existence probe; the updater refuses to install an installer it could not publish; plus the D-234…D-238 audit fixes | D-234…D-243 | [v0.3.2](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.2) |
 | **0.3.1** | **2026-11-15** | Everything after 0.3.0, machine-verified: DNS-pinned outbound connections; CSP + deny-all session permission gate on every page; atomic config writes with corrupt-snapshot backup; config-domain whitelist; cancellable URL pre-checks; first-launch OS language; deep-link prefill fix; download-location root rejection; verifier-timeout honesty | D-140…D-213 | [v0.3.1](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.1) |
+| **0.3.2** | **2026-11-17** | Private mode confirmed by the host before the UI claims it, and never persisted — a crash cannot resurrect the record; enqueue / retry / removal report a failed snapshot write instead of swallowing it; history reads no longer trust an existence probe; the updater refuses to install an installer it could not publish; plus the D-234…D-238 audit fixes | D-234…D-243 | [v0.3.2](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.2) |
+| **0.3.3** | **2026-11-26** | Close-out of two online-audit rounds, no new feature surface: categorized downloads land in real `<Extractor>/<Playlist>` folders; the queue status line, delete-with-files checkbox, release-page button, log body and batch row list are visible again; a damaged `tasks.json` no longer bricks startup; unresolved `%VARIABLE%` in a configured download folder is refused up front; persist-first config / template / history writes; https-only covers; a second quit can no longer cut the shutdown cleanup short | D-244…D-282 | [v0.3.3](https://github.com/yechenliao0820/YTVDLT/releases/tag/v0.3.3) |
 
-0.3.2 is published, and everything landed through D-243 is in it: the six
-private-mode and persistence defects from the second online audit (D-239…D-243),
-on top of the first audit round (D-234…D-238). Details live in
+0.3.3 is published, and everything landed through D-282 is in it: the two audit
+rounds that made the categorized folders, the restored UI feedback, the
+damaged-snapshot recovery and the quit-path cleanup real. Details live in
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
-Work landing after 0.3.2 is **not yet released** (D-244…D-249): a transition veil
-for the language reload, `--ignore-config --no-plugin-dirs` on every yt-dlp spawn so
-a stray user/portable config or plugin directory can never bypass the argv
-allowlist, config reads that no longer trust an existence probe, in-flight downloads
-cancelled on quit with a bounded wait for exit evidence (and `Alt+F4` handed back to
-the OS window-close path), single-flight bounded file-status probing, and a
-command-template store that backs up a damaged file before replacing it.
-
-A second audit round on top of that (D-250…D-264) adds: an `http://` → `https://`
-cover upgrade so Bilibili covers are no longer rejected by the https-only gate, a
-themed status bar in place of the persistent empty `{}` box on the detail page,
-private-mode cover-cache reclaim with a delete-time reference re-check and an
-exact accounting, a narrowed install baseline, a fail-closed private-directory
-expansion, quit-path evidence for queued tasks plus a gate that keeps a second
-quit from cutting the cleanup short, persist-first template CRUD with its error
-priority restored, write-then-start for retries, English refusal copy through a
-pure display model, and test suites that no longer rewrite the host environment.
+Work landing after 0.3.3 is **not yet released** (D-284…D-294): in-app upgrades
+now quit the app first and only then launch the installer silently (`--updated`),
+through a detached waiter whose first act — writing an ACK file — must be seen
+before the app commits to quitting, with a wizard fallback kept (D-284 / D-289 /
+D-291); the downloaded installer is cleaned up after a successful upgrade via a
+Settings switch (on by default), and the orphaned installers left behind by the
+0.3.0–0.3.3 marker bug are swept at startup, strictly-older versions only
+(D-286 / D-289 / D-294); Settings carries a bundled, bilingual, re-openable
+"What's new in this version" panel (D-287); cover fetching works behind system
+proxies / TUN / Fake-IP by handing that traffic to the Chromium network stack
+(D-288); playlist-classified batch downloads finally group entries under the
+playlist name — the entry-URL path the switch is about (D-293); per-task temp
+folders (`.part` resume evidence) are reclaimed when a record is deleted,
+including private records on window close (D-291 / D-292); a hung network-drive
+`stat` can no longer stall the queue page (deadline + quarantine, D-291); and a
+cancelled update download no longer parks 226 MB in the Recycle Bin (D-285).
 
 ## Engineering and verification
 
@@ -355,8 +351,8 @@ state of the repository (per-release numbers live in
 | Gate | Result |
 |---|---|
 | `pnpm typecheck` | 5/5 workspace packages successful (per-package `tsc --noEmit`) |
-| Unit / contract / integration tests | **2,875 passed, 6 skipped (capability-gated), 0 failed across 170 files** |
-| Coverage | statements 93.16% / branches 86.66% / functions 93.46% / lines 93.16% (floor 70, not raised; the zero-dependency UI itself is covered too) |
+| Unit / contract / integration tests | **3,155 passed, 6 skipped (capability-gated), 0 failed across 176 files** |
+| Coverage | statements 92.55% / branches 86.68% / functions 93.42% / lines 92.55% (floor 70, not raised; the zero-dependency UI itself is covered too) |
 | Screenshot E2E | 31/31 cases + 5/5 deliberate negative checks; screenshot baselines untouched by the recent audit-repair rounds |
 | `check-layering` / `frozen-gate` / `request.ts` freeze | 0 violations / passed / byte-identical |
 | CI | GitHub Actions (`ci.yml`, `windows-latest`) runs typecheck, the full suite with coverage, layering and the frozen-file gate on every push to `main` and every PR; branch protection requires it to pass before merge, and all actions are pinned to commit SHAs |
