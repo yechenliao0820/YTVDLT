@@ -391,6 +391,40 @@ describe('B3 · R1-R5 argv-level mutual exclusion', () => {
       expect(argv).not.toContain(flag);
     }
   });
+
+  it('P2 fix · a batch record with the baked playlist-title layer carries it in -o, byte for byte', () => {
+    // buildPlaylistBatchRecordsByUrl output with subdirByPlaylist on: the
+    // entry-URL request runs `--no-playlist` (plan.playlistItems === null) and
+    // the literal layer must survive in the -o value after the categorized
+    // prefix — this is the argv yt-dlp actually receives for the batch.
+    const argv = buildDownload(req({
+      paths: paths({
+        subdirByExtractor: true, subdirByPlaylist: true,
+        outputTemplate: 'My Playlist/%(title)s.%(ext)s',
+      }),
+    }), CTX);
+    assertInvariants(argv);
+    expect(argv).toContain('--no-playlist');
+    expect(argv).not.toContain('--yes-playlist');
+    expect(argv[argv.indexOf('-o') + 1])
+      .toBe('%(extractor_key)s/%(playlist|.)s/My_Playlist/%(title)s.%(ext)s');
+    // No whitespace element survives (the title's space is argv-sanitized).
+    expect(argv.every((x) => !/\s/.test(x))).toBe(true);
+
+    // Chapter ordering: splitChapters keeps `chapter:` as the FIRST token of
+    // the -o value; the literal layer sits behind the chapter segment.
+    const chapter = buildDownload(req({
+      paths: paths({
+        subdirByExtractor: true, subdirByPlaylist: true,
+        outputTemplate: 'My Playlist/%(title)s.%(ext)s',
+      }),
+      advanced: advanced({ splitChapters: true }),
+    }), CTX);
+    const oValue = chapter[chapter.indexOf('-o') + 1];
+    expect(oValue.startsWith('chapter:')).toBe(true);
+    expect(oValue)
+      .toBe('chapter:%(extractor_key)s/%(playlist|.)s/My_Playlist/%(title)s.%(ext)s');
+  });
 });
 
 describe('B3 · M3 conditional segments + argv iron rules', () => {

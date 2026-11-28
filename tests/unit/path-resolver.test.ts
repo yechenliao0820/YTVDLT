@@ -347,6 +347,47 @@ describe('B2 PathResolver · resolveOutputPath (Q-M3-09 fixed order / D-43)', ()
     const resolution = resolveOutputPath(paths(), vars({ title: 'My Two Words' }));
     expect(resolution.preview).toBe('C:/V/My Two Words.mp4');
   });
+
+  it('P2 fix · the baked playlist-title layer previews as a directory — one chain with the argv (D-270)', () => {
+    // resolveOutputPath renders exactly what the batch record carries: the
+    // literal `<title>/` layer passes through untouched. The argv template is
+    // `%(playlist|.)s/My_Playlist/%(title)s.%(ext)s` (sanitizeToken folded the
+    // space to `_`); the `.` no-op collapses and the layer stays a REAL
+    // directory — the preview must show the same shape yt-dlp renders.
+    const layered = resolveOutputPath(
+      paths({ subdirByPlaylist: true, outputTemplate: 'My Playlist/%(title)s.%(ext)s' }),
+      vars({ playlist: '' }),
+    );
+    expect(layered.dir).toBe('C:/V');
+    expect(layered.preview.replace(/\\/g, '/')).toBe('C:/V/My_Playlist/My Video.mp4');
+
+    // Both categorized switches: the extractor token layer renders first, the
+    // `.` playlist no-op is dropped, then the literal layer.
+    const both = resolveOutputPath(
+      paths({
+        subdirByExtractor: true, subdirByPlaylist: true,
+        outputTemplate: 'My Playlist/%(title)s.%(ext)s',
+      }),
+      vars({ playlist: '' }),
+    );
+    expect(both.preview.replace(/\\/g, '/')).toBe('C:/V/YouTube/My_Playlist/My Video.mp4');
+  });
+
+  it('P2 fix · a separator inside a rendered FIELD value stays inside its segment (engine parity)', () => {
+    // yt-dlp sanitizes each field value individually: a `/` inside the title
+    // becomes `_`, never a phantom directory. Segmenting the TEMPLATE (not the
+    // rendered string) keeps that parity — and keeps flat templates
+    // byte-identical to the previous whole-string behaviour.
+    const dirty = resolveOutputPath(paths(), vars({ title: 'a/b' }));
+    expect(dirty.preview.replace(/\\/g, '/')).toBe('C:/V/a_b.mp4');
+    // A layered template with a dirty field: the layer stays a directory, the
+    // field separator is rewritten inside its own segment.
+    const layeredDirty = resolveOutputPath(
+      paths({ outputTemplate: 'My_List/%(title)s.%(ext)s' }),
+      vars({ title: 'x/y' }),
+    );
+    expect(layeredDirty.preview.replace(/\\/g, '/')).toBe('C:/V/My_List/x_y.mp4');
+  });
 });
 
 describe('B2 · three-dir / private-dir config persistence (A-4.4-01 / 02)', () => {

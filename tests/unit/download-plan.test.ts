@@ -413,6 +413,63 @@ describe('B1 · network / advanced / path derivation', () => {
     expect(plan.outputDir).toBe('C:/V');
   });
 
+  it('P2 fix · the batch-baked playlist-title layer rides the -o template, behind the categorized prefix', () => {
+    // The request shape `buildPlaylistBatchRecordsByUrl` produces with
+    // `subdirByPlaylist` on: the playlist title baked as a LITERAL layer into
+    // paths.outputTemplate (entry-url records run `--no-playlist`, so the
+    // `%(playlist|.)s` field layer alone would collapse — the literal layer is
+    // what actually groups the batch output).
+    const baked = req({
+      paths: paths({ subdirByPlaylist: true, outputTemplate: 'My Playlist/%(title)s.%(ext)s' }),
+    });
+    const plan = resolveDownloadPlan(baked);
+    // The title's space becomes `_` (argv-safety sanitizeToken over the whole
+    // template); the `%(playlist|.)s` field layer stays in front and collapses
+    // to `.` inside yt-dlp for a single video (normpath eats it, D-290).
+    expect(plan.outputTemplate).toBe('%(playlist|.)s/My_Playlist/%(title)s.%(ext)s');
+    expect(plan.outputDir).toBe('C:/V');
+
+    // Both categorized switches: extractor token layer, playlist token layer,
+    // THEN the literal title layer.
+    const both = resolveDownloadPlan(req({
+      paths: paths({
+        subdirByExtractor: true, subdirByPlaylist: true,
+        outputTemplate: 'My Playlist/%(title)s.%(ext)s',
+      }),
+    }));
+    expect(both.outputTemplate)
+      .toBe('%(extractor_key)s/%(playlist|.)s/My_Playlist/%(title)s.%(ext)s');
+  });
+
+  it('P2 fix · the baked layer never breaks the chapter: first-token rule (手册坑 46 / D-275)', () => {
+    // splitChapters on: chapter: selector first, then the categorized prefix,
+    // then the literal layer — the layer is always AFTER the chapter segment.
+    const plan = resolveDownloadPlan(req({
+      paths: paths({
+        subdirByExtractor: true, subdirByPlaylist: true,
+        outputTemplate: 'My Playlist/%(title)s.%(ext)s',
+      }),
+      advanced: advanced({ splitChapters: true }),
+    }));
+    expect(plan.outputTemplate)
+      .toBe('chapter:%(extractor_key)s/%(playlist|.)s/My_Playlist/%(title)s.%(ext)s');
+    expect(plan.outputTemplate.startsWith('chapter:')).toBe(true);
+
+    // A user template that itself opens with the chapter: selector keeps it
+    // ahead of the layer: the record template below is exactly what
+    // bakePlaylistTitleLayer('chapter:%(title)s.%(ext)s', 'My Playlist/')
+    // produces (selector first, then the layer), and the plan must not move
+    // the selector away from the front of the user's own template.
+    const userSelector = resolveDownloadPlan(req({
+      paths: paths({
+        subdirByPlaylist: true,
+        outputTemplate: 'chapter:My Playlist/%(title)s.%(ext)s',
+      }),
+    }));
+    expect(userSelector.outputTemplate)
+      .toBe('%(playlist|.)s/chapter:My_Playlist/%(title)s.%(ext)s');
+  });
+
   it('D-229: private mode keeps the root the intake resolved (no %VAR% in -P)', () => {
     // The private directory is expanded and written into request.paths at
     // intake (`m4-host.ts::readDefaults`); the pure planner must not swap in a

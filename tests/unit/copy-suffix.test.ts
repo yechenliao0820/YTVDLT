@@ -68,4 +68,17 @@ describe('copy suffix · applyCopySuffix', () => {
   it('refuses templates with no extension placeholder', () => {
     expect(applyCopySuffix('%(title)s', '_(1)')).toBeNull();
   });
+
+  it('P2 fix · the baked playlist-title layer survives the numbered-copy insertion', () => {
+    // buildPlaylistBatchRecordsByUrl bakes `My_List/` in front of the user
+    // template when subdirByPlaylist is on. The suffix anchors on the LAST
+    // `%(ext)s` (the layer carries none), so the directory layer is untouched
+    // and the ` (n)` still lands before the extension — and since the baked
+    // template contains a `/`, the D-273 tree-scan trigger (template has a
+    // separator OR a categorized switch is on) keeps firing for it.
+    const layered = 'My_List/%(title).200B [%(id)s].%(ext)s';
+    expect(applyCopySuffix(layered, '_(1)'))
+      .toBe('My_List/%(title).200B [%(id)s]_(1).%(ext)s');
+    expect(applyCopySuffix(layered, '')).toBe(layered);
+  });
 });

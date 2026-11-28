@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildPlaylistBatchRecords, buildPlaylistBatchRecordsByUrl,
+  bakePlaylistTitleLayer, playlistTitleTemplateLayer, PLAYLIST_TITLE_LAYER_MAX,
   sanitizePlaylistItems, TaskQueue, HistoryStore,
 } from '@ytvdlt/core';
 import { buildDownload } from '@ytvdlt/engine-ytdlp';
@@ -272,5 +273,135 @@ describe('D-69 · production batches use entry URLs, not playlist positions', ()
     });
     expect(plan.records[0]?.url).toBe(PLAYLIST.webpage_url);
     expect(plan.records[0]?.request?.advanced.playlistItems).toBe('2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2 fix · the playlist-title directory layer (`title-layer.ts`).
+//
+// An entry-URL batch record downloads with `--no-playlist`, so the plan's
+// `%(playlist|.)s` layer collapses to the relative no-op `.` inside yt-dlp
+// (D-290) and "按播放列表分类" never grouped the production path. The batch
+// knows `playlist.title` at record time, so the title is baked into the
+// record's `paths.outputTemplate` as a LITERAL directory layer.
+// ---------------------------------------------------------------------------
+describe('P2 fix · playlistTitleTemplateLayer (pure rules)', () => {
+  it('returns no layer when the switch is off or the title is unusable', () => {
+    expect(playlistTitleTemplateLayer('My List', false)).toBe('');
+    expect(playlistTitleTemplateLayer('My List', undefined as unknown as boolean)).toBe('');
+    expect(playlistTitleTemplateLayer('', true)).toBe('');
+    expect(playlistTitleTemplateLayer('   ', true)).toBe('');
+    expect(playlistTitleTemplateLayer(null as unknown as string, true)).toBe('');
+  });
+
+  it('keeps the readable title (readability over aggressive cleaning) and appends the separator', () => {
+    expect(playlistTitleTemplateLayer('My List', true)).toBe('My List/');
+    expect(playlistTitleTemplateLayer('中文播放列表 2024', true)).toBe('中文播放列表 2024/');
+    // D-270: spaces STAY in the baked template — the plan's argv-safety
+    // `sanitizeToken` rewrites them to `_` on BOTH chains (argv + preview),
+    // so the on-disk `My_List` is exactly what the preview showed.
+  });
+
+  it('never carries a separator, a dot-run, or a reserved device name', () => {
+    expect(playlistTitleTemplateLayer('a/b\\c', true)).toBe('a_b_c/');
+    expect(playlistTitleTemplateLayer('a<b>c:d"e|f?g*h', true)).toBe('a_b_c_d_e_f_g_h/');
+    // sanitizeFileName's never-empty fallback maps dot-runs to `_` (a usable,
+    // honest directory) instead of a phantom empty layer.
+    expect(playlistTitleTemplateLayer('..', true)).toBe('_/');
+    expect(playlistTitleTemplateLayer('...', true)).toBe('_/');
+    expect(playlistTitleTemplateLayer('CON', true)).toBe('_CON/');
+    expect(playlistTitleTemplateLayer('name.', true)).toBe('name/');
+  });
+
+  it(`caps the layer at PLAYLIST_TITLE_LAYER_MAX (${PLAYLIST_TITLE_LAYER_MAX}) to defend the Windows 260 budget`, () => {
+    const layer = playlistTitleTemplateLayer('X'.repeat(200), true);
+    expect(layer).toBe(`${'X'.repeat(PLAYLIST_TITLE_LAYER_MAX)}/`);
+    expect(layer.length).toBe(PLAYLIST_TITLE_LAYER_MAX + 1);
+    // A cut inside a dots run must re-strip the re-exposed trailing dots —
+    // otherwise Windows would refuse the trailing-dot directory.
+    const dotted = `${'A'.repeat(PLAYLIST_TITLE_LAYER_MAX - 1)}.${'B'.repeat(10)}`;
+    expect(playlistTitleTemplateLayer(dotted, true))
+      .toBe(`${'A'.repeat(PLAYLIST_TITLE_LAYER_MAX - 1)}/`);
+  });
+
+  it('bakePlaylistTitleLayer: plain prefix; behind a leading chapter: selector (手册坑 46)', () => {
+    expect(bakePlaylistTitleLayer('%(title)s.%(ext)s', 'My_List/'))
+      .toBe('My_List/%(title)s.%(ext)s');
+    // The user's own chapter: SELECTOR keeps selecting everything after it —
+    // the layer must never land in front of a `chapter:` token.
+    expect(bakePlaylistTitleLayer('chapter:%(title)s.%(ext)s', 'My_List/'))
+      .toBe('chapter:My_List/%(title)s.%(ext)s');
+    // No layer -> byte-identical no-op.
+    expect(bakePlaylistTitleLayer('%(title)s.%(ext)s', '')).toBe('%(title)s.%(ext)s');
+  });
+});
+
+describe('P2 fix · buildPlaylistBatchRecordsByUrl bakes the layer (entry-url records only)', () => {
+  it('switch on + entry url -> the literal layer rides the record template and the final -o', () => {
+    const plan = buildPlaylistBatchRecordsByUrl({
+      playlist: PLAYLIST,
+      selectedIds: ['a1', 'a2'],
+      baseRequest: baseRequest(),
+      kind: 'video',
+      createdAt: '2026-11-28T00:00:00.000Z',
+    });
+    expect(plan.records.every((r) => r.request?.advanced.playlistItems === null)).toBe(true);
+    for (const record of plan.records) {
+      expect(record.request?.paths.outputTemplate)
+        .toBe('Recorded Flat Playlist/%(title)s.%(ext)s');
+    }
+    // End to end through the REAL argv builder: the plan wraps the layer
+    // (after the categorized prefix) and sanitizes the title's space to `_`.
+    const argv = buildDownload(plan.records[0]!.request!, {
+      jsRuntimePath: 'C:/runtime/node.exe',
+      ffmpegDir: 'C:/runtime/ffmpeg',
+      artifactManifestPath: 'C:/T/ytvdlt-artifacts-a1.txt',
+    });
+    expect(argv[argv.indexOf('-o') + 1])
+      .toBe('%(playlist|.)s/Recorded_Flat_Playlist/%(title)s.%(ext)s');
+    // Everything else on the record stays byte-identical (url, domains).
+    expect(plan.records[0]?.request?.url).toBe('https://example.org/watch?v=a1');
+    expect(plan.records[0]?.request?.paths.subdirByPlaylist).toBe(true);
+  });
+
+  it('switch off -> template untouched', () => {
+    const off = baseRequest();
+    const plan = buildPlaylistBatchRecordsByUrl({
+      playlist: PLAYLIST,
+      selectedIds: ['a1'],
+      baseRequest: { ...off, paths: { ...off.paths, subdirByPlaylist: false } },
+      kind: 'video',
+      createdAt: '2026-11-28T00:00:00.000Z',
+    });
+    expect(plan.records[0]?.request?.paths.outputTemplate).toBe('%(title)s.%(ext)s');
+  });
+
+  it('fallback records (no entry url) are NEVER baked — the engine fills %(playlist)s there', () => {
+    const noUrls: PlaylistInfo = {
+      ...PLAYLIST,
+      entries: PLAYLIST.entries.map((entry) => ({ ...entry, url: '' })),
+    };
+    const plan = buildPlaylistBatchRecordsByUrl({
+      playlist: noUrls,
+      selectedIds: ['a2'],
+      baseRequest: baseRequest(),
+      kind: 'video',
+      createdAt: '2026-11-28T00:00:00.000Z',
+    });
+    expect(plan.records[0]?.request?.advanced.playlistItems).toBe('2');
+    // Baking here would create the playlist directory TWICE (literal layer +
+    // the engine-resolved %(playlist)s field).
+    expect(plan.records[0]?.request?.paths.outputTemplate).toBe('%(title)s.%(ext)s');
+  });
+
+  it('a title that sanitizes to nothing usable bakes nothing even with the switch on', () => {
+    const plan = buildPlaylistBatchRecordsByUrl({
+      playlist: { ...PLAYLIST, title: '   ' },
+      selectedIds: ['a1'],
+      baseRequest: baseRequest(),
+      kind: 'video',
+      createdAt: '2026-11-28T00:00:00.000Z',
+    });
+    expect(plan.records[0]?.request?.paths.outputTemplate).toBe('%(title)s.%(ext)s');
   });
 });

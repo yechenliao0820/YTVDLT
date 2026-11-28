@@ -12,6 +12,7 @@
 import type {
   DownloadKind, DownloadRequest, PlaylistEntry, PlaylistInfo, TaskRecord,
 } from '@ytvdlt/shared';
+import { bakePlaylistTitleLayer, playlistTitleTemplateLayer } from './title-layer.js';
 
 export interface PlaylistBatchInput {
   readonly playlist: PlaylistInfo;
@@ -110,9 +111,27 @@ export function buildPlaylistBatchRecords(input: PlaylistBatchInput): PlaylistBa
  *
  * If an extractor provides no entry URL, the old position-based behaviour is
  * kept as a fallback (never a silent drop).
+ *
+ * Playlist-classified output (P2 fix): an entry-URL record downloads with
+ * `--no-playlist`, so the plan's `%(playlist|.)s` layer collapses to the
+ * relative no-op `.` inside yt-dlp (D-290) and the media would land directly
+ * in `outDir` even with `paths.subdirByPlaylist` on. The batch knows
+ * `playlist.title` HERE, so when the switch is on and the record carries its
+ * own entry URL, the title is baked into the record's `paths.outputTemplate`
+ * as a literal directory layer (`title-layer.ts`) — the argv then groups by
+ * playlist without any engine-side playlist context. The no-entry-URL fallback
+ * keeps `--yes-playlist --playlist-items`, i.e. REAL playlist context, so its
+ * `%(playlist)s` field resolves on its own and baking it would create the
+ * directory twice — fallback records are never baked.
  */
 export function buildPlaylistBatchRecordsByUrl(input: PlaylistBatchInput): PlaylistBatchPlan {
   const { playlist, selectedIds, baseRequest, kind, createdAt } = input;
+  // Computed once: `''` unless the switch is on AND the title yields a usable
+  // literal directory layer (see `playlistTitleTemplateLayer` for the rules).
+  const titleLayer = playlistTitleTemplateLayer(
+    playlist.title,
+    baseRequest.paths.subdirByPlaylist === true,
+  );
   const byId = new Map<string, { entry: PlaylistEntry; position: number }>();
   playlist.entries.forEach((entry, index) => {
     if (!byId.has(entry.id)) byId.set(entry.id, { entry, position: index + 1 });
@@ -140,10 +159,20 @@ export function buildPlaylistBatchRecordsByUrl(input: PlaylistBatchInput): Playl
     const entryUrl = typeof found.entry.url === 'string' ? found.entry.url.trim() : '';
     const hasEntryUrl = entryUrl !== '';
     const url = hasEntryUrl ? entryUrl : playlist.webpage_url;
+    // Bake the literal playlist-title layer ONLY into entry-URL records: they
+    // run `--no-playlist` and need the literal text for grouping. Fallback
+    // records (`--yes-playlist --playlist-items`) get the real `%(playlist)s`
+    // field from the engine — a baked layer would duplicate the directory.
+    // `bakePlaylistTitleLayer` also keeps a user-template-leading `chapter:`
+    // selector ahead of the layer (手册坑 46 / D-275 first-token rule).
+    const outputTemplate = hasEntryUrl
+      ? bakePlaylistTitleLayer(baseRequest.paths.outputTemplate, titleLayer)
+      : baseRequest.paths.outputTemplate;
     const request: DownloadRequest = {
       ...baseRequest,
       taskId,
       url,
+      paths: { ...baseRequest.paths, outputTemplate },
       advanced: {
         ...baseRequest.advanced,
         playlistItems: hasEntryUrl ? null : String(found.position),
