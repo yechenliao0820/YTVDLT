@@ -1279,6 +1279,76 @@ describe('D-232 · 无痕清理的作用域', () => {
 });
 
 /**
+ * D-292 · 私有关窗也必须回收任务临时目录。
+ *
+ * 私有记录最主要的删除路径是关窗/退出（`purgePrivateRecords`），但 D-291 只把
+ * `discardTaskTempDir` 接到了手动删除（TASK_ACTION）。被取消/失败的私有任务在
+ * 关窗后记录消失，`<private>/work/<taskId>/` 里带标题的 `.part` 永久残留——
+ * 启动清扫只删空目录，这正是私有模式要避免的痕迹。`onRemoved` 回调让宿主层在
+ * 记录被真正移除的当下拿到完整 record，走同一守卫路径回收其临时目录。
+ */
+describe('D-292 · purgePrivateRecords 的 onRemoved 回调', () => {
+  const privWithTemp = (id: string, overrides: Partial<TaskRecord> = {}): TaskRecord => {
+    const base = record(id, true);
+    return {
+      ...base,
+      ...overrides,
+      request: { ...base.request!, paths: { ...base.request!.paths, tempDir: `C:/data/work/${id}` } },
+    };
+  };
+
+  it('fires for every actually-removed record, with the full record attached', async () => {
+    const rows = [
+      privWithTemp('priv-a'),
+      { ...privWithTemp('priv-run'), state: 'Running' as const },
+      privWithTemp('priv-b', { state: 'Error' }),
+      record('normal', false),
+    ];
+    const removed: string[] = [];
+    const seen: string[] = [];
+    const report = await purgePrivateRecords(
+      { list: () => rows, remove: async (taskId) => { removed.push(taskId); return true; } },
+      undefined,
+      (rec) => { seen.push(`${rec.id}:${String(rec.request?.paths?.tempDir)}`); },
+    );
+    expect(report.removed).toEqual(['priv-a', 'priv-b']);
+    expect(removed).toEqual(['priv-a', 'priv-b']);
+    expect(seen).toEqual(['priv-a:C:/data/work/priv-a', 'priv-b:C:/data/work/priv-b']);
+  });
+
+  it('does not fire for kept-running rows, normal rows, or refused removals', async () => {
+    const rows = [
+      { ...privWithTemp('priv-run'), state: 'Running' as const },
+      { ...privWithTemp('priv-info'), state: 'FetchingInfo' as const },
+      record('normal', false),
+      privWithTemp('priv-refused'),
+    ];
+    const seen: string[] = [];
+    const report = await purgePrivateRecords(
+      { list: () => rows, remove: async (taskId) => taskId !== 'priv-refused' },
+      undefined,
+      (rec) => { seen.push(rec.id); },
+    );
+    expect(report.removed).toEqual([]);
+    expect(report.keptRunning).toEqual(['priv-run', 'priv-info']);
+    expect(seen).toEqual([]);
+  });
+
+  it('a callback rejection propagates and aborts the purge (production wiring catches it)', async () => {
+    const rows = [privWithTemp('priv-a'), privWithTemp('priv-b')];
+    const removed: string[] = [];
+    await expect(
+      purgePrivateRecords(
+        { list: () => rows, remove: async (taskId) => { removed.push(taskId); return true; } },
+        undefined,
+        async () => { throw new Error('temp io blew up'); },
+      ),
+    ).rejects.toThrow('temp io blew up');
+    expect(removed).toEqual(['priv-a']);
+  });
+});
+
+/**
  * D-252 · 无痕关窗的封面独占判定（`coverNamesOwnedOnlyBy`）。
  *
  * 关窗清理的隐私承诺必须落到缓存层：只有「index 里记录的全部引用 id 都属于

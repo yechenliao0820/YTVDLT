@@ -34,7 +34,7 @@ import { createPathPicker } from './adapters/path-picker.js';
 import { createLocalFileStatusPort, createTrashFilesPort } from './adapters/local-file-status-port.js';
 import { createTempDirIo } from './adapters/temp-dir-io.js';
 import { realInstallerWaiter } from './installer-waiter.js';
-import { sweepEmptyTempDirs, tempDirOf } from './task-temp-cleanup.js';
+import { discardTaskTempDir, sweepEmptyTempDirs, tempDirOf } from './task-temp-cleanup.js';
 import { createWinStartup } from './adapters/win-startup.js';
 import { resolveFixtureDir, resolveRuntimeDir } from './runtime-paths.js';
 import {
@@ -218,6 +218,7 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
     const host = hostRef;
     if (host === null) return;
     try {
+      const tempDirIo = createTempDirIo();
       const report = await purgePrivateRecords(
         {
           list: () => host.m4.task.queue.list(),
@@ -227,6 +228,15 @@ export async function startApplication(options: StartOptions): Promise<Bootstrap
         // right below (D-252) — exclusivity-proven covers go to the recycle
         // bin, everything else waits for a prune pass as before.
         (taskId) => thumbnailsRef?.forget(taskId),
+        // D-292: the record is gone, so its per-task temp dir can never be
+        // resumed — without this hook a cancelled private download left a
+        // title-bearing `.part` under `<private>/work/<taskId>/` forever (the
+        // boot sweep only removes EMPTY managed dirs). Same guarded path the
+        // manual-delete wiring uses; best effort, a temp-dir hiccup must never
+        // stop the remaining rows from being purged.
+        (record) => {
+          void discardTaskTempDir(tempDirIo, tempDirOf(record), record.id).catch(() => undefined);
+        },
       );
       if (report.removed.length > 0) await thumbnailsRef?.purgeCovers(report.removed);
     } catch {
